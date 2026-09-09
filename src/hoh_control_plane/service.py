@@ -680,6 +680,14 @@ class ControlPlaneService:
             raise AuthorizationError("Only execution roles have a work inbox")
         limit = min(max(limit, 1), 50)
         self._offer_seconds(offer_seconds)
+        # The dedicated scheduler proactively reclaims expired leases.  An inbox
+        # poll is also a safe recovery point: without this fallback, a stopped
+        # scheduler leaves an otherwise-live worker waiting forever behind a
+        # stale claim.  Recovery uses the internal admin identity rather than
+        # granting execution workers permission to sweep leases themselves.
+        self.sweep_expired_leases(
+            Actor("lease-recovery", Role.ADMIN, frozenset({"*"}))
+        )
         now = _now()
         with self.store.connection(immediate=True) as connection:
             presence = self._refresh_presence(connection, actor, 120, now=now)
