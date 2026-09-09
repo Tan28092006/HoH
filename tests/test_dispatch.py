@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from hoh_control_plane.domain import Actor, ConflictError, Role, TicketStatus
 from hoh_control_plane.service import ControlPlaneService
+
+
+def _expire_lease(store, lease_id: str) -> None:
+    with store.connection(immediate=True) as connection:
+        connection.execute(
+            "UPDATE leases SET expires_at = ? WHERE lease_id = ?",
+            ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(), lease_id),
+        )
 
 
 def _submit_candidate(
@@ -107,6 +117,26 @@ def test_inbox_returns_the_callers_active_lease_before_new_offers(
 
     assert inbox["active_leases"][0]["ticket"]["ticket_id"] == "DEV-142"
     assert inbox["active_leases"][0]["lease_id"] == claimed["lease"]["lease_id"]
+
+
+def test_inbox_recovers_an_expired_qa_lease_before_offering_work(
+    service: ControlPlaneService,
+    store,
+    actors: dict[str, Actor],
+    seeded: dict[str, object],
+) -> None:
+    submitted = _submit_candidate(service, actors, seeded)
+    service.register_agent(actors["qa"], skills=["hoh-qa"], capacity=1)
+    claimed = service.claim_qa(
+        actors["qa"], "DEV-142", submitted["ticket"]["version"], 900
+    )
+    _expire_lease(store, claimed["lease"]["lease_id"])
+
+    inbox = service.get_agent_inbox(actors["qa"], "project-1")
+
+    assert inbox["active_leases"] == []
+    assert inbox["offers"][0]["ticket"]["ticket_id"] == "DEV-142"
+    assert inbox["offers"][0]["ticket"]["status"] == TicketStatus.QA_READY.value
 
 
 def test_failed_qa_requeues_ticket_for_an_available_developer(
