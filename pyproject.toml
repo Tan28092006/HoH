@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hoh-control-plane"
+version = "0.1.0"
+description = "Shared MCP control plane for role-separated AI software teams"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.141,<1",
+  "mcp>=1.30,<2",
+  "pydantic>=2.13,<3",
+  "uvicorn[standard]>=0.52,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28,<1",
+  "pytest>=8.4,<9",
+  "pytest-cov>=6.3,<7",
+]
+
+[project.scripts]
+hoh-api = "hoh_control_plane.__main__:main"
+hoh-mcp = "hoh_control_plane.mcp_server:main"
+hoh-scheduler = "hoh_control_plane.scheduler:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hoh_control_plane"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+  "--strict-markers",
+  "--cov=hoh_control_plane",
+  "--cov-report=term-missing",
+  "--cov-fail-under=80",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["hoh_control_plane"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

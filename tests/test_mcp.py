@@ -1,0 +1,304 @@
+from __future__ import annotations
+
+import pytest
+
+from hoh_control_plane.domain import Actor, Role
+from hoh_control_plane.mcp_server import create_mcp_server
+from hoh_control_plane.service import ControlPlaneService
+from hoh_control_plane.store import SQLiteStore
+
+
+@pytest.mark.anyio
+async def test_mcp_exposes_only_role_appropriate_tools(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "mcp.db")
+    store.initialize()
+    service = ControlPlaneService(store)
+    planner = Actor("planner-01", Role.PLANNER, frozenset({"project-1"}))
+    service.create_project(planner, "project-1", "Project", "Description", "main")
+    service.create_feature(planner, "project-1", "feature-1", "Feature", "Objective")
+    service.create_ticket(
+        planner,
+        "feature-1",
+        "DEV-1",
+        "Build feature",
+        "Observable result",
+        Role.DEVELOPER,
+        ["Behavior is visible"],
+        [],
+        ["src/**"],
+        True,
+    )
+    developer = Actor("dev-01", Role.DEVELOPER, frozenset({"project-1"}))
+    qa = Actor("qa-01", Role.QA, frozenset({"project-1"}))
+    planner_server = create_mcp_server(service, planner)
+    developer_server = create_mcp_server(service, developer)
+    qa_server = create_mcp_server(service, qa)
+
+    tools = await developer_server.list_tools()
+    names = {tool.name for tool in tools}
+    qa_names = {tool.name for tool in await qa_server.list_tools()}
+    planner_names = {tool.name for tool in await planner_server.list_tools()}
+    identity_content, identity = await developer_server.call_tool(
+        "identity.get_capabilities", {}
+    )
+    content, structured = await developer_server.call_tool(
+        "work.discover", {"project_id": "project-1", "dependency_ready": True}
+    )
+    feature_content, feature_context = await developer_server.call_tool(
+        "feature.get_context", {"feature_ref": "feature:feature-1"}
+    )
+    ticket_content, ticket_context = await developer_server.call_tool(
+        "ticket.get_context", {"ticket_ref": "ticket:DEV-1"}
+    )
+
+    assert {
+        "identity.get_capabilities",
+        "work.discover",
+        "feature.get_context",
+        "ticket.get_context",
+        "work.claim",
+        "work.heartbeat",
+        "dev.prepare_worktree",
+        "dev.append_progress",
+        "dev.submit_candidate",
+    }.issubset(names)
+    assert "planner.create_ticket" not in names
+    assert "qa.submit_verdict" not in names
+    assert {"qa.claim_candidate", "qa.record_test_run", "qa.submit_verdict"}.issubset(
+        qa_names
+    )
+    assert "qa.run_project_tests" in qa_names
+    assert "dev.submit_candidate" not in qa_names
+    assert "planner.configure_repository" in planner_names
+    assert "planner.configure_test_command" in planner_names
+    assert content[0].text
+    assert structured["project"]["project_id"] == "project-1"
+    assert identity_content[0].text
+    assert identity["role"] == "developer"
+    assert feature_content[0].text and feature_context["open_ticket_count"] == 1
+    assert ticket_content[0].text and ticket_context["ticket"]["ticket_id"] == "DEV-1"
+
+
+@pytest.mark.anyio
+async def test_planner_mcp_creates_ready_ticket_and_records_safe_tool_activity(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "mcp.db")
+    store.initialize()
+    service = ControlPlaneService(store)
+    planner = Actor("planner-01", Role.PLANNER, frozenset({"project-1"}))
+    server = create_mcp_server(service, planner)
+
+    names = {tool.name for tool in await server.list_tools()}
+    assert {
+        "planner.create_project",
+        "planner.create_feature",
+        "planner.create_ticket",
+        "planner.set_ticket_ready",
+        "planner.append_context",
+    }.issubset(names)
+    assert "dev.append_progress" not in names
+
+    _, project = await server.call_tool(
+        "planner.create_project",
+        {
+            "project_id": "project-1",
+            "name": "Project",
+            "description": "A project planned through MCP",
+            "default_branch": "main",
+        },
+    )
+    _, feature = await server.call_tool(
+        "planner.create_feature",
+        {
+            "project_id": "project-1",
+            "feature_id": "feature-1",
+            "title": "Feature",
+            "objective": "Deliver an observable feature",
+        },
+    )
+    _, ticket = await server.call_tool(
+        "planner.create_ticket",
+        {
+            "feature_id": "feature-1",
+            "ticket_id": "DEV-100",
+            "title": "Implement the feature",
+            "objective": "Users can observe the feature",
+            "required_role": "developer",
+            "acceptance_criteria": ["The behavior is demonstrable"],
+            "preservation_constraints": ["Existing flows continue to work"],
+            "file_scope": ["src/**"],
+        },
+    )
+    _, ready = await server.call_tool(
+        "planner.set_ticket_ready",
+        {"ticket_id": "DEV-100", "expected_version": ticket["version"]},
+    )
+    await server.call_tool(
+        "planner.append_context",
+        {
+            "ticket_id": "DEV-100",
+            "entry_type": "planning_decision",
+            "content": "Split code and QA work by observable behavior.",
+        },
+    )
+
+    activity = service.list_agent_activity(planner, "project-1")
+    assert project["project_id"] == "project-1"
+    assert feature["feature_id"] == "feature-1"
+    assert ready["ticket"]["status"] == "READY"
+    assert [item["tool_name"] for item in activity["calls"]] == [
+        "planner.create_project",
+        "planner.create_feature",
+        "planner.create_ticket",
+        "planner.set_ticket_ready",
+        "planner.append_context",
+    ]
+    assert activity["calls"][-1]["input_summary"] == {
+        "argument_keys": ["content", "entry_type", "ticket_id"],
+        "target": {"ticket_id": "DEV-100"},
+    }
+
+
+@pytest.mark.anyio
+async def test_execution_mcp_registers_and_polls_its_durable_inbox(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "mcp-dispatch.db")
+    store.initialize()
+    service = ControlPlaneService(store)
+    planner = Actor("planner-01", Role.PLANNER, frozenset({"project-1"}))
+    developer = Actor("dev-01", Role.DEVELOPER, frozenset({"project-1"}))
+    service.create_project(planner, "project-1", "Project", "Description", "main")
+    service.create_feature(planner, "project-1", "feature-1", "Feature", "Objective")
+    service.create_ticket(
+        planner, "feature-1", "DEV-QUEUE", "Queued work", "Do one bounded thing",
+        Role.DEVELOPER, ["The bounded thing is observable"], [], ["src/**"], ready=True,
+    )
+    server = create_mcp_server(service, developer)
+
+    names = {tool.name for tool in await server.list_tools()}
+    _, presence = await server.call_tool(
+        "agent.register", {"skills": ["hoh-developer"], "machine_id": "dev-machine"}
+    )
+    _, inbox = await server.call_tool("work.inbox", {"project_id": "project-1"})
+
+    assert {"agent.register", "agent.heartbeat", "work.inbox"}.issubset(names)
+    assert presence["agent_id"] == "dev-01"
+    assert inbox["offers"][0]["ticket"]["ticket_id"] == "DEV-QUEUE"
+    activity = service.list_agent_activity(developer, "project-1")["calls"]
+    assert activity[-1]["tool_name"] == "work.inbox"
+    assert "skills" not in activity[-2]["input_summary"].get("target", {})
+
+
+@pytest.mark.anyio
+async def test_developer_can_report_a_blocker_and_planner_can_requeue_it(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "mcp.db")
+    store.initialize()
+    service = ControlPlaneService(store)
+    planner = Actor("planner-01", Role.PLANNER, frozenset({"project-1"}))
+    developer = Actor("dev-01", Role.DEVELOPER, frozenset({"project-1"}))
+    service.create_project(planner, "project-1", "Project", "Description", "main")
+    service.create_feature(planner, "project-1", "feature-1", "Feature", "Objective")
+    ticket = service.create_ticket(
+        planner, "feature-1", "DEV-101", "Blocked work", "Need a contract",
+        Role.DEVELOPER, ["Contract is known"], [], ["src/**"], ready=True,
+    )
+    developer_server = create_mcp_server(service, developer)
+    planner_server = create_mcp_server(service, planner)
+
+    _, claim = await developer_server.call_tool(
+        "work.claim", {"ticket_id": "DEV-101", "expected_version": ticket["version"]}
+    )
+    _, blocked = await developer_server.call_tool(
+        "dev.report_blocker",
+        {
+            "ticket_id": "DEV-101",
+            "lease_id": claim["lease"]["lease_id"],
+            "expected_version": claim["ticket"]["version"],
+            "reason": "The upstream API contract is undecided.",
+        },
+    )
+    _, requeued = await planner_server.call_tool(
+        "planner.set_ticket_ready",
+        {"ticket_id": "DEV-101", "expected_version": blocked["ticket"]["version"]},
+    )
+
+    assert blocked["ticket"]["status"] == "BLOCKED"
+    assert requeued["ticket"]["status"] == "READY"
+    calls = service.list_agent_activity(planner, "project-1")["calls"]
+    assert [call["tool_name"] for call in calls] == [
+        "work.claim", "dev.report_blocker", "planner.set_ticket_ready"
+    ]
+
+
+@pytest.mark.anyio
+async def test_developer_and_qa_mcp_flow_records_test_run_and_verdict(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "mcp.db")
+    store.initialize()
+    service = ControlPlaneService(store)
+    planner = Actor("planner-01", Role.PLANNER, frozenset({"project-1"}))
+    developer = Actor("dev-01", Role.DEVELOPER, frozenset({"project-1"}))
+    qa = Actor("qa-01", Role.QA, frozenset({"project-1"}))
+    service.create_project(planner, "project-1", "Project", "Description", "main")
+    service.create_feature(planner, "project-1", "feature-1", "Feature", "Objective")
+    ticket = service.create_ticket(
+        planner, "feature-1", "DEV-102", "Implement behavior", "Behavior works",
+        Role.DEVELOPER, ["The behavior is demonstrable"], [], ["src/**"], ready=True,
+    )
+    developer_server = create_mcp_server(service, developer)
+    qa_server = create_mcp_server(service, qa)
+
+    _, claim = await developer_server.call_tool(
+        "work.claim", {"ticket_id": "DEV-102", "expected_version": ticket["version"]}
+    )
+    await developer_server.call_tool(
+        "dev.append_progress",
+        {"ticket_id": "DEV-102", "lease_id": claim["lease"]["lease_id"], "message": "Implementation complete."},
+    )
+    _, candidate = await developer_server.call_tool(
+        "dev.submit_candidate",
+        {
+            "ticket_id": "DEV-102",
+            "lease_id": claim["lease"]["lease_id"],
+            "expected_version": claim["ticket"]["version"],
+            "commit_sha": "a" * 40,
+            "base_commit": "b" * 40,
+            "branch_ref": "agent/dev-01/DEV-102",
+            "developer_claims": ["Behavior is ready for independent QA."],
+        },
+    )
+    _, qa_claim = await qa_server.call_tool(
+        "qa.claim_candidate",
+        {"ticket_id": "DEV-102", "expected_version": candidate["ticket"]["version"]},
+    )
+    await qa_server.call_tool(
+        "qa.record_test_run",
+        {
+            "ticket_id": "DEV-102",
+            "lease_id": qa_claim["lease"]["lease_id"],
+            "summary": "The isolated regression suite passed.",
+            "evidence_refs": ["evidence://qa/DEV-102/run-1.json"],
+        },
+    )
+    _, verdict = await qa_server.call_tool(
+        "qa.submit_verdict",
+        {
+            "ticket_id": "DEV-102",
+            "lease_id": qa_claim["lease"]["lease_id"],
+            "candidate_id": candidate["candidate"]["candidate_id"],
+            "expected_version": qa_claim["ticket"]["version"],
+            "verdict": "passed",
+            "findings": [{
+                "criterion": "The behavior is demonstrable",
+                "status": "verified",
+                "severity": "none",
+                "observation": "Passed isolated regression coverage.",
+                "evidence": [{
+                    "type": "test_result",
+                    "observation": "passed",
+                    "storage_ref": "evidence://qa/DEV-102/run-1.json",
+                }],
+            }],
+        },
+    )
+
+    assert verdict["ticket"]["status"] == "VERIFIED"
+    context = service.get_ticket_context(planner, "DEV-102")
+    assert any(entry["entry_type"] == "qa_test_run" for entry in context["context_entries"])

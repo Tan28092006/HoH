@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Harness Control</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Harness Control home"><span class="brand-mark">H</span>Harness Control</a>
+    <select id="project-picker" aria-label="Project"><option value="demo">Checkout Platform</option></select>
+    <nav aria-label="Primary navigation">
+      <button class="nav-item active" data-view="board">Board</button>
+      <button class="nav-item" data-view="features">Features</button>
+      <button class="nav-item" data-view="dispatch">Dispatch</button>
+      <button class="nav-item" data-view="events">Agent activity</button>
+    </nav>
+    <span class="connection"><span></span><b id="connection-label">Connecting</b></span>
+  </header>
+
+  <main>
+    <section class="page-head">
+      <div>
+        <p class="eyebrow">READ-ONLY MULTI-AGENT ENGINEERING</p>
+        <h1>Engineering board</h1>
+        <p id="project-description">Ticket progress, evidence gates and MCP activity</p>
+      </div>
+      <div class="head-actions">
+        <button id="refresh-button" class="secondary">Refresh</button>
+      </div>
+    </section>
+
+    <div id="error-banner" class="error-banner" role="alert" hidden></div>
+
+    <section id="board-view" class="workspace" aria-label="Project board">
+      <div id="board" class="board" aria-live="polite"></div>
+      <aside id="detail" class="detail" aria-live="polite">
+        <p class="empty-detail">Select a ticket to inspect its context, lease and evidence.</p>
+      </aside>
+    </section>
+
+    <section id="features-view" class="alternate-view" hidden>
+      <h2>Feature map</h2>
+      <div id="feature-list" class="feature-list"></div>
+    </section>
+
+    <section id="dispatch-view" class="alternate-view" hidden>
+      <div class="activity-heading">
+        <div><p class="eyebrow">DURABLE HAND-OFFS</p><h2>Dispatch queue</h2></div>
+        <p>Offers expire and retry. A ticket lease, not an offer, decides which agent owns the phase.</p>
+      </div>
+      <div id="presence-list" class="agent-summary"></div>
+      <div id="dispatch-list" class="dispatch-list" aria-live="polite"></div>
+    </section>
+
+    <section id="events-view" class="alternate-view" hidden>
+      <div class="activity-heading">
+        <div><p class="eyebrow">MCP INVOCATION LOG</p><h2>Agent activity</h2></div>
+        <p>Arguments are redacted; ticket context and evidence stay in the control plane.</p>
+      </div>
+      <div id="agent-summary" class="agent-summary"></div>
+      <div id="event-list" class="event-list" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

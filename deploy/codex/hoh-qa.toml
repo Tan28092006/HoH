@@ -1,0 +1,15 @@
+# Merge this one server into the QA agent's .codex/config.toml.
+[mcp_servers.hoh-qa]
+command = "powershell.exe"
+args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "D:\\HoH\\scripts\\start-mcp.ps1"]
+cwd = "D:\\HoH"
+startup_timeout_sec = 20
+tool_timeout_sec = 60
+required = true
+default_tools_approval_mode = "writes"
+
+[mcp_servers.hoh-qa.env]
+HOH_DATABASE_PATH = "D:\\HoH\\data\\control-plane.db"
+HOH_AGENT_ID = "qa-01"
+HOH_AGENT_ROLE = "qa"
+HOH_PROJECT_IDS = "demo"

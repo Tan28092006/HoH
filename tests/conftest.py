@@ -1,0 +1,67 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from hoh_control_plane.domain import Actor, Role
+from hoh_control_plane.service import ControlPlaneService
+from hoh_control_plane.store import SQLiteStore
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> SQLiteStore:
+    database = SQLiteStore(tmp_path / "control-plane.db")
+    database.initialize()
+    return database
+
+
+@pytest.fixture
+def service(store: SQLiteStore) -> ControlPlaneService:
+    return ControlPlaneService(store)
+
+
+@pytest.fixture
+def actors() -> dict[str, Actor]:
+    return {
+        "planner": Actor("planner-01", Role.PLANNER, frozenset({"project-1"})),
+        "developer": Actor("dev-01", Role.DEVELOPER, frozenset({"project-1"})),
+        "developer_2": Actor("dev-02", Role.DEVELOPER, frozenset({"project-1"})),
+        "qa": Actor("qa-01", Role.QA, frozenset({"project-1"})),
+        "integrator": Actor("integrator-01", Role.INTEGRATOR, frozenset({"project-1"})),
+    }
+
+
+@pytest.fixture
+def seeded(service: ControlPlaneService, actors: dict[str, Actor]) -> dict[str, object]:
+    planner = actors["planner"]
+    project = service.create_project(
+        planner,
+        project_id="project-1",
+        name="Checkout Platform",
+        description="Reliable checkout",
+        default_branch="main",
+    )
+    feature = service.create_feature(
+        planner,
+        project_id=project["project_id"],
+        feature_id="payment-retry",
+        title="Payment retry",
+        objective="Let customers retry failed payments safely",
+    )
+    ticket = service.create_ticket(
+        planner,
+        feature_id=feature["feature_id"],
+        ticket_id="DEV-142",
+        title="Repair checkout retry behavior",
+        objective="Retry without creating duplicate orders",
+        required_role=Role.DEVELOPER,
+        acceptance_criteria=[
+            "A failed payment can be retried",
+            "A successful retry creates exactly one order",
+        ],
+        preservation_constraints=["Existing successful checkout remains valid"],
+        file_scope=["src/checkout/**", "tests/checkout/**"],
+        ready=True,
+    )
+    return {"project": project, "feature": feature, "ticket": ticket}
