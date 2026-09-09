@@ -717,8 +717,27 @@ class ControlPlaneService:
                 (actor.agent_id, project_id, limit),
             ).fetchall()
             offers = [self._inbox_offer(connection, _row(row)) for row in offer_rows]
+            lease_rows = connection.execute(
+                """
+                SELECT l.*
+                FROM leases l
+                JOIN tickets t ON t.ticket_id = l.ticket_id
+                JOIN features f ON f.feature_id = t.feature_id
+                WHERE l.agent_id = ? AND l.role = ? AND f.project_id = ?
+                  AND l.expires_at > ?
+                ORDER BY l.acquired_at ASC
+                """,
+                (actor.agent_id, actor.role.value, project_id, _iso(now)),
+            ).fetchall()
+            active_leases = []
+            for lease_row in lease_rows:
+                lease = _row(lease_row)
+                assert lease is not None
+                lease["ticket"] = self._ticket(connection, lease["ticket_id"])
+                active_leases.append(lease)
         return {
             "agent": presence,
+            "active_leases": active_leases,
             "offers": offers,
             "offered_now": len(created_offers),
             "next_poll_after_seconds": 20,
