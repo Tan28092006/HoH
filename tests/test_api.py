@@ -92,6 +92,8 @@ def test_ui_is_served(tmp_path: Path) -> None:
     assert 'method: "POST"' not in script.text
     assert "agent-activity" in script.text
     assert "/dispatch" in script.text
+    assert '["MERGE_READY", "Integration"]' in script.text
+    assert '"integrator.merge_candidate"' in script.text
 
 
 def test_ui_static_assets_include_a_favicon(tmp_path: Path) -> None:
