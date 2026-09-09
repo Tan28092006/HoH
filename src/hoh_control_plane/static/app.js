@@ -1,4 +1,11 @@
-const state = { projectId: "demo", board: null, activity: null, dispatch: null, selectedTicketId: null };
+const requestedProjectId = new URLSearchParams(window.location.search).get("project");
+const state = {
+  projectId: requestedProjectId || "demo",
+  board: null,
+  activity: null,
+  dispatch: null,
+  selectedTicketId: null,
+};
 
 const statusColumns = [
   ["READY", "Ready"],
