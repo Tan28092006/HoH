@@ -9,10 +9,12 @@ The implementation includes:
 - Typed feature/ticket context references.
 - Role-aware discovery.
 - Timed, single-writer leases and optimistic concurrency.
+- Claim-time dependency and conservative write-scope conflict gates.
 - Durable role hand-offs: presence, queue, fan-out offers and an outbox boundary.
 - Planner-frozen test commands run by QA against clean, candidate-bound Git worktrees.
 - Immutable Git candidate identity.
 - Evidence-bound QA verdicts and rework context.
+- Integrator-only fast-forward merge gate, with base drift returned to Developer rework.
 - Read-only Jira-style Kanban UI with ticket progress, dispatch queue and Agent activity.
 - Official MCP Python SDK server over stdio.
 - Local role skills under `skills/`.
@@ -40,6 +42,9 @@ Open <http://127.0.0.1:8765>. The local runner enables local identity headers an
 
 For automatic queue checks in a long-lived Codex or Claude Code role worker,
 see [docs/ROLE_WAKEUPS.md](./docs/ROLE_WAKEUPS.md).
+
+To use this repository as the first project managed by HoH itself, follow the
+role-by-role [dogfood runbook](./docs/DOGFOOD_HOH.md).
 
 Run the test suite:
 
@@ -91,4 +96,4 @@ Production mode is the default when `HOH_LOCAL_MODE` is unset. It ignores claime
 
 ## Current scope
 
-This MVP deliberately uses a modular monolith and SQLite so the core workflow is easy to inspect and test. It has a durable outbox but no adapter that can wake a stopped/idle Claude or Codex chat: that requires a platform-specific webhook, automation or desktop notification adapter. PostgreSQL, object storage, Jira synchronization, server-side event streaming and managed OAuth are subsequent phases. The schema and service boundaries are structured so those adapters can be added without changing the agent workflow contract.
+This MVP deliberately uses a modular monolith and SQLite so the core workflow is easy to inspect and test. Its local Integrator accepts only a fast-forward candidate whose recorded base still matches the checked-out default branch; it does not yet run post-merge mainline tests, create provider PRs, or resolve textual conflicts automatically. It has a durable outbox but no adapter that can wake a stopped/idle Claude or Codex chat: that requires a platform-specific webhook, automation or desktop notification adapter. PostgreSQL, object storage, Jira synchronization, server-side event streaming and managed OAuth are subsequent phases. The schema and service boundaries are structured so those adapters can be added without changing the agent workflow contract.

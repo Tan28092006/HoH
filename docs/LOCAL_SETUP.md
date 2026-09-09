@@ -184,8 +184,11 @@ evidence, and a reverse-proxied dashboard.
    stopped chat cannot be awakened by stdio MCP alone. Add a Codex automation,
    Claude-compatible hook, desktop notification or webhook consumer for the
    durable `dispatch_outbox` before expecting push wakeups.
-2. Merge/integration gate: verify test evidence and Git state again before a
-   protected branch is merged.
+2. Integration hardening: the current local Integrator only fast-forwards a
+   QA-verified candidate when its base SHA still matches the checked-out
+   default branch. Add post-merge mainline tests, protected-branch/PR support
+   and an explicit textual-conflict workflow before relying on it for shared
+   production branches.
 3. PostgreSQL + authenticated remote MCP: required before agents span machines
    or user accounts.
 4. SSE event stream, backups/migrations, and optional Jira synchronization.
