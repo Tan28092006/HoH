@@ -875,6 +875,8 @@ class ControlPlaneService:
                     (ticket_id,),
                 ).fetchone()
             )
+            if candidate is not None:
+                candidate = self._candidate_with_changed_paths(connection, candidate)
             worktree = _row(
                 connection.execute(
                     "SELECT * FROM worktrees WHERE ticket_id = ?", (ticket_id,)
@@ -1402,6 +1404,7 @@ class ControlPlaneService:
                     "SELECT * FROM project_repositories WHERE project_id = ?", (project_id,)
                 ).fetchone()
             )
+            changed_paths: list[str] = []
             if repository is not None:
                 worktree = _row(
                     connection.execute(
@@ -1424,6 +1427,21 @@ class ControlPlaneService:
                     candidate_commit=commit_sha,
                     submitted_base_commit=base_commit,
                 )
+                changed_paths = self.git_worktrees.changed_paths(
+                    repository_path=repository["repository_path"],
+                    base_commit=base_commit,
+                    candidate_commit=commit_sha,
+                )
+                paths_outside_scope = [
+                    path
+                    for path in changed_paths
+                    if not self._path_is_in_any_scope(path, ticket["file_scope"])
+                ]
+                if paths_outside_scope:
+                    raise ValidationError(
+                        "Candidate changes paths outside ticket write scope: "
+                        + ", ".join(paths_outside_scope)
+                    )
                 connection.execute(
                     "UPDATE worktrees SET last_verified_at = ? WHERE ticket_id = ?",
                     (_iso(), ticket_id),
@@ -1449,6 +1467,11 @@ class ControlPlaneService:
                     timestamp,
                 ),
             )
+            for path in changed_paths:
+                connection.execute(
+                    "INSERT INTO candidate_changed_paths (candidate_id, path) VALUES (?, ?)",
+                    (candidate_id, path),
+                )
             test_profile = _row(
                 connection.execute(
                     "SELECT * FROM project_test_profiles WHERE project_id = ?", (project_id,)
@@ -1499,11 +1522,11 @@ class ControlPlaneService:
             self._queue_ticket(connection, actor, project_id, qa_ready_ticket)
             return {
                 "ticket": qa_ready_ticket,
-                "candidate": self._one(
+                "candidate": self._candidate_with_changed_paths(connection, self._one(
                     connection,
                     "SELECT * FROM candidates WHERE candidate_id = ?",
                     (candidate_id,),
-                ),
+                )),
             }
 
     def submit_qa_verdict(
@@ -1803,6 +1826,20 @@ class ControlPlaneService:
             if ticket["required_role"] != actor.role.value and actor.role is not Role.QA:
                 raise AuthorizationError("Ticket is assigned to another role")
             timestamp = _now()
+            if actor.role is Role.DEVELOPER:
+                unfinished_dependencies = self._unfinished_dependency_ids(connection, ticket_id)
+                if unfinished_dependencies:
+                    raise ConflictError(
+                        "Ticket dependencies are not complete: "
+                        + ", ".join(unfinished_dependencies)
+                    )
+                conflicting_ticket_id = self._active_write_scope_conflict(
+                    connection, project_id, ticket, timestamp
+                )
+                if conflicting_ticket_id is not None:
+                    raise ConflictError(
+                        "Ticket write scope conflicts with active ticket " + conflicting_ticket_id
+                    )
             lease_id = _id("lease")
             connection.execute(
                 """
@@ -2196,6 +2233,128 @@ class ControlPlaneService:
             ).fetchall()
         ]
         return ticket
+
+    def _candidate_with_changed_paths(
+        self, connection: sqlite3.Connection, candidate: dict[str, Any]
+    ) -> dict[str, Any]:
+        candidate["changed_paths"] = [
+            row["path"]
+            for row in connection.execute(
+                "SELECT path FROM candidate_changed_paths WHERE candidate_id = ? ORDER BY path",
+                (candidate["candidate_id"],),
+            ).fetchall()
+        ]
+        return candidate
+
+    @staticmethod
+    def _unfinished_dependency_ids(connection: sqlite3.Connection, ticket_id: str) -> list[str]:
+        return [
+            row["ticket_id"]
+            for row in connection.execute(
+                """
+                SELECT dependency.ticket_id
+                FROM ticket_dependencies dependency_link
+                JOIN tickets dependency ON dependency.ticket_id = dependency_link.depends_on_ticket_id
+                WHERE dependency_link.ticket_id = ? AND dependency.status != ?
+                ORDER BY dependency.ticket_id
+                """,
+                (ticket_id, TicketStatus.DONE.value),
+            ).fetchall()
+        ]
+
+    def _active_write_scope_conflict(
+        self,
+        connection: sqlite3.Connection,
+        project_id: str,
+        ticket: dict[str, Any],
+        now: datetime,
+    ) -> str | None:
+        active_tickets = connection.execute(
+            """
+            SELECT active_ticket.ticket_id, active_ticket.file_scope
+            FROM leases lease
+            JOIN tickets active_ticket ON active_ticket.ticket_id = lease.ticket_id
+            JOIN features feature ON feature.feature_id = active_ticket.feature_id
+            WHERE feature.project_id = ?
+              AND lease.role = ?
+              AND lease.expires_at > ?
+              AND active_ticket.ticket_id != ?
+            ORDER BY active_ticket.ticket_id
+            """,
+            (project_id, Role.DEVELOPER.value, _iso(now), ticket["ticket_id"]),
+        ).fetchall()
+        for active_ticket in active_tickets:
+            active_scope = json.loads(active_ticket["file_scope"])
+            if self._scopes_overlap(ticket["file_scope"], active_scope):
+                return str(active_ticket["ticket_id"])
+        return None
+
+    @staticmethod
+    def _scopes_overlap(left_scopes: list[str], right_scopes: list[str]) -> bool:
+        if not left_scopes or not right_scopes:
+            return True
+        return any(
+            ControlPlaneService._scope_roots_overlap(left_scope, right_scope)
+            for left_scope in left_scopes
+            for right_scope in right_scopes
+        )
+
+    @staticmethod
+    def _scope_roots_overlap(left_scope: str, right_scope: str) -> bool:
+        left_root = ControlPlaneService._scope_root(left_scope)
+        right_root = ControlPlaneService._scope_root(right_scope)
+        if not left_root or not right_root:
+            return True
+        return (
+            left_root == right_root
+            or left_root.startswith(f"{right_root}/")
+            or right_root.startswith(f"{left_root}/")
+        )
+
+    @staticmethod
+    def _scope_root(scope: str) -> str:
+        normalized = scope.replace("\\", "/").strip("/")
+        static_parts = []
+        for part in normalized.split("/"):
+            if any(character in part for character in "*?["):
+                break
+            if part:
+                static_parts.append(part)
+        return "/".join(static_parts)
+
+    @staticmethod
+    def _path_is_in_any_scope(path: str, scopes: list[str]) -> bool:
+        return any(ControlPlaneService._path_matches_scope(path, scope) for scope in scopes)
+
+    @staticmethod
+    def _path_matches_scope(path: str, scope: str) -> bool:
+        normalized_path = path.replace("\\", "/").lstrip("/")
+        normalized_scope = scope.replace("\\", "/").strip("/")
+        pattern = []
+        index = 0
+        while index < len(normalized_scope):
+            character = normalized_scope[index]
+            if (
+                character == "*"
+                and index + 1 < len(normalized_scope)
+                and normalized_scope[index + 1] == "*"
+            ):
+                if index + 2 < len(normalized_scope) and normalized_scope[index + 2] == "/":
+                    pattern.append("(?:.*/)?")
+                    index += 3
+                else:
+                    pattern.append(".*")
+                    index += 2
+            elif character == "*":
+                pattern.append("[^/]*")
+                index += 1
+            elif character == "?":
+                pattern.append("[^/]")
+                index += 1
+            else:
+                pattern.append(re.escape(character))
+                index += 1
+        return re.fullmatch("".join(pattern), normalized_path) is not None
 
     def _project_for_feature(self, connection: sqlite3.Connection, feature_id: str) -> str:
         row = connection.execute(

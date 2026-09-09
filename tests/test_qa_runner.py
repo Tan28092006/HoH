@@ -46,8 +46,10 @@ def _candidate_waiting_for_qa(service, actors, seeded, tmp_path: Path, test_comm
         development["ticket"]["version"],
     )
     worktree = Path(prepared["worktree"]["worktree_path"])
-    (worktree / "retry.txt").write_text("safe retry\n", encoding="utf-8")
-    _git(worktree, "add", "retry.txt")
+    retry_path = worktree / "src" / "checkout" / "retry.txt"
+    retry_path.parent.mkdir(parents=True)
+    retry_path.write_text("safe retry\n", encoding="utf-8")
+    _git(worktree, "add", "src/checkout/retry.txt")
     _git(worktree, "commit", "-m", "Implement safe retry")
     candidate = service.submit_candidate(
         actors["developer"],
@@ -71,7 +73,7 @@ def test_qa_runs_the_planner_registered_command_and_persists_evidence(
     test_command = [
         sys.executable,
         "-c",
-        "from pathlib import Path; assert Path('retry.txt').read_text() == 'safe retry\\n'; print('passed')",
+        "from pathlib import Path; assert Path('src/checkout/retry.txt').read_text() == 'safe retry\\n'; print('passed')",
     ]
     ticket, candidate, qa_claim = _candidate_waiting_for_qa(
         service, actors, seeded, tmp_path, test_command

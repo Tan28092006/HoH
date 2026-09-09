@@ -112,6 +112,14 @@ CREATE TABLE IF NOT EXISTS candidates (
     frozen_at TEXT NOT NULL
 );
 
+-- Changed paths are derived from immutable Git commits, rather than supplied
+-- by a Developer, so they can enforce the ticket's declared write scope.
+CREATE TABLE IF NOT EXISTS candidate_changed_paths (
+    candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),
+    path TEXT NOT NULL,
+    PRIMARY KEY (candidate_id, path)
+);
+
 CREATE TABLE IF NOT EXISTS candidate_test_profiles (
     candidate_id TEXT PRIMARY KEY REFERENCES candidates(candidate_id),
     test_command TEXT NOT NULL,

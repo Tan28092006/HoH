@@ -125,6 +125,23 @@ class GitWorktreeManager:
             raise ValidationError("Assigned worktree must be clean before QA runs project tests")
         return str(worktree)
 
+    def changed_paths(
+        self, *, repository_path: str, base_commit: str, candidate_commit: str
+    ) -> list[str]:
+        """Return deterministic paths changed between the immutable base and candidate."""
+        repository = Path(self.validate_repository(repository_path))
+        base = self._resolve_commit(repository, base_commit)
+        candidate = self._resolve_commit(repository, candidate_commit)
+        result = self._git(
+            repository,
+            "diff",
+            "--name-only",
+            "--no-renames",
+            base,
+            candidate,
+        )
+        return sorted({line.strip().replace("\\", "/") for line in result.stdout.splitlines() if line.strip()})
+
     def _worktree_path(self, project_id: str, ticket_id: str, agent_id: str) -> Path:
         segments = [self._safe_segment(value, field) for value, field in (
             (project_id, "project_id"),
