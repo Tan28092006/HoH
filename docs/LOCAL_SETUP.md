@@ -98,11 +98,12 @@ For a Developer agent, add the matching stdio process (adapt the other role
 templates in the same way):
 
 ```powershell
-claude mcp add hoh-developer --scope user `
+claude mcp add --scope user `
   --env HOH_DATABASE_PATH=D:\HoH\data\control-plane.db `
   --env HOH_AGENT_ID=developer-01 `
   --env HOH_AGENT_ROLE=developer `
   --env HOH_PROJECT_IDS=demo `
+  hoh-developer `
   -- powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\HoH\scripts\start-mcp.ps1
 ```
 
@@ -110,6 +111,23 @@ Run `claude mcp list` to verify. The JSON templates in `deploy/claude-code/`
 are useful for a project-scoped configuration. Claude Code documents local
 stdio servers, environment variables and `local` / `project` / `user` scopes in
 its [MCP guide](https://docs.anthropic.com/en/docs/claude-code/mcp).
+
+### Claude Code VS Code extension
+
+The extension reads the same project-scoped `.mcp.json` file, so it does not
+need a separate MCP server implementation or a CLI worker. Copy the matching
+template from `deploy/claude-code/` to the repository root as `.mcp.json`, then
+set a unique `HOH_AGENT_ID`, the fixed role, and the project's exact scope.
+For the HoH dogfood project, the checked-out root `.mcp.json` is already a
+Developer profile with `developer-claude-01` scoped only to
+`hoh-control-plane`.
+
+Reload the VS Code window after changing the file. In the Claude Code chat,
+open `/mcp` and approve `hoh-developer` when prompted; project-scoped MCP
+servers require this one-time approval. Confirm that the tool list contains
+Developer tools (`work.claim`, `dev.*`) and does not contain Planner or QA
+mutation tools. Do not open a Planner, QA, and Developer profile in the same
+Claude chat.
 
 ## 4. Smoke test each agent
 

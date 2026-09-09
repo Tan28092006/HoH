@@ -10,6 +10,7 @@ data/*.db-*
 data/worktrees/
 data/evidence/
 .env
+.claude/
 dist/
 build/
 *.egg-info/
