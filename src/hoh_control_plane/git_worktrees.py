@@ -9,6 +9,7 @@ from hoh_control_plane.domain import ValidationError
 
 
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+_GIT_COMMAND_TIMEOUT_SECONDS = 15
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,7 +216,10 @@ class GitWorktreeManager:
                 check=False,
                 capture_output=True,
                 text=True,
+                timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
             )
+        except subprocess.TimeoutExpired as exc:
+            raise ValidationError("Git operation timed out") from exc
         except OSError as exc:
             raise ValidationError("Git executable is unavailable") from exc
         if check and completed.returncode != 0:

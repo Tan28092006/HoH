@@ -13,6 +13,7 @@ from hoh_control_plane.domain import (
     Actor,
     AuthorizationError,
     ConflictError,
+    DomainError,
     NotFoundError,
     Role,
     TicketStatus,
@@ -1431,9 +1432,9 @@ class ControlPlaneService:
             if not isinstance(timeout_seconds, int) or not 5 <= timeout_seconds <= 1800:
                 raise ValidationError("Candidate test command timeout is invalid")
             candidate_commit = candidate["commit_sha"]
-            worktree_path = self.git_worktrees.verify_frozen_candidate(
-                worktree["worktree_path"], candidate_commit
-            )
+            # Queueing must return promptly. The detached worker re-verifies this
+            # immutable path and commit before it executes the test command.
+            worktree_path = worktree["worktree_path"]
             test_run_id = _id("testrun")
             timestamp = _iso()
             connection.execute(
@@ -1554,7 +1555,9 @@ class ControlPlaneService:
     ) -> dict[str, Any]:
         """Compatibility helper for direct callers; MCP callers must queue then poll."""
         queued = self.queue_project_tests(actor, ticket_id, lease_id)
-        self.execute_queued_project_test(queued["test_run"]["test_run_id"])
+        completed = self.execute_queued_project_test(queued["test_run"]["test_run_id"])
+        if completed["status"] == "FAILED":
+            raise ValidationError(completed["error_message"])
         return self.get_project_test_run(
             actor, ticket_id, lease_id, queued["test_run"]["test_run_id"]
         )
