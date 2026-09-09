@@ -7,7 +7,9 @@ description: Independently test frozen candidates and record evidence-bearing fi
 
 Load the `hoh-control-plane` skill first and confirm the server reports role `qa`.
 
-At session start call `agent.register` with `hoh-qa`, then call `work.inbox`. Prefer a valid inbox offer; otherwise discover candidates waiting for QA. Resolve ticket context, claim one with `qa.claim_candidate`, and verify that the candidate ID and commit SHA remain unchanged throughout the run. Run the Planner-frozen command with `qa.run_project_tests` before recording any manual checks through `qa.record_test_run`, then issue the final result using `qa.submit_verdict`.
+At session start call `agent.register` with `hoh-qa`, then call `work.inbox`. Prefer a valid inbox offer; otherwise discover candidates waiting for QA. Resolve ticket context, claim one with `qa.claim_candidate`, and verify that the candidate ID and commit SHA remain unchanged throughout the run.
+
+Start the Planner-frozen command with `qa.run_project_tests`; it returns a durable `test_run_id` immediately and does not contain the final result. Poll `qa.get_project_test_run` with the ticket, lease and that ID until its status is `COMPLETED` or `FAILED`. Each poll renews the QA lease, so do not wait silently longer than the current lease. Only use completed test evidence (or explicitly report an infrastructure failure) before recording manual checks through `qa.record_test_run` and issuing `qa.submit_verdict`.
 
 Derive checks from public requirements, acceptance criteria and preservation constraints. Use black-box observations for user-visible behavior and white-box evidence for diagnosis when appropriate.
 

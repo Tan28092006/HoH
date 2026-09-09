@@ -155,6 +155,29 @@ CREATE TABLE IF NOT EXISTS qa_test_runs (
 CREATE INDEX IF NOT EXISTS qa_test_runs_candidate_created
     ON qa_test_runs(candidate_id, created_at);
 
+CREATE TABLE IF NOT EXISTS qa_test_jobs (
+    test_run_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),
+    ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
+    lease_id TEXT NOT NULL REFERENCES leases(lease_id),
+    test_command TEXT NOT NULL,
+    command_digest TEXT NOT NULL,
+    timeout_seconds INTEGER NOT NULL,
+    worktree_path TEXT NOT NULL,
+    candidate_commit TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('QUEUED', 'RUNNING', 'COMPLETED', 'FAILED', 'STALE')),
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS qa_test_jobs_candidate_created
+    ON qa_test_jobs(candidate_id, created_at);
+CREATE INDEX IF NOT EXISTS qa_test_jobs_active_candidate
+    ON qa_test_jobs(candidate_id, status);
+
 CREATE TABLE IF NOT EXISTS evidence (
     evidence_id TEXT PRIMARY KEY,
     candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),

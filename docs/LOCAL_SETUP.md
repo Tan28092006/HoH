@@ -171,10 +171,12 @@ Developer flow for a configured repository is now mandatory:
 3. Make changes only in its returned `worktree_path` and `branch_ref`.
 4. Commit the work there and submit that exact `HEAD` with `dev.submit_candidate`.
 
-QA then claims the candidate and calls `qa.run_project_tests`. It can execute
-only that candidate's frozen Planner command, after verifying that the assigned
-worktree is clean and still at the frozen SHA. Pass/fail/timeout plus bounded
-stdout and stderr are written to `data\evidence` and exposed to QA as an
+QA then claims the candidate and calls `qa.run_project_tests`. It validates the
+frozen worktree, persists a durable `test_run_id`, starts a detached worker and
+returns immediately; it does not hold the MCP connection while tests execute.
+QA polls `qa.get_project_test_run` using that ID until it reports `COMPLETED` or
+`FAILED`; each poll renews the ticket lease. Pass/fail/timeout plus bounded
+stdout and stderr are written to `data\evidence` and exposed as an
 `evidence://local/...` reference. A failing test is evidence; it never changes
 the QA verdict automatically.
 

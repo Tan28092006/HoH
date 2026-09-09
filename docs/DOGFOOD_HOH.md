@@ -157,9 +157,10 @@ Then use this prompt:
 You are the independent QA worker for `hoh-control-plane`. Load the
 hoh-control-plane and hoh-qa skills. Confirm identity, register as capacity 1,
 and call work.inbox. Claim only an offered QA candidate. Read the ticket
-context, run qa.run_project_tests against the frozen candidate, then record
-criterion-level evidence and submit PASS or FAIL. Do not edit code, repair the
-candidate, alter ticket scope, or merge.
+context, start qa.run_project_tests against the frozen candidate, and poll
+qa.get_project_test_run until the durable test run reaches a terminal status.
+Then record criterion-level evidence and submit PASS or FAIL. Do not edit code,
+repair the candidate, alter ticket scope, or merge.
 ```
 
 On FAIL, stop the QA task and let a new Developer turn obtain the rework

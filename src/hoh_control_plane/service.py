@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -20,7 +21,7 @@ from hoh_control_plane.domain import (
     require_role,
 )
 from hoh_control_plane.git_worktrees import GitWorktreeManager
-from hoh_control_plane.qa_runner import ProjectTestRunner
+from hoh_control_plane.qa_runner import ProjectTestRunner, TestExecution
 from hoh_control_plane.store import SQLiteStore
 
 
@@ -1387,12 +1388,12 @@ class ControlPlaneService:
                 connection, "SELECT * FROM context_entries WHERE entry_id = ?", (entry_id,)
             )
 
-    def run_project_tests(
+    def queue_project_tests(
         self, actor: Actor, ticket_id: str, lease_id: str
     ) -> dict[str, Any]:
-        """Run the candidate's Planner-frozen test command from its clean ticket worktree."""
+        """Persist a frozen QA test job and return before its command is executed."""
         require_role(actor, Role.QA)
-        with self.store.connection() as connection:
+        with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             if ticket["status"] != TicketStatus.QA_IN_PROGRESS.value:
                 raise ConflictError("Ticket is not in QA")
@@ -1402,6 +1403,15 @@ class ControlPlaneService:
                 "SELECT * FROM candidates WHERE ticket_id = ? ORDER BY submitted_at DESC LIMIT 1",
                 (ticket_id,),
             )
+            active_job = connection.execute(
+                """
+                SELECT test_run_id FROM qa_test_jobs
+                WHERE candidate_id = ? AND status IN ('QUEUED', 'RUNNING')
+                """,
+                (candidate["candidate_id"],),
+            ).fetchone()
+            if active_job is not None:
+                raise ConflictError("Candidate already has an active project test run")
             test_profile = _row(
                 connection.execute(
                     "SELECT * FROM candidate_test_profiles WHERE candidate_id = ?",
@@ -1420,72 +1430,32 @@ class ControlPlaneService:
             timeout_seconds = test_profile["timeout_seconds"]
             if not isinstance(timeout_seconds, int) or not 5 <= timeout_seconds <= 1800:
                 raise ValidationError("Candidate test command timeout is invalid")
-            candidate_id = candidate["candidate_id"]
             candidate_commit = candidate["commit_sha"]
             worktree_path = self.git_worktrees.verify_frozen_candidate(
                 worktree["worktree_path"], candidate_commit
             )
-
-        execution = self.project_tests.execute(command, worktree_path, timeout_seconds)
-        with self.store.connection(immediate=True) as connection:
-            ticket, current_project_id = self._authorized_ticket(connection, actor, ticket_id)
-            if current_project_id != project_id or ticket["status"] != TicketStatus.QA_IN_PROGRESS.value:
-                raise ConflictError("Ticket changed while project tests were running")
-            self._require_active_lease(connection, actor, ticket_id, lease_id)
-            current_candidate = self._one(
-                connection,
-                "SELECT * FROM candidates WHERE candidate_id = ? AND ticket_id = ?",
-                (candidate_id, ticket_id),
-            )
-            if current_candidate["commit_sha"] != candidate_commit:
-                raise ConflictError("Candidate changed while project tests were running")
             test_run_id = _id("testrun")
-            storage_ref, report_path = self.project_tests.write_report(
-                candidate_id=candidate_id,
-                test_run_id=test_run_id,
-                execution=execution,
-            )
             timestamp = _iso()
             connection.execute(
                 """
-                INSERT INTO qa_test_runs
-                    (test_run_id, candidate_id, ticket_id, command_digest, exit_code, timed_out,
-                     duration_ms, storage_ref, report_path, executed_by, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO qa_test_jobs
+                    (test_run_id, project_id, candidate_id, ticket_id, lease_id, test_command,
+                     command_digest, timeout_seconds, worktree_path, candidate_commit,
+                     requested_by, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'QUEUED', ?)
                 """,
                 (
                     test_run_id,
-                    candidate_id,
-                    ticket_id,
-                    execution.command_digest,
-                    execution.exit_code,
-                    int(execution.timed_out),
-                    execution.duration_ms,
-                    storage_ref,
-                    report_path,
-                    actor.agent_id,
-                    timestamp,
-                ),
-            )
-            entry_id = _id("ctx")
-            outcome = "timed out" if execution.timed_out else f"exited {execution.exit_code}"
-            connection.execute(
-                """
-                INSERT INTO context_entries
-                    (entry_id, project_id, feature_id, ticket_id, entry_type, content,
-                     source_ref, artifact_commit, actor_id, actor_role, created_at)
-                VALUES (?, ?, ?, ?, 'qa_automated_test_run', ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    entry_id,
                     project_id,
-                    ticket["feature_id"],
+                    candidate["candidate_id"],
                     ticket_id,
-                    f"Planner-registered project test command {outcome} in {execution.duration_ms}ms.",
-                    storage_ref,
+                    lease_id,
+                    json.dumps(command),
+                    hashlib.sha256("\0".join(command).encode()).hexdigest(),
+                    timeout_seconds,
+                    worktree_path,
                     candidate_commit,
                     actor.agent_id,
-                    actor.role.value,
                     timestamp,
                 ),
             )
@@ -1493,22 +1463,243 @@ class ControlPlaneService:
                 connection,
                 actor,
                 project_id,
-                "qa.automated_test_completed",
+                "qa.automated_test_queued",
                 "ticket",
                 ticket_id,
                 ticket["version"],
-                {
-                    "test_run_id": test_run_id,
-                    "exit_code": execution.exit_code,
-                    "timed_out": execution.timed_out,
-                },
+                {"test_run_id": test_run_id, "candidate_id": candidate["candidate_id"]},
             )
             return {
                 "ticket": self._ticket(connection, ticket_id),
-                "test_run": self._one(
-                    connection, "SELECT * FROM qa_test_runs WHERE test_run_id = ?", (test_run_id,)
-                ),
+                "test_run": self._qa_test_job(connection, test_run_id),
             }
+
+    def get_project_test_run(
+        self,
+        actor: Actor,
+        ticket_id: str,
+        lease_id: str,
+        test_run_id: str,
+        lease_seconds: int = 900,
+    ) -> dict[str, Any]:
+        """Poll a persisted QA test job and renew the caller's exclusive QA lease."""
+        require_role(actor, Role.QA)
+        if not 30 <= lease_seconds <= 3600:
+            raise ValidationError("Lease duration must be between 30 and 3600 seconds")
+        with self.store.connection(immediate=True) as connection:
+            ticket, _project_id = self._authorized_ticket(connection, actor, ticket_id)
+            if ticket["status"] != TicketStatus.QA_IN_PROGRESS.value:
+                raise ConflictError("Ticket is not in QA")
+            self._require_active_lease(connection, actor, ticket_id, lease_id)
+            job = self._qa_test_job(connection, test_run_id)
+            if job["ticket_id"] != ticket_id or job["lease_id"] != lease_id:
+                raise AuthorizationError("Project test run does not belong to this QA lease")
+            timestamp = _now()
+            expires_at = _iso(timestamp + timedelta(seconds=lease_seconds))
+            connection.execute(
+                "UPDATE leases SET heartbeat_at = ?, expires_at = ? WHERE lease_id = ?",
+                (_iso(timestamp), expires_at, lease_id),
+            )
+            return {
+                "ticket": self._ticket(connection, ticket_id),
+                "lease": self._lease(connection, lease_id),
+                "test_run": self._qa_test_job(connection, test_run_id),
+            }
+
+    def execute_queued_project_test(self, test_run_id: str) -> dict[str, Any]:
+        """Worker-only execution for a previously authorized, immutable QA test job."""
+        preflight_error: str | None = None
+        with self.store.connection(immediate=True) as connection:
+            job = self._qa_test_job(connection, test_run_id)
+            if job["status"] != "QUEUED":
+                return job
+            actor = Actor(job["requested_by"], Role.QA, frozenset({job["project_id"]}))
+            ticket = self._ticket(connection, job["ticket_id"])
+            if ticket["status"] != TicketStatus.QA_IN_PROGRESS.value:
+                preflight_error = "Ticket is no longer in QA before the test worker started."
+            else:
+                try:
+                    self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
+                    candidate = self._one(
+                        connection,
+                        "SELECT * FROM candidates WHERE candidate_id = ? AND ticket_id = ?",
+                        (job["candidate_id"], job["ticket_id"]),
+                    )
+                    if candidate["commit_sha"] != job["candidate_commit"]:
+                        preflight_error = "Candidate changed before the test worker started."
+                except DomainError as error:
+                    preflight_error = str(error)
+                if preflight_error is None:
+                    connection.execute(
+                        "UPDATE qa_test_jobs SET status = 'RUNNING', started_at = ? WHERE test_run_id = ?",
+                        (_iso(), test_run_id),
+                    )
+
+        if preflight_error is not None:
+            return self.fail_queued_project_test(test_run_id, preflight_error)
+
+        try:
+            worktree_path = self.git_worktrees.verify_frozen_candidate(
+                job["worktree_path"], job["candidate_commit"]
+            )
+            execution = self.project_tests.execute(
+                job["test_command"], worktree_path, job["timeout_seconds"]
+            )
+            return self._complete_queued_project_test(test_run_id, execution)
+        except (DomainError, OSError) as error:
+            return self.fail_queued_project_test(test_run_id, str(error))
+
+    def run_project_tests(
+        self, actor: Actor, ticket_id: str, lease_id: str
+    ) -> dict[str, Any]:
+        """Compatibility helper for direct callers; MCP callers must queue then poll."""
+        queued = self.queue_project_tests(actor, ticket_id, lease_id)
+        self.execute_queued_project_test(queued["test_run"]["test_run_id"])
+        return self.get_project_test_run(
+            actor, ticket_id, lease_id, queued["test_run"]["test_run_id"]
+        )
+
+    def _complete_queued_project_test(
+        self, test_run_id: str, execution: TestExecution
+    ) -> dict[str, Any]:
+        try:
+            with self.store.connection(immediate=True) as connection:
+                job = self._qa_test_job(connection, test_run_id)
+                if job["status"] != "RUNNING":
+                    return job
+                actor = Actor(job["requested_by"], Role.QA, frozenset({job["project_id"]}))
+                ticket = self._ticket(connection, job["ticket_id"])
+                if ticket["status"] != TicketStatus.QA_IN_PROGRESS.value:
+                    raise ConflictError("Ticket changed while project tests were running")
+                self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
+                candidate = self._one(
+                    connection,
+                    "SELECT * FROM candidates WHERE candidate_id = ? AND ticket_id = ?",
+                    (job["candidate_id"], job["ticket_id"]),
+                )
+                if candidate["commit_sha"] != job["candidate_commit"]:
+                    raise ConflictError("Candidate changed while project tests were running")
+                storage_ref, report_path = self.project_tests.write_report(
+                    candidate_id=job["candidate_id"],
+                    test_run_id=test_run_id,
+                    execution=execution,
+                )
+                timestamp = _iso()
+                connection.execute(
+                    """
+                    INSERT INTO qa_test_runs
+                        (test_run_id, candidate_id, ticket_id, command_digest, exit_code, timed_out,
+                         duration_ms, storage_ref, report_path, executed_by, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        test_run_id,
+                        job["candidate_id"],
+                        job["ticket_id"],
+                        execution.command_digest,
+                        execution.exit_code,
+                        int(execution.timed_out),
+                        execution.duration_ms,
+                        storage_ref,
+                        report_path,
+                        actor.agent_id,
+                        timestamp,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE qa_test_jobs
+                    SET status = 'COMPLETED', completed_at = ?, error_message = NULL
+                    WHERE test_run_id = ?
+                    """,
+                    (timestamp, test_run_id),
+                )
+                entry_id = _id("ctx")
+                outcome = "timed out" if execution.timed_out else f"exited {execution.exit_code}"
+                connection.execute(
+                    """
+                    INSERT INTO context_entries
+                        (entry_id, project_id, feature_id, ticket_id, entry_type, content,
+                         source_ref, artifact_commit, actor_id, actor_role, created_at)
+                    VALUES (?, ?, ?, ?, 'qa_automated_test_run', ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        entry_id,
+                        job["project_id"],
+                        ticket["feature_id"],
+                        job["ticket_id"],
+                        f"Planner-registered project test command {outcome} in {execution.duration_ms}ms.",
+                        storage_ref,
+                        job["candidate_commit"],
+                        actor.agent_id,
+                        actor.role.value,
+                        timestamp,
+                    ),
+                )
+                self._event(
+                    connection,
+                    actor,
+                    job["project_id"],
+                    "qa.automated_test_completed",
+                    "ticket",
+                    job["ticket_id"],
+                    ticket["version"],
+                    {
+                        "test_run_id": test_run_id,
+                        "exit_code": execution.exit_code,
+                        "timed_out": execution.timed_out,
+                    },
+                )
+                return self._qa_test_job(connection, test_run_id)
+        except DomainError as error:
+            return self.fail_queued_project_test(test_run_id, str(error))
+
+    def fail_queued_project_test(self, test_run_id: str, message: str) -> dict[str, Any]:
+        """Terminally record infrastructure or stale-state failures without blocking QA polling."""
+        self._bounded_text(message, "test worker error", 2000)
+        with self.store.connection(immediate=True) as connection:
+            job = self._qa_test_job(connection, test_run_id)
+            if job["status"] in {"COMPLETED", "FAILED", "STALE"}:
+                return job
+            timestamp = _iso()
+            connection.execute(
+                """
+                UPDATE qa_test_jobs
+                SET status = 'FAILED', error_message = ?, completed_at = ?
+                WHERE test_run_id = ?
+                """,
+                (message, timestamp, test_run_id),
+            )
+            ticket = self._ticket(connection, job["ticket_id"])
+            actor = Actor(job["requested_by"], Role.QA, frozenset({job["project_id"]}))
+            self._event(
+                connection,
+                actor,
+                job["project_id"],
+                "qa.automated_test_failed",
+                "ticket",
+                job["ticket_id"],
+                ticket["version"],
+                {"test_run_id": test_run_id},
+            )
+            return self._qa_test_job(connection, test_run_id)
+
+    def _qa_test_job(self, connection: sqlite3.Connection, test_run_id: str) -> dict[str, Any]:
+        job = self._one(
+            connection, "SELECT * FROM qa_test_jobs WHERE test_run_id = ?", (test_run_id,)
+        )
+        test_run = _row(
+            connection.execute(
+                "SELECT * FROM qa_test_runs WHERE test_run_id = ?", (test_run_id,)
+            ).fetchone()
+        )
+        job["test_run"] = test_run
+        if test_run is not None:
+            job.update({
+                key: test_run[key]
+                for key in ("exit_code", "timed_out", "duration_ms", "storage_ref", "report_path")
+            })
+        return job
 
     def submit_candidate(
         self,

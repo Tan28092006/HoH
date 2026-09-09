@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from hoh_control_plane.domain import ValidationError
+from hoh_control_plane import qa_worker
+from hoh_control_plane.domain import ConflictError, ValidationError
 
 
 def _git(path: Path, *arguments: str) -> str:
@@ -111,7 +112,14 @@ def test_qa_queues_project_tests_then_polls_a_completed_durable_run(
     assert queued["test_run"]["candidate_id"] == candidate["candidate"]["candidate_id"]
     assert service.get_ticket_context(actors["qa"], ticket["ticket_id"])["test_runs"] == []
 
-    service.execute_queued_project_test(queued["test_run"]["test_run_id"])
+    qa_worker.main(
+        [
+            "--database",
+            str(service.store.path),
+            "--test-run-id",
+            queued["test_run"]["test_run_id"],
+        ]
+    )
     polled = service.get_project_test_run(
         actors["qa"],
         ticket["ticket_id"],
@@ -132,7 +140,7 @@ def test_qa_cannot_queue_two_active_runs_for_one_frozen_candidate(
     )
     service.queue_project_tests(actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"])
 
-    with pytest.raises(ValidationError, match="active"):
+    with pytest.raises(ConflictError, match="active"):
         service.queue_project_tests(
             actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"]
         )

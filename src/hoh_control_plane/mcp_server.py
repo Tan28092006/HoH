@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar
@@ -14,6 +16,25 @@ from hoh_control_plane.store import SQLiteStore
 
 Result = TypeVar("Result")
 _TARGET_KEYS = ("project_id", "feature_id", "ticket_id", "feature_ref", "ticket_ref")
+
+
+def _start_qa_test_worker(database_path: Path, test_run_id: str) -> None:
+    """Launch one isolated runner so stdio MCP calls stay available for polling."""
+    subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "hoh_control_plane.qa_worker",
+            "--database",
+            str(database_path),
+            "--test-run-id",
+            test_run_id,
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
 
 
 def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
@@ -457,12 +478,45 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
 
         @server.tool(name="qa.run_project_tests", structured_output=True)
         def qa_run_project_tests(ticket_id: str, lease_id: str) -> dict[str, Any]:
-            """Run the Planner-frozen test command against the clean, frozen candidate worktree."""
+            """Queue the frozen candidate test in a detached worker and return its test_run_id."""
             arguments = {"ticket_id": ticket_id, "lease_id": lease_id}
+
+            def queue_and_start() -> dict[str, Any]:
+                queued = service.queue_project_tests(actor, **arguments)
+                try:
+                    _start_qa_test_worker(service.store.path, queued["test_run"]["test_run_id"])
+                except OSError as error:
+                    service.fail_queued_project_test(
+                        queued["test_run"]["test_run_id"],
+                        f"Could not start the isolated QA test worker: {error}",
+                    )
+                    raise ValidationError("Could not start the isolated QA test worker") from error
+                return queued
+
             return invoke(
                 "qa.run_project_tests",
                 arguments,
-                lambda: service.run_project_tests(actor, **arguments),
+                queue_and_start,
+            )
+
+        @server.tool(name="qa.get_project_test_run", structured_output=True)
+        def qa_get_project_test_run(
+            ticket_id: str,
+            lease_id: str,
+            test_run_id: str,
+            lease_seconds: int = 900,
+        ) -> dict[str, Any]:
+            """Poll one durable QA test run; every poll also renews the QA ticket lease."""
+            arguments = {
+                "ticket_id": ticket_id,
+                "lease_id": lease_id,
+                "test_run_id": test_run_id,
+                "lease_seconds": lease_seconds,
+            }
+            return invoke(
+                "qa.get_project_test_run",
+                arguments,
+                lambda: service.get_project_test_run(actor, **arguments),
             )
 
         @server.tool(name="qa.record_test_run", structured_output=True)

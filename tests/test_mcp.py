@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+import hoh_control_plane.mcp_server as mcp_server
 from hoh_control_plane.domain import Actor, Role
 from hoh_control_plane.mcp_server import create_mcp_server
 from hoh_control_plane.service import ControlPlaneService
@@ -237,6 +238,35 @@ async def test_developer_can_report_a_blocker_and_planner_can_requeue_it(tmp_pat
     assert [call["tool_name"] for call in calls] == [
         "work.claim", "dev.report_blocker", "planner.set_ticket_ready"
     ]
+
+
+@pytest.mark.anyio
+async def test_qa_mcp_queues_a_detached_project_test_worker(
+    service, actors, seeded, monkeypatch
+) -> None:
+    queued = {
+        "ticket": seeded["ticket"],
+        "test_run": {
+            "test_run_id": "testrun_async",
+            "ticket_id": seeded["ticket"]["ticket_id"],
+            "status": "QUEUED",
+        },
+    }
+    launched: list[tuple[object, str]] = []
+    monkeypatch.setattr(service, "queue_project_tests", lambda *_args, **_kwargs: queued)
+    monkeypatch.setattr(
+        mcp_server,
+        "_start_qa_test_worker",
+        lambda database_path, test_run_id: launched.append((database_path, test_run_id)),
+    )
+
+    _, result = await create_mcp_server(service, actors["qa"]).call_tool(
+        "qa.run_project_tests",
+        {"ticket_id": seeded["ticket"]["ticket_id"], "lease_id": "lease_qa"},
+    )
+
+    assert result["test_run"]["status"] == "QUEUED"
+    assert launched == [(service.store.path, "testrun_async")]
 
 
 @pytest.mark.anyio
