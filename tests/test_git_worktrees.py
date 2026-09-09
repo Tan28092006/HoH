@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import subprocess
+from unittest.mock import patch
 from pathlib import Path
 
 import pytest
 
 from hoh_control_plane.domain import ConflictError, ValidationError
+from hoh_control_plane.git_worktrees import GitWorktreeManager
 
 
 def _git(path: Path, *arguments: str) -> str:
@@ -28,6 +30,17 @@ def _repository(tmp_path: Path) -> Path:
     _git(repository, "add", "README.md")
     _git(repository, "commit", "-m", "Initial checkout")
     return repository
+
+
+def test_git_command_timeout_becomes_a_domain_error(tmp_path: Path) -> None:
+    manager = GitWorktreeManager(tmp_path / "worktrees")
+
+    with patch(
+        "hoh_control_plane.git_worktrees.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(["git", "status"], 1),
+    ):
+        with pytest.raises(ValidationError, match="timed out"):
+            manager._git(tmp_path, "status", "--porcelain")
 
 
 def _candidate_ready_for_integration(service, actors, seeded, tmp_path: Path):

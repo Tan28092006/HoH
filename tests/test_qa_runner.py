@@ -132,6 +132,25 @@ def test_qa_queues_project_tests_then_polls_a_completed_durable_run(
     assert Path(polled["test_run"]["report_path"]).is_file()
 
 
+def test_qa_queues_without_running_git_checks_in_the_mcp_request(
+    service, actors, seeded, tmp_path: Path, monkeypatch
+) -> None:
+    ticket, _candidate, qa_claim = _candidate_waiting_for_qa(
+        service, actors, seeded, tmp_path, [sys.executable, "-c", "print('passed')"]
+    )
+
+    def fail_if_called(*_args, **_kwargs):
+        pytest.fail("QA queueing must not wait for a Git verification")
+
+    monkeypatch.setattr(service.git_worktrees, "verify_frozen_candidate", fail_if_called)
+
+    queued = service.queue_project_tests(
+        actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"]
+    )
+
+    assert queued["test_run"]["status"] == "QUEUED"
+
+
 def test_qa_cannot_queue_two_active_runs_for_one_frozen_candidate(
     service, actors, seeded, tmp_path: Path
 ) -> None:
