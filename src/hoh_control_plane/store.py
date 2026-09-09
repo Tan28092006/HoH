@@ -160,7 +160,9 @@ CREATE TABLE IF NOT EXISTS qa_test_jobs (
     project_id TEXT NOT NULL REFERENCES projects(project_id),
     candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),
     ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
-    lease_id TEXT NOT NULL REFERENCES leases(lease_id),
+    -- A job retains the lease identifier that authorized it as audit provenance.
+    -- It must not prevent the live, expiring lease from being reclaimed.
+    lease_id TEXT NOT NULL,
     test_command TEXT NOT NULL,
     command_digest TEXT NOT NULL,
     timeout_seconds INTEGER NOT NULL,
@@ -314,6 +316,64 @@ class SQLiteStore:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = NORMAL")
             connection.executescript(SCHEMA)
+            connection.execute("BEGIN IMMEDIATE")
+            self._migrate_qa_test_job_lease_foreign_key(connection)
+
+    @staticmethod
+    def _migrate_qa_test_job_lease_foreign_key(connection: sqlite3.Connection) -> None:
+        """Remove the legacy live-lease FK without discarding durable QA history.
+
+        An asynchronous test run is authorized by a lease but can outlive it.  The
+        old foreign key made lease recovery fail after a test job had been created,
+        which blocked every later inbox and claim operation in that transaction.
+        """
+        foreign_keys = connection.execute("PRAGMA foreign_key_list(qa_test_jobs)").fetchall()
+        if not any(
+            foreign_key["table"] == "leases" and foreign_key["from"] == "lease_id"
+            for foreign_key in foreign_keys
+        ):
+            return
+
+        columns = (
+            "test_run_id, project_id, candidate_id, ticket_id, lease_id, test_command, "
+            "command_digest, timeout_seconds, worktree_path, candidate_commit, requested_by, "
+            "status, error_message, created_at, started_at, completed_at"
+        )
+        connection.execute("DROP INDEX IF EXISTS qa_test_jobs_candidate_created")
+        connection.execute("DROP INDEX IF EXISTS qa_test_jobs_active_candidate")
+        connection.execute("ALTER TABLE qa_test_jobs RENAME TO qa_test_jobs_legacy")
+        connection.execute(
+            """
+            CREATE TABLE qa_test_jobs (
+                test_run_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(project_id),
+                candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),
+                ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
+                lease_id TEXT NOT NULL,
+                test_command TEXT NOT NULL,
+                command_digest TEXT NOT NULL,
+                timeout_seconds INTEGER NOT NULL,
+                worktree_path TEXT NOT NULL,
+                candidate_commit TEXT NOT NULL,
+                requested_by TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('QUEUED', 'RUNNING', 'COMPLETED', 'FAILED', 'STALE')),
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            f"INSERT INTO qa_test_jobs ({columns}) SELECT {columns} FROM qa_test_jobs_legacy"
+        )
+        connection.execute("DROP TABLE qa_test_jobs_legacy")
+        connection.execute(
+            "CREATE INDEX qa_test_jobs_candidate_created ON qa_test_jobs(candidate_id, created_at)"
+        )
+        connection.execute(
+            "CREATE INDEX qa_test_jobs_active_candidate ON qa_test_jobs(candidate_id, status)"
+        )
 
     @contextmanager
     def connection(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
