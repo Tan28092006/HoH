@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from hoh_control_plane import qa_worker
-from hoh_control_plane.domain import ConflictError, ValidationError
+from hoh_control_plane.domain import Actor, ConflictError, Role, ValidationError
 
 
 def _git(path: Path, *arguments: str) -> str:
@@ -163,6 +165,101 @@ def test_qa_cannot_queue_two_active_runs_for_one_frozen_candidate(
         service.queue_project_tests(
             actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"]
         )
+
+
+def test_expiring_a_qa_lease_keeps_its_durable_test_job_but_requeues_the_ticket(
+    service, store, actors, seeded, tmp_path: Path
+) -> None:
+    """A QA test job retains its audit lease id after the live lease is reclaimed."""
+    ticket, _candidate, qa_claim = _candidate_waiting_for_qa(
+        service, actors, seeded, tmp_path, [sys.executable, "-c", "print('passed')"]
+    )
+    queued = service.queue_project_tests(
+        actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"]
+    )
+    with store.connection(immediate=True) as connection:
+        connection.execute(
+            "UPDATE leases SET expires_at = ? WHERE lease_id = ?",
+            (
+                (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+                qa_claim["lease"]["lease_id"],
+            ),
+        )
+
+    swept = service.sweep_expired_leases(
+        Actor("test-scheduler", Role.ADMIN, frozenset({"*"}))
+    )
+
+    assert swept["count"] == 1
+    with store.connection() as connection:
+        retained_job = connection.execute(
+            "SELECT lease_id, status FROM qa_test_jobs WHERE test_run_id = ?",
+            (queued["test_run"]["test_run_id"],),
+        ).fetchone()
+    assert retained_job is not None
+    assert retained_job["lease_id"] == qa_claim["lease"]["lease_id"]
+    assert retained_job["status"] == "QUEUED"
+
+
+def test_store_migrates_legacy_qa_test_job_lease_foreign_key_without_losing_job(
+    service, store, actors, seeded, tmp_path: Path
+) -> None:
+    """Existing databases must release lease rows while keeping QA audit history."""
+    ticket, _candidate, qa_claim = _candidate_waiting_for_qa(
+        service, actors, seeded, tmp_path, [sys.executable, "-c", "print('passed')"]
+    )
+    queued = service.queue_project_tests(
+        actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"]
+    )["test_run"]
+    job_columns = (
+        "test_run_id, project_id, candidate_id, ticket_id, lease_id, test_command, "
+        "command_digest, timeout_seconds, worktree_path, candidate_commit, requested_by, "
+        "status, error_message, created_at, started_at, completed_at"
+    )
+    with store.connection(immediate=True) as connection:
+        connection.execute("DROP TABLE qa_test_jobs")
+        connection.execute(
+            """
+            CREATE TABLE qa_test_jobs (
+                test_run_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(project_id),
+                candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),
+                ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
+                lease_id TEXT NOT NULL REFERENCES leases(lease_id),
+                test_command TEXT NOT NULL,
+                command_digest TEXT NOT NULL,
+                timeout_seconds INTEGER NOT NULL,
+                worktree_path TEXT NOT NULL,
+                candidate_commit TEXT NOT NULL,
+                requested_by TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            f"INSERT INTO qa_test_jobs ({job_columns}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            tuple(
+                json.dumps(queued[column]) if column == "test_command" else queued[column]
+                for column in job_columns.split(", ")
+            ),
+        )
+
+    store.initialize()
+
+    with store.connection() as connection:
+        lease_foreign_keys = connection.execute("PRAGMA foreign_key_list(qa_test_jobs)").fetchall()
+        migrated_job = connection.execute(
+            "SELECT test_run_id, lease_id, status FROM qa_test_jobs WHERE test_run_id = ?",
+            (queued["test_run_id"],),
+        ).fetchone()
+    assert all(foreign_key["table"] != "leases" for foreign_key in lease_foreign_keys)
+    assert migrated_job is not None
+    assert migrated_job["lease_id"] == qa_claim["lease"]["lease_id"]
+    assert migrated_job["status"] == "QUEUED"
 
 
 def test_qa_records_a_failing_registered_test_without_accepting_the_candidate(
