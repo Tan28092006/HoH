@@ -92,6 +92,23 @@ def test_later_qa_check_in_receives_an_offer_even_when_another_offer_is_open(
     assert later_inbox["offers"][0]["ticket"]["ticket_id"] == "DEV-142"
 
 
+def test_inbox_returns_the_callers_active_lease_before_new_offers(
+    service: ControlPlaneService,
+    actors: dict[str, Actor],
+    seeded: dict[str, object],
+) -> None:
+    submitted = _submit_candidate(service, actors, seeded)
+    service.register_agent(actors["qa"], skills=["hoh-qa"], capacity=1)
+    claimed = service.claim_qa(
+        actors["qa"], "DEV-142", submitted["ticket"]["version"], 900
+    )
+
+    inbox = service.get_agent_inbox(actors["qa"], "project-1")
+
+    assert inbox["active_leases"][0]["ticket"]["ticket_id"] == "DEV-142"
+    assert inbox["active_leases"][0]["lease_id"] == claimed["lease"]["lease_id"]
+
+
 def test_failed_qa_requeues_ticket_for_an_available_developer(
     service: ControlPlaneService,
     actors: dict[str, Actor],
