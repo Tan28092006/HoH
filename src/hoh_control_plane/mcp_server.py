@@ -394,7 +394,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 lambda: service.submit_candidate(actor, **arguments),
             )
 
-    if actor.role in {Role.DEVELOPER, Role.QA, Role.ADMIN}:
+    if actor.role in {Role.DEVELOPER, Role.QA, Role.INTEGRATOR, Role.ADMIN}:
 
         @server.tool(name="work.heartbeat", structured_output=True)
         def work_heartbeat(lease_id: str, lease_seconds: int = 900) -> dict[str, Any]:
@@ -402,6 +402,40 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
             arguments = {"lease_id": lease_id, "lease_seconds": lease_seconds}
             return invoke(
                 "work.heartbeat", arguments, lambda: service.heartbeat(actor, **arguments)
+            )
+
+    if actor.role in {Role.INTEGRATOR, Role.ADMIN}:
+
+        @server.tool(name="integrator.claim_candidate", structured_output=True)
+        def integrator_claim_candidate(
+            ticket_id: str, expected_version: int, lease_seconds: int = 900
+        ) -> dict[str, Any]:
+            """Claim a QA-verified candidate for the protected integration gate."""
+            arguments = {
+                "ticket_id": ticket_id,
+                "expected_version": expected_version,
+                "lease_seconds": lease_seconds,
+            }
+            return invoke(
+                "integrator.claim_candidate",
+                arguments,
+                lambda: service.claim_integration(actor, **arguments),
+            )
+
+        @server.tool(name="integrator.merge_candidate", structured_output=True)
+        def integrator_merge_candidate(
+            ticket_id: str, lease_id: str, expected_version: int
+        ) -> dict[str, Any]:
+            """Fast-forward a verified candidate, or safely requeue it when main drifted."""
+            arguments = {
+                "ticket_id": ticket_id,
+                "lease_id": lease_id,
+                "expected_version": expected_version,
+            }
+            return invoke(
+                "integrator.merge_candidate",
+                arguments,
+                lambda: service.merge_candidate(actor, **arguments),
             )
 
     if actor.role in {Role.QA, Role.ADMIN}:

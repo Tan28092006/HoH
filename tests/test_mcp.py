@@ -30,13 +30,16 @@ async def test_mcp_exposes_only_role_appropriate_tools(tmp_path) -> None:
     )
     developer = Actor("dev-01", Role.DEVELOPER, frozenset({"project-1"}))
     qa = Actor("qa-01", Role.QA, frozenset({"project-1"}))
+    integrator = Actor("integrator-01", Role.INTEGRATOR, frozenset({"project-1"}))
     planner_server = create_mcp_server(service, planner)
     developer_server = create_mcp_server(service, developer)
     qa_server = create_mcp_server(service, qa)
+    integrator_server = create_mcp_server(service, integrator)
 
     tools = await developer_server.list_tools()
     names = {tool.name for tool in tools}
     qa_names = {tool.name for tool in await qa_server.list_tools()}
+    integrator_names = {tool.name for tool in await integrator_server.list_tools()}
     planner_names = {tool.name for tool in await planner_server.list_tools()}
     identity_content, identity = await developer_server.call_tool(
         "identity.get_capabilities", {}
@@ -69,6 +72,14 @@ async def test_mcp_exposes_only_role_appropriate_tools(tmp_path) -> None:
     )
     assert "qa.run_project_tests" in qa_names
     assert "dev.submit_candidate" not in qa_names
+    assert {
+        "work.inbox",
+        "work.heartbeat",
+        "integrator.claim_candidate",
+        "integrator.merge_candidate",
+    }.issubset(integrator_names)
+    assert "dev.submit_candidate" not in integrator_names
+    assert "qa.submit_verdict" not in integrator_names
     assert "planner.configure_repository" in planner_names
     assert "planner.configure_test_command" in planner_names
     assert content[0].text

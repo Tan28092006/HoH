@@ -1063,6 +1063,129 @@ class ControlPlaneService:
             event_type="qa.started",
         )
 
+    def claim_integration(
+        self,
+        actor: Actor,
+        ticket_id: str,
+        expected_version: int,
+        lease_seconds: int,
+    ) -> dict[str, Any]:
+        require_role(actor, Role.INTEGRATOR)
+        return self._claim(
+            actor,
+            ticket_id,
+            expected_version,
+            lease_seconds,
+            allowed_statuses={TicketStatus.VERIFIED, TicketStatus.MERGE_READY},
+            next_status=TicketStatus.MERGE_READY,
+            event_type="integration.started",
+        )
+
+    def merge_candidate(
+        self,
+        actor: Actor,
+        ticket_id: str,
+        lease_id: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        """Merge only a QA-verified candidate whose mainline base has not drifted."""
+        require_role(actor, Role.INTEGRATOR)
+        with self.store.connection(immediate=True) as connection:
+            ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._expect_version(ticket, expected_version)
+            if ticket["status"] != TicketStatus.MERGE_READY.value:
+                raise ConflictError("Ticket is not ready for integration")
+            self._require_active_lease(connection, actor, ticket_id, lease_id)
+            project = self._one(
+                connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+            )
+            repository = _row(
+                connection.execute(
+                    "SELECT * FROM project_repositories WHERE project_id = ?", (project_id,)
+                ).fetchone()
+            )
+            candidate = self._one(
+                connection,
+                "SELECT * FROM candidates WHERE ticket_id = ? AND commit_sha = ?",
+                (ticket_id, ticket["candidate_commit"]),
+            )
+            if repository is None:
+                raise ValidationError("Project repository is required before integrating a candidate")
+            merged, mainline_commit = self.git_worktrees.fast_forward_default_branch(
+                repository_path=repository["repository_path"],
+                default_branch=project["default_branch"],
+                expected_base_commit=candidate["base_commit"],
+                candidate_commit=candidate["commit_sha"],
+            )
+            timestamp = _iso()
+            next_version = ticket["version"] + 1
+            connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease_id,))
+            if not merged:
+                reason = (
+                    "Mainline advanced after this candidate was based; rebase the candidate "
+                    "and submit a new QA candidate."
+                )
+                connection.execute(
+                    """
+                    INSERT INTO context_entries
+                        (entry_id, project_id, feature_id, ticket_id, entry_type, content,
+                         source_ref, artifact_commit, actor_id, actor_role, created_at)
+                    VALUES (?, ?, ?, ?, 'integration_base_drift', ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        _id("ctx"),
+                        project_id,
+                        ticket["feature_id"],
+                        ticket_id,
+                        reason,
+                        f"candidate:{candidate['candidate_id']}",
+                        mainline_commit,
+                        actor.agent_id,
+                        actor.role.value,
+                        timestamp,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE tickets
+                    SET status = ?, blocked_reason = ?, version = ?, updated_at = ?
+                    WHERE ticket_id = ?
+                    """,
+                    (TicketStatus.REWORK.value, reason, next_version, timestamp, ticket_id),
+                )
+                self._event(
+                    connection,
+                    actor,
+                    project_id,
+                    "integration.base_drift",
+                    "ticket",
+                    ticket_id,
+                    next_version,
+                    {"candidate_id": candidate["candidate_id"], "mainline_commit": mainline_commit},
+                )
+                rework_ticket = self._ticket(connection, ticket_id)
+                self._queue_ticket(connection, actor, project_id, rework_ticket)
+                return {"ticket": rework_ticket, "merge_status": "base_drift"}
+            connection.execute(
+                """
+                UPDATE tickets
+                SET status = ?, blocked_reason = NULL, version = ?, updated_at = ?
+                WHERE ticket_id = ?
+                """,
+                (TicketStatus.DONE.value, next_version, timestamp, ticket_id),
+            )
+            self._event(
+                connection,
+                actor,
+                project_id,
+                "integration.completed",
+                "ticket",
+                ticket_id,
+                next_version,
+                {"candidate_id": candidate["candidate_id"], "commit_sha": mainline_commit},
+            )
+            return {"ticket": self._ticket(connection, ticket_id), "merge_status": "merged"}
+
     def heartbeat(self, actor: Actor, lease_id: str, lease_seconds: int = 900) -> dict[str, Any]:
         if not 30 <= lease_seconds <= 3600:
             raise ValidationError("Lease duration must be between 30 and 3600 seconds")
@@ -1097,8 +1220,10 @@ class ControlPlaneService:
                 project_id = self._project_for_ticket(connection, ticket["ticket_id"])
                 require_project(actor, project_id)
                 fallback = (
-                    TicketStatus.QA_READY
-                    if ticket["status"] == TicketStatus.QA_IN_PROGRESS.value
+                    TicketStatus.MERGE_READY
+                    if lease["role"] == Role.INTEGRATOR.value
+                    else TicketStatus.QA_READY
+                    if lease["role"] == Role.QA.value
                     else TicketStatus.READY
                 )
                 next_version = ticket["version"] + 1
@@ -1662,7 +1787,7 @@ class ControlPlaneService:
                 {"candidate_id": candidate_id, "verdict": verdict},
             )
             verdict_ticket = self._ticket(connection, ticket_id)
-            if verdict == "failed":
+            if verdict in {"passed", "failed"}:
                 self._queue_ticket(connection, actor, project_id, verdict_ticket)
             return {
                 "ticket": verdict_ticket,
@@ -1823,7 +1948,10 @@ class ControlPlaneService:
                 raise ConflictError("Ticket is already leased")
             if TicketStatus(ticket["status"]) not in allowed_statuses:
                 raise ConflictError(f"Ticket cannot be claimed from {ticket['status']}")
-            if ticket["required_role"] != actor.role.value and actor.role is not Role.QA:
+            if ticket["required_role"] != actor.role.value and actor.role not in {
+                Role.QA,
+                Role.INTEGRATOR,
+            }:
                 raise AuthorizationError("Ticket is assigned to another role")
             timestamp = _now()
             if actor.role is Role.DEVELOPER:
@@ -1962,7 +2090,8 @@ class ControlPlaneService:
             FROM tickets t
             JOIN features f ON f.feature_id = t.feature_id
             LEFT JOIN leases l ON l.ticket_id = t.ticket_id
-            WHERE t.status IN ('READY', 'REWORK', 'QA_READY') AND l.lease_id IS NULL
+            WHERE t.status IN ('READY', 'REWORK', 'QA_READY', 'VERIFIED', 'MERGE_READY')
+              AND l.lease_id IS NULL
             ORDER BY t.priority DESC, t.created_at ASC
             """
         ).fetchall()
@@ -1976,6 +2105,8 @@ class ControlPlaneService:
         status = TicketStatus(ticket["status"])
         if status is TicketStatus.QA_READY:
             return Role.QA
+        if status in {TicketStatus.VERIFIED, TicketStatus.MERGE_READY}:
+            return Role.INTEGRATOR
         if status in {TicketStatus.READY, TicketStatus.REWORK}:
             role = Role(ticket["required_role"])
             return role if role in {Role.DEVELOPER, Role.INTEGRATOR} else None
@@ -2187,8 +2318,10 @@ class ControlPlaneService:
             connection.execute("DELETE FROM leases WHERE ticket_id = ?", (ticket_id,))
             current = self._ticket(connection, ticket_id)
             fallback = (
-                TicketStatus.QA_READY
-                if current["status"] == TicketStatus.QA_IN_PROGRESS.value
+                TicketStatus.MERGE_READY
+                if lease["role"] == Role.INTEGRATOR.value
+                else TicketStatus.QA_READY
+                if lease["role"] == Role.QA.value
                 else TicketStatus.READY
             )
             connection.execute(

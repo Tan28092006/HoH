@@ -142,6 +142,29 @@ class GitWorktreeManager:
         )
         return sorted({line.strip().replace("\\", "/") for line in result.stdout.splitlines() if line.strip()})
 
+    def fast_forward_default_branch(
+        self,
+        *,
+        repository_path: str,
+        default_branch: str,
+        expected_base_commit: str,
+        candidate_commit: str,
+    ) -> tuple[bool, str]:
+        """Fast-forward the checked-out default branch only when its base is unchanged."""
+        repository = Path(self.validate_repository(repository_path))
+        active_branch = self._git(repository, "branch", "--show-current").stdout.strip()
+        if active_branch != default_branch:
+            raise ValidationError("Repository default branch is not checked out for integration")
+        current = self._resolve_commit(repository, f"refs/heads/{default_branch}")
+        expected_base = self._resolve_commit(repository, expected_base_commit)
+        candidate = self._resolve_commit(repository, candidate_commit)
+        if current != expected_base:
+            return False, current
+        merged = self._git(repository, "merge", "--ff-only", candidate, check=False)
+        if merged.returncode != 0:
+            raise ValidationError("Candidate cannot fast-forward the default branch")
+        return True, candidate
+
     def _worktree_path(self, project_id: str, ticket_id: str, agent_id: str) -> Path:
         segments = [self._safe_segment(value, field) for value, field in (
             (project_id, "project_id"),
