@@ -7,6 +7,7 @@ const statusColumns = [
   ["QA_IN_PROGRESS", "QA in progress"],
   ["REWORK", "Rework"],
   ["VERIFIED", "Verified"],
+  ["MERGE_READY", "Integration"],
   ["BLOCKED", "Blocked"],
   ["DONE", "Done"],
 ];
@@ -168,6 +169,8 @@ function describeTool(toolName) {
     "qa.run_project_tests": "ran the Planner-registered test command on the frozen candidate",
     "qa.record_test_run": "recorded a QA test run",
     "qa.submit_verdict": "submitted an evidence-backed QA verdict",
+    "integrator.claim_candidate": "claimed a verified candidate for integration",
+    "integrator.merge_candidate": "ran the protected merge gate",
   };
   return actions[toolName] || "called an MCP tool";
 }
