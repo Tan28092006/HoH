@@ -126,6 +126,11 @@ Then reload the dashboard. The Agent activity page should show the redacted MCP
 invocations, Dispatch should show presence/offer/claim state, and the Board
 should reflect the ticket state. A queue remains durable if no agent is online.
 
+To let a dedicated Codex or Claude Code Developer/QA worker wake itself and
+check the queue, follow [ROLE_WAKEUPS.md](./ROLE_WAKEUPS.md). This is optional
+for manual use, but it is the recommended local setup when hand-offs should not
+wait for a person to prompt an idle chat.
+
 ## 5. Connect a real code repository
 
 For a real project, the Planner calls `planner.configure_repository` once with

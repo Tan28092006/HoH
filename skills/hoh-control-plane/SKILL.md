@@ -10,6 +10,9 @@ Start every control-plane task by calling `identity.get_capabilities`. Treat the
 For an execution role, call `agent.register` once per session and `work.inbox`
 before discovery. When a task resumes after waiting, call `work.inbox` again:
 offers are durable but short-lived, and the first ticket lease is authoritative.
+For an unattended Codex or Claude Code execution worker, read
+[`references/wakeup.md`](references/wakeup.md) before enabling a heartbeat or
+loop.
 
 Then:
 
