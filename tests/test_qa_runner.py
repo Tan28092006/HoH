@@ -90,6 +90,54 @@ def test_qa_runs_the_planner_registered_command_and_persists_evidence(
     assert context["test_runs"][0]["storage_ref"].startswith("evidence://local/")
 
 
+def test_qa_queues_project_tests_then_polls_a_completed_durable_run(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """The MCP-facing request must finish before the isolated test command runs."""
+    test_command = [
+        sys.executable,
+        "-c",
+        "from pathlib import Path; assert Path('src/checkout/retry.txt').is_file(); print('passed')",
+    ]
+    ticket, candidate, qa_claim = _candidate_waiting_for_qa(
+        service, actors, seeded, tmp_path, test_command
+    )
+
+    queued = service.queue_project_tests(
+        actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"]
+    )
+
+    assert queued["test_run"]["status"] == "QUEUED"
+    assert queued["test_run"]["candidate_id"] == candidate["candidate"]["candidate_id"]
+    assert service.get_ticket_context(actors["qa"], ticket["ticket_id"])["test_runs"] == []
+
+    service.execute_queued_project_test(queued["test_run"]["test_run_id"])
+    polled = service.get_project_test_run(
+        actors["qa"],
+        ticket["ticket_id"],
+        qa_claim["lease"]["lease_id"],
+        queued["test_run"]["test_run_id"],
+    )
+
+    assert polled["test_run"]["status"] == "COMPLETED"
+    assert polled["test_run"]["exit_code"] == 0
+    assert Path(polled["test_run"]["report_path"]).is_file()
+
+
+def test_qa_cannot_queue_two_active_runs_for_one_frozen_candidate(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    ticket, _candidate, qa_claim = _candidate_waiting_for_qa(
+        service, actors, seeded, tmp_path, [sys.executable, "-c", "print('passed')"]
+    )
+    service.queue_project_tests(actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"])
+
+    with pytest.raises(ValidationError, match="active"):
+        service.queue_project_tests(
+            actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"]
+        )
+
+
 def test_qa_records_a_failing_registered_test_without_accepting_the_candidate(
     service, actors, seeded, tmp_path: Path
 ) -> None:

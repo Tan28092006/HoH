@@ -70,7 +70,7 @@ async def test_mcp_exposes_only_role_appropriate_tools(tmp_path) -> None:
     assert {"qa.claim_candidate", "qa.record_test_run", "qa.submit_verdict"}.issubset(
         qa_names
     )
-    assert "qa.run_project_tests" in qa_names
+    assert {"qa.run_project_tests", "qa.get_project_test_run"}.issubset(qa_names)
     assert "dev.submit_candidate" not in qa_names
     assert {
         "work.inbox",
