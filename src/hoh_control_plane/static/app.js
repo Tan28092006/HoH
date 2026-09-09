@@ -8,6 +8,7 @@ const state = {
 };
 
 const statusColumns = [
+  ["BACKLOG", "Backlog"],
   ["READY", "Ready"],
   ["DEV_IN_PROGRESS", "In development"],
   ["QA_READY", "Awaiting QA"],
@@ -22,6 +23,7 @@ const statusColumns = [
 const boardElement = document.querySelector("#board");
 const detailElement = document.querySelector("#detail");
 const errorBanner = document.querySelector("#error-banner");
+const projectPicker = document.querySelector("#project-picker");
 const activityHeaders = { "X-HOH-Agent-Id": "ui-observer", "X-HOH-Role": "planner" };
 
 function escapeHtml(value) {
@@ -41,6 +43,16 @@ function showError(message) {
 }
 
 function clearError() { errorBanner.hidden = true; }
+
+function syncProjectPicker() {
+  let option = [...projectPicker.options].find(item => item.value === state.projectId);
+  if (!option) {
+    option = new Option(state.board.project.name, state.projectId);
+    projectPicker.add(option);
+  }
+  option.textContent = state.board.project.name;
+  projectPicker.value = state.projectId;
+}
 
 async function loadDashboard() {
   clearError();
@@ -67,6 +79,7 @@ async function loadDashboard() {
     state.dispatch = { agents: [], queues: [], unavailable: `Dispatch requires an authenticated dashboard (${dispatchResponse.status}).` };
   }
   document.querySelector("#project-description").textContent = state.board.project.description;
+  syncProjectPicker();
   document.querySelector("#connection-label").textContent = "Live";
   renderBoard();
   renderFeatures();
@@ -214,6 +227,12 @@ function renderActivity() {
 }
 
 document.querySelector("#refresh-button").addEventListener("click", () => loadDashboard().catch(error => showError(error.message)));
+projectPicker.addEventListener("change", () => {
+  state.projectId = projectPicker.value;
+  state.selectedTicketId = null;
+  window.history.replaceState(null, "", `?project=${encodeURIComponent(state.projectId)}`);
+  loadDashboard().catch(error => showError(error.message));
+});
 document.querySelectorAll(".nav-item").forEach(button => button.addEventListener("click", () => {
   document.querySelectorAll(".nav-item").forEach(item => item.classList.toggle("active", item === button));
   ["board", "features", "dispatch", "events"].forEach(view => { document.querySelector(`#${view}-view`).hidden = view !== button.dataset.view; });

@@ -95,6 +95,8 @@ def test_ui_is_served(tmp_path: Path) -> None:
     assert '["MERGE_READY", "Integration"]' in script.text
     assert '"integrator.merge_candidate"' in script.text
     assert "new URLSearchParams(window.location.search)" in script.text
+    assert '["BACKLOG", "Backlog"]' in script.text
+    assert "projectPicker.value = state.projectId" in script.text
 
 
 def test_ui_static_assets_include_a_favicon(tmp_path: Path) -> None:
