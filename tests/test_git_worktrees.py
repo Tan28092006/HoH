@@ -49,8 +49,10 @@ def test_developer_worktree_binds_a_candidate_to_its_ticket_and_branch(
         claim["ticket"]["version"],
     )
     worktree = Path(prepared["worktree"]["worktree_path"])
-    (worktree / "retry.txt").write_text("safe retry\n", encoding="utf-8")
-    _git(worktree, "add", "retry.txt")
+    retry_path = worktree / "src" / "checkout" / "retry.txt"
+    retry_path.parent.mkdir(parents=True)
+    retry_path.write_text("safe retry\n", encoding="utf-8")
+    _git(worktree, "add", "src/checkout/retry.txt")
     _git(worktree, "commit", "-m", "Implement safe retry")
     candidate_commit = _git(worktree, "rev-parse", "HEAD")
 
@@ -70,7 +72,42 @@ def test_developer_worktree_binds_a_candidate_to_its_ticket_and_branch(
     assert prepared["worktree"]["agent_id"] == "dev-01"
     assert worktree.is_dir()
     assert submitted["candidate"]["commit_sha"] == candidate_commit
+    assert submitted["candidate"]["changed_paths"] == ["src/checkout/retry.txt"]
     assert context["worktree"]["branch_ref"] == prepared["worktree"]["branch_ref"]
+    assert context["candidate"]["changed_paths"] == ["src/checkout/retry.txt"]
+
+
+def test_candidate_is_rejected_when_actual_diff_exceeds_declared_write_scope(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    repository = _repository(tmp_path)
+    service.configure_repository(actors["planner"], "project-1", str(repository))
+    ticket = seeded["ticket"]
+    claim = service.claim_ticket(
+        actors["developer"], ticket["ticket_id"], ticket["version"], 900
+    )
+    prepared = service.prepare_worktree(
+        actors["developer"],
+        ticket["ticket_id"],
+        claim["lease"]["lease_id"],
+        claim["ticket"]["version"],
+    )
+    worktree = Path(prepared["worktree"]["worktree_path"])
+    (worktree / "README.md").write_text("# Changed outside ticket scope\n", encoding="utf-8")
+    _git(worktree, "add", "README.md")
+    _git(worktree, "commit", "-m", "Change unrelated documentation")
+
+    with pytest.raises(ValidationError, match="outside ticket write scope"):
+        service.submit_candidate(
+            actors["developer"],
+            ticket["ticket_id"],
+            claim["lease"]["lease_id"],
+            claim["ticket"]["version"],
+            _git(worktree, "rev-parse", "HEAD"),
+            prepared["worktree"]["base_commit"],
+            prepared["worktree"]["branch_ref"],
+            ["This deliberately changes an unrelated file."],
+        )
 
 
 def test_configured_repository_rejects_candidate_from_another_branch(

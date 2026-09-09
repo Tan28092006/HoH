@@ -68,6 +68,107 @@ def test_only_one_developer_can_hold_a_ticket_lease(
         )
 
 
+def test_direct_claim_rejects_an_unfinished_dependency(
+    service: ControlPlaneService,
+    actors: dict[str, object],
+    seeded: dict[str, object],
+) -> None:
+    prerequisite = service.create_ticket(
+        actors["planner"],
+        feature_id="payment-retry",
+        ticket_id="DEV-141",
+        title="Provide retry contract",
+        objective="Define the retry contract before implementation work starts",
+        required_role=Role.DEVELOPER,
+        acceptance_criteria=["The retry contract is documented and tested"],
+        preservation_constraints=[],
+        file_scope=["src/checkout/contracts/**"],
+        ready=True,
+    )
+    dependent = service.create_ticket(
+        actors["planner"],
+        feature_id="payment-retry",
+        ticket_id="DEV-143",
+        title="Use the retry contract",
+        objective="Implement a consumer of the retry contract",
+        required_role=Role.DEVELOPER,
+        acceptance_criteria=["The consumer uses the retry contract"],
+        preservation_constraints=[],
+        file_scope=["src/checkout/consumer/**"],
+        dependency_ids=[prerequisite["ticket_id"]],
+        ready=True,
+    )
+
+    with pytest.raises(ConflictError, match="dependencies"):
+        service.claim_ticket(
+            actors["developer"],
+            ticket_id=dependent["ticket_id"],
+            expected_version=dependent["version"],
+            lease_seconds=900,
+        )
+
+
+def test_developer_claim_rejects_an_overlapping_active_write_scope(
+    service: ControlPlaneService,
+    actors: dict[str, object],
+    seeded: dict[str, object],
+) -> None:
+    overlapping = service.create_ticket(
+        actors["planner"],
+        feature_id="payment-retry",
+        ticket_id="DEV-143",
+        title="Update checkout retry serializer",
+        objective="Make the serializer preserve retry metadata",
+        required_role=Role.DEVELOPER,
+        acceptance_criteria=["Retry metadata survives serializer round trips"],
+        preservation_constraints=[],
+        file_scope=["src/checkout/serializers/**"],
+        ready=True,
+    )
+    first_claim = service.claim_ticket(
+        actors["developer"], "DEV-142", seeded["ticket"]["version"], 900
+    )
+
+    with pytest.raises(ConflictError, match="write scope"):
+        service.claim_ticket(
+            actors["developer_2"],
+            ticket_id=overlapping["ticket_id"],
+            expected_version=overlapping["version"],
+            lease_seconds=900,
+        )
+
+    assert first_claim["ticket"]["status"] == TicketStatus.DEV_IN_PROGRESS.value
+
+
+def test_developer_claim_allows_disjoint_active_write_scopes(
+    service: ControlPlaneService,
+    actors: dict[str, object],
+    seeded: dict[str, object],
+) -> None:
+    disjoint = service.create_ticket(
+        actors["planner"],
+        feature_id="payment-retry",
+        ticket_id="DEV-143",
+        title="Update payment retry metrics",
+        objective="Emit metrics for payment retries",
+        required_role=Role.DEVELOPER,
+        acceptance_criteria=["Retry metrics are emitted"],
+        preservation_constraints=[],
+        file_scope=["src/payments/metrics/**"],
+        ready=True,
+    )
+    service.claim_ticket(actors["developer"], "DEV-142", seeded["ticket"]["version"], 900)
+
+    claim = service.claim_ticket(
+        actors["developer_2"],
+        ticket_id=disjoint["ticket_id"],
+        expected_version=disjoint["version"],
+        lease_seconds=900,
+    )
+
+    assert claim["ticket"]["status"] == TicketStatus.DEV_IN_PROGRESS.value
+
+
 def test_stale_ticket_version_is_rejected(
     service: ControlPlaneService,
     actors: dict[str, object],
