@@ -30,6 +30,65 @@ def _repository(tmp_path: Path) -> Path:
     return repository
 
 
+def _candidate_ready_for_integration(service, actors, seeded, tmp_path: Path):
+    repository = _repository(tmp_path)
+    service.configure_repository(actors["planner"], "project-1", str(repository))
+    ticket = seeded["ticket"]
+    development = service.claim_ticket(
+        actors["developer"], ticket["ticket_id"], ticket["version"], 900
+    )
+    prepared = service.prepare_worktree(
+        actors["developer"],
+        ticket["ticket_id"],
+        development["lease"]["lease_id"],
+        development["ticket"]["version"],
+    )
+    worktree = Path(prepared["worktree"]["worktree_path"])
+    retry_path = worktree / "src" / "checkout" / "retry.txt"
+    retry_path.parent.mkdir(parents=True)
+    retry_path.write_text("safe retry\n", encoding="utf-8")
+    _git(worktree, "add", "src/checkout/retry.txt")
+    _git(worktree, "commit", "-m", "Implement safe retry")
+    candidate = service.submit_candidate(
+        actors["developer"],
+        ticket["ticket_id"],
+        development["lease"]["lease_id"],
+        development["ticket"]["version"],
+        _git(worktree, "rev-parse", "HEAD"),
+        prepared["worktree"]["base_commit"],
+        prepared["worktree"]["branch_ref"],
+        ["Retry implementation is ready for QA."],
+    )
+    qa_claim = service.claim_qa(
+        actors["qa"], ticket["ticket_id"], candidate["ticket"]["version"], 900
+    )
+    verified = service.submit_qa_verdict(
+        actors["qa"],
+        ticket["ticket_id"],
+        qa_claim["lease"]["lease_id"],
+        candidate["candidate"]["candidate_id"],
+        qa_claim["ticket"]["version"],
+        "passed",
+        [
+            {
+                "criterion": criterion,
+                "status": "verified",
+                "severity": "none",
+                "observation": "Verified against the frozen candidate.",
+                "evidence": [
+                    {
+                        "type": "test_result",
+                        "observation": "passed",
+                        "storage_ref": f"evidence://qa/{index}.json",
+                    }
+                ],
+            }
+            for index, criterion in enumerate(ticket["acceptance_criteria"], start=1)
+        ],
+    )
+    return repository, ticket, candidate, verified
+
+
 def test_developer_worktree_binds_a_candidate_to_its_ticket_and_branch(
     service, actors, seeded, tmp_path: Path
 ) -> None:
@@ -108,6 +167,57 @@ def test_candidate_is_rejected_when_actual_diff_exceeds_declared_write_scope(
             prepared["worktree"]["branch_ref"],
             ["This deliberately changes an unrelated file."],
         )
+
+
+def test_integrator_fast_forwards_a_verified_candidate_to_main(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    repository, ticket, candidate, verified = _candidate_ready_for_integration(
+        service, actors, seeded, tmp_path
+    )
+
+    integration = service.claim_integration(
+        actors["integrator"],
+        ticket["ticket_id"],
+        verified["ticket"]["version"],
+        900,
+    )
+    merged = service.merge_candidate(
+        actors["integrator"],
+        ticket["ticket_id"],
+        integration["lease"]["lease_id"],
+        integration["ticket"]["version"],
+    )
+
+    assert merged["ticket"]["status"] == "DONE"
+    assert _git(repository, "rev-parse", "main") == candidate["candidate"]["commit_sha"]
+
+
+def test_integrator_returns_candidate_to_rework_when_main_has_drifted(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    repository, ticket, _candidate, verified = _candidate_ready_for_integration(
+        service, actors, seeded, tmp_path
+    )
+    (repository / "mainline.txt").write_text("new mainline work\n", encoding="utf-8")
+    _git(repository, "add", "mainline.txt")
+    _git(repository, "commit", "-m", "Advance mainline")
+    integration = service.claim_integration(
+        actors["integrator"],
+        ticket["ticket_id"],
+        verified["ticket"]["version"],
+        900,
+    )
+
+    rework = service.merge_candidate(
+        actors["integrator"],
+        ticket["ticket_id"],
+        integration["lease"]["lease_id"],
+        integration["ticket"]["version"],
+    )
+
+    assert rework["ticket"]["status"] == "REWORK"
+    assert rework["merge_status"] == "base_drift"
 
 
 def test_configured_repository_rejects_candidate_from_another_branch(
