@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 
 from hoh_control_plane.domain import Actor, ConflictError, DomainError, Role, ValidationError
 from hoh_control_plane.service import ControlPlaneService
@@ -128,11 +129,27 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
         ),
     )
 
-    def invoke(tool_name: str, arguments: dict[str, Any], operation: Callable[[], Result]) -> Result:
+    def invoke(
+        tool_name: str,
+        arguments: dict[str, Any],
+        operation: Callable[[], Result],
+        idempotency_key: str | None = None,
+    ) -> Result:
         project_id = _project_for_call(service, actor, arguments)
         summary = _safe_input_summary(arguments)
+
+        def run() -> Result:
+            return service.run_idempotent(
+                actor,
+                operation=tool_name,
+                idempotency_key=idempotency_key,
+                payload=arguments,
+                run=operation,
+                project_id=project_id,
+            )
+
         try:
-            result = _run_with_contention_retry(operation)
+            result = _run_with_contention_retry(run)
         except DomainError as error:
             service.record_tool_call(
                 actor,
@@ -142,7 +159,9 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 outcome="rejected",
                 error_code=error.code,
             )
-            raise
+            # Stable, machine-readable parity with the REST error body: a stdio
+            # client branches on the code instead of parsing the prose.
+            raise ToolError(f"[{error.code}] {error}") from error
         except (sqlite3.OperationalError, sqlite3.IntegrityError) as error:
             # Safety net: normalize any raw driver error that reaches this boundary
             # without an existing service-layer translation (e.g. a foreign-key
@@ -156,8 +175,9 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 outcome="rejected",
                 error_code="database_error",
             )
-            raise ConflictError(
-                "This change conflicts with the current database state; retry the request."
+            raise ToolError(
+                f"[{ConflictError.code}] This change conflicts with the current database "
+                "state; retry the request."
             ) from error
         except Exception:
             service.record_tool_call(
@@ -317,7 +337,11 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
 
         @server.tool(name="planner.create_project", structured_output=True)
         def planner_create_project(
-            project_id: str, name: str, description: str, default_branch: str = "main"
+            project_id: str,
+            name: str,
+            description: str,
+            default_branch: str = "main",
+            idempotency_key: str | None = None,
         ) -> dict[str, Any]:
             """Create a project container owned by the Planner's project scope."""
             arguments = {
@@ -329,6 +353,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
             return invoke(
                 "planner.create_project", arguments,
                 lambda: service.create_project(actor, **arguments),
+                idempotency_key,
             )
 
         @server.tool(name="planner.create_feature", structured_output=True)
@@ -339,6 +364,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
             objective: str,
             parent_feature_id: str | None = None,
             priority: int = 50,
+            idempotency_key: str | None = None,
         ) -> dict[str, Any]:
             """Create a feature or nested subfeature with a stable context reference."""
             arguments = {
@@ -352,6 +378,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
             return invoke(
                 "planner.create_feature", arguments,
                 lambda: service.create_feature(actor, **arguments),
+                idempotency_key,
             )
 
         @server.tool(name="planner.create_ticket", structured_output=True)
@@ -368,6 +395,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
             ticket_type: str = "feature_work",
             priority: int = 50,
             parent_ticket_id: str | None = None,
+            idempotency_key: str | None = None,
         ) -> dict[str, Any]:
             """Create a bounded backlog ticket for Developer, QA or Integrator work."""
             arguments = {
@@ -402,15 +430,19 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                     priority=priority,
                     parent_ticket_id=parent_ticket_id,
                 ),
+                idempotency_key,
             )
 
         @server.tool(name="planner.set_ticket_ready", structured_output=True)
-        def planner_set_ticket_ready(ticket_id: str, expected_version: int) -> dict[str, Any]:
+        def planner_set_ticket_ready(
+            ticket_id: str, expected_version: int, idempotency_key: str | None = None
+        ) -> dict[str, Any]:
             """Release a planned backlog ticket into the role's executable queue."""
             arguments = {"ticket_id": ticket_id, "expected_version": expected_version}
             return invoke(
                 "planner.set_ticket_ready", arguments,
                 lambda: service.set_ticket_ready(actor, **arguments),
+                idempotency_key,
             )
 
         @server.tool(name="planner.update_write_scope", structured_output=True)
@@ -458,7 +490,10 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
 
         @server.tool(name="work.claim", structured_output=True)
         def work_claim(
-            ticket_id: str, expected_version: int, lease_seconds: int = 900
+            ticket_id: str,
+            expected_version: int,
+            lease_seconds: int = 900,
+            idempotency_key: str | None = None,
         ) -> dict[str, Any]:
             """Claim READY or REWORK Developer work through a timed exclusive lease."""
             arguments = {
@@ -466,7 +501,12 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 "expected_version": expected_version,
                 "lease_seconds": lease_seconds,
             }
-            return invoke("work.claim", arguments, lambda: service.claim_ticket(actor, **arguments))
+            return invoke(
+                "work.claim",
+                arguments,
+                lambda: service.claim_ticket(actor, **arguments),
+                idempotency_key,
+            )
 
         @server.tool(name="dev.prepare_worktree", structured_output=True)
         def dev_prepare_worktree(
@@ -554,6 +594,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
             base_commit: str,
             branch_ref: str,
             developer_claims: list[str],
+            idempotency_key: str | None = None,
         ) -> dict[str, Any]:
             """Queue immutable candidate validation and return immediately for polling."""
             arguments = {
@@ -569,10 +610,12 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 return invoke(
                     "dev.submit_candidate", arguments,
                     lambda: service.submit_candidate(actor, **arguments),
+                    idempotency_key,
                 )
             queued = invoke(
                 "dev.submit_candidate", arguments,
                 lambda: service.queue_candidate_submission(actor, **arguments),
+                idempotency_key,
             )
             _start_candidate_submission_worker(service.store.path, queued["submission"]["submission_id"])
             return queued
@@ -610,7 +653,10 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
 
         @server.tool(name="integrator.claim_candidate", structured_output=True)
         def integrator_claim_candidate(
-            ticket_id: str, expected_version: int, lease_seconds: int = 900
+            ticket_id: str,
+            expected_version: int,
+            lease_seconds: int = 900,
+            idempotency_key: str | None = None,
         ) -> dict[str, Any]:
             """Claim a QA-verified candidate for the protected integration gate."""
             arguments = {
@@ -622,11 +668,15 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 "integrator.claim_candidate",
                 arguments,
                 lambda: service.claim_integration(actor, **arguments),
+                idempotency_key,
             )
 
         @server.tool(name="integrator.merge_candidate", structured_output=True)
         def integrator_merge_candidate(
-            ticket_id: str, lease_id: str, expected_version: int
+            ticket_id: str,
+            lease_id: str,
+            expected_version: int,
+            idempotency_key: str | None = None,
         ) -> dict[str, Any]:
             """Queue a durable merge job and return its merge_job_id before Git runs."""
             arguments = {
@@ -651,6 +701,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 "integrator.merge_candidate",
                 arguments,
                 queue_and_start,
+                idempotency_key,
             )
 
         @server.tool(name="integrator.get_merge_candidate", structured_output=True)
@@ -677,7 +728,10 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
 
         @server.tool(name="qa.claim_candidate", structured_output=True)
         def qa_claim_candidate(
-            ticket_id: str, expected_version: int, lease_seconds: int = 900
+            ticket_id: str,
+            expected_version: int,
+            lease_seconds: int = 900,
+            idempotency_key: str | None = None,
         ) -> dict[str, Any]:
             """Claim a frozen candidate for an independent QA pass."""
             arguments = {
@@ -688,6 +742,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
             return invoke(
                 "qa.claim_candidate", arguments,
                 lambda: service.claim_qa(actor, **arguments),
+                idempotency_key,
             )
 
         @server.tool(name="qa.run_project_tests", structured_output=True)
@@ -757,6 +812,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
             expected_version: int,
             verdict: str,
             findings: list[dict[str, Any]],
+            idempotency_key: str | None = None,
         ) -> dict[str, Any]:
             """Submit PASS or FAIL using evidence for every finding and acceptance criterion."""
             arguments = {
@@ -770,6 +826,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
             return invoke(
                 "qa.submit_verdict", arguments,
                 lambda: service.submit_qa_verdict(actor, **arguments),
+                idempotency_key,
             )
 
     return server

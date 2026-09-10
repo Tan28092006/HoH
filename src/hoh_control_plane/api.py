@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import sqlite3
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -15,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from hoh_control_plane.domain import (
     Actor,
     AuthenticationError,
+    ConflictError,
     DomainError,
     Role,
 )
@@ -25,6 +27,11 @@ from hoh_control_plane.store import SQLiteStore
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+# A consequential write may be retried after a lost acknowledgment; the same key
+# with the same body replays the original result instead of duplicating state.
+IdempotencyKey = Annotated[str | None, Header(alias="Idempotency-Key")]
 
 
 class ProjectCreate(StrictModel):
@@ -150,6 +157,37 @@ def create_app(
             },
         )
 
+    @app.exception_handler(sqlite3.Error)
+    async def storage_error_handler(_request: Request, error: sqlite3.Error):
+        """Mirror the MCP safety net so raw storage-engine text never reaches a client."""
+        return JSONResponse(
+            status_code=ConflictError.status_code,
+            content={
+                "error": {
+                    "code": ConflictError.code,
+                    "message": (
+                        "This change conflicts with the current database state; "
+                        "retry the request."
+                    ),
+                    "details": {},
+                }
+            },
+        )
+
+    @app.exception_handler(Exception)
+    async def internal_error_handler(_request: Request, error: Exception):
+        """An unexpected failure is reported as an opaque, stable internal error."""
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": {
+                    "code": "internal_error",
+                    "message": "The control plane could not complete this request.",
+                    "details": {},
+                }
+            },
+        )
+
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(_request: Request, error: RequestValidationError):
         details = [
@@ -218,18 +256,37 @@ def create_app(
 
     @app.post("/api/v1/projects", status_code=201)
     def create_project(
-        payload: ProjectCreate, actor: Actor = Depends(actor_dependency)
+        payload: ProjectCreate,
+        actor: Actor = Depends(actor_dependency),
+        idempotency_key: IdempotencyKey = None,
     ) -> dict[str, Any]:
-        return {"data": service.create_project(actor, **payload.model_dump())}
+        body = payload.model_dump()
+        return {
+            "data": service.run_idempotent(
+                actor,
+                operation="planner.create_project",
+                idempotency_key=idempotency_key,
+                payload=body,
+                run=lambda: service.create_project(actor, **body),
+            )
+        }
 
     @app.post("/api/v1/projects/{project_id}/features", status_code=201)
     def create_feature(
         project_id: str,
         payload: FeatureCreate,
         actor: Actor = Depends(actor_dependency),
+        idempotency_key: IdempotencyKey = None,
     ) -> dict[str, Any]:
+        body = payload.model_dump()
         return {
-            "data": service.create_feature(actor, project_id=project_id, **payload.model_dump())
+            "data": service.run_idempotent(
+                actor,
+                operation="planner.create_feature",
+                idempotency_key=idempotency_key,
+                payload={"project_id": project_id, **body},
+                run=lambda: service.create_feature(actor, project_id=project_id, **body),
+            )
         }
 
     @app.post("/api/v1/features/{feature_id}/tickets", status_code=201)
@@ -237,9 +294,17 @@ def create_app(
         feature_id: str,
         payload: TicketCreate,
         actor: Actor = Depends(actor_dependency),
+        idempotency_key: IdempotencyKey = None,
     ) -> dict[str, Any]:
+        body = payload.model_dump()
         return {
-            "data": service.create_ticket(actor, feature_id=feature_id, **payload.model_dump())
+            "data": service.run_idempotent(
+                actor,
+                operation="planner.create_ticket",
+                idempotency_key=idempotency_key,
+                payload={"feature_id": feature_id, **body},
+                run=lambda: service.create_ticket(actor, feature_id=feature_id, **body),
+            )
         }
 
     @app.get("/api/v1/metadata/discover")
@@ -273,12 +338,24 @@ def create_app(
         ticket_id: str,
         payload: ClaimRequest,
         actor: Actor = Depends(actor_dependency),
+        idempotency_key: IdempotencyKey = None,
     ) -> dict[str, Any]:
-        if actor.role is Role.QA:
-            result = service.claim_qa(actor, ticket_id, **payload.model_dump())
-        else:
-            result = service.claim_ticket(actor, ticket_id, **payload.model_dump())
-        return {"data": result}
+        body = payload.model_dump()
+
+        def run() -> dict[str, Any]:
+            if actor.role is Role.QA:
+                return service.claim_qa(actor, ticket_id, **body)
+            return service.claim_ticket(actor, ticket_id, **body)
+
+        return {
+            "data": service.run_idempotent(
+                actor,
+                operation="work.claim",
+                idempotency_key=idempotency_key,
+                payload={"ticket_id": ticket_id, **body},
+                run=run,
+            )
+        }
 
     @app.post("/api/v1/tickets/{ticket_id}/progress", status_code=201)
     def progress(
@@ -295,9 +372,17 @@ def create_app(
         ticket_id: str,
         payload: CandidateRequest,
         actor: Actor = Depends(actor_dependency),
+        idempotency_key: IdempotencyKey = None,
     ) -> dict[str, Any]:
+        body = payload.model_dump()
         return {
-            "data": service.submit_candidate(actor, ticket_id=ticket_id, **payload.model_dump())
+            "data": service.run_idempotent(
+                actor,
+                operation="dev.submit_candidate",
+                idempotency_key=idempotency_key,
+                payload={"ticket_id": ticket_id, **body},
+                run=lambda: service.submit_candidate(actor, ticket_id=ticket_id, **body),
+            )
         }
 
     @app.post("/api/v1/tickets/{ticket_id}/qa-verdict", status_code=201)
@@ -305,10 +390,17 @@ def create_app(
         ticket_id: str,
         payload: VerdictRequest,
         actor: Actor = Depends(actor_dependency),
+        idempotency_key: IdempotencyKey = None,
     ) -> dict[str, Any]:
         body = payload.model_dump()
         return {
-            "data": service.submit_qa_verdict(actor, ticket_id=ticket_id, **body)
+            "data": service.run_idempotent(
+                actor,
+                operation="qa.submit_verdict",
+                idempotency_key=idempotency_key,
+                payload={"ticket_id": ticket_id, **body},
+                run=lambda: service.submit_qa_verdict(actor, ticket_id=ticket_id, **body),
+            )
         }
 
     @app.get("/api/v1/projects/{project_id}/events")

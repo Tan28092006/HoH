@@ -534,6 +534,48 @@ async def test_invoke_raises_after_exhausting_the_contention_retry_budget(
 
 
 @pytest.mark.anyio
+async def test_a_repeated_keyed_claim_replays_instead_of_reporting_a_stale_version(
+    service, actors, seeded
+) -> None:
+    """The retry carries the version the caller still believes in; the replay wins."""
+    server = create_mcp_server(service, actors["developer"])
+    arguments = {
+        "ticket_id": seeded["ticket"]["ticket_id"],
+        "expected_version": seeded["ticket"]["version"],
+        "idempotency_key": "mcp-retry-1",
+    }
+
+    _, first = await server.call_tool("work.claim", arguments)
+    _, replay = await server.call_tool("work.claim", arguments)
+
+    assert replay == first
+    with service.store.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM leases").fetchone()[0] == 1
+
+
+@pytest.mark.anyio
+async def test_an_unkeyed_call_is_never_recorded_as_idempotent(
+    service, actors, seeded
+) -> None:
+    server = create_mcp_server(service, actors["developer"])
+
+    await server.call_tool(
+        "work.claim",
+        {
+            "ticket_id": seeded["ticket"]["ticket_id"],
+            "expected_version": seeded["ticket"]["version"],
+        },
+    )
+
+    with service.store.connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM idempotency_records"
+        ).fetchone()[0] == 0
+    activity = service.list_agent_activity(actors["planner"], "project-1")["calls"]
+    assert "idempotency_key" not in activity[-1]["input_summary"]["argument_keys"]
+
+
+@pytest.mark.anyio
 async def test_invoke_normalizes_a_raw_sqlite_error_instead_of_leaking_it(
     service, actors, monkeypatch
 ) -> None:

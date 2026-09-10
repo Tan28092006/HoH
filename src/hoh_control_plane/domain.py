@@ -61,6 +61,16 @@ class ConflictError(DomainError):
     status_code = 409
 
 
+class IdempotencyConflictError(ConflictError):
+    """The caller reused an idempotency key that cannot replay this exact request.
+
+    Distinct from a plain state conflict so a client can tell "your retry was
+    refused" from "the domain state moved on"; the details carry which guard fired.
+    """
+
+    code = "idempotency_conflict"
+
+
 class NotFoundError(DomainError):
     code = "not_found"
     status_code = 404

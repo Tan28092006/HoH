@@ -90,6 +90,38 @@ def test_local_mode_write_requires_valid_role_headers(tmp_path: Path) -> None:
     assert created.status_code == 201
 
 
+def test_a_repeated_keyed_claim_returns_the_original_lease(tmp_path: Path) -> None:
+    """A retried REST claim must replay its lease rather than fail on a stale version."""
+    app = create_app(database_path=tmp_path / "api.db", local_mode=True, seed_demo=True)
+    developer_headers = headers("developer", "developer-retry-01")
+
+    with TestClient(app) as client:
+        discovered = client.get(
+            "/api/v1/metadata/discover",
+            params={"project_id": "demo"},
+            headers=developer_headers,
+        ).json()["data"]
+        ticket = discovered["features"][0]["tickets"][0]
+        body = {"expected_version": ticket["version"], "lease_seconds": 900}
+        keyed = {**developer_headers, "Idempotency-Key": "claim-retry-1"}
+        first = client.post(
+            f"/api/v1/tickets/{ticket['ticket_id']}/leases", headers=keyed, json=body
+        )
+        replay = client.post(
+            f"/api/v1/tickets/{ticket['ticket_id']}/leases", headers=keyed, json=body
+        )
+        unkeyed_retry = client.post(
+            f"/api/v1/tickets/{ticket['ticket_id']}/leases",
+            headers=developer_headers,
+            json=body,
+        )
+
+    assert first.status_code == 201
+    assert replay.status_code == 201
+    assert replay.json()["data"]["lease"]["lease_id"] == first.json()["data"]["lease"]["lease_id"]
+    assert unkeyed_retry.status_code == 409
+
+
 def test_api_rejects_invalid_ticket_input(tmp_path: Path) -> None:
     app = create_app(database_path=tmp_path / "api.db", local_mode=True, seed_demo=True)
 

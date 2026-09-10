@@ -391,6 +391,30 @@ CREATE INDEX IF NOT EXISTS work_offers_agent_status
 CREATE INDEX IF NOT EXISTS work_offers_queue_status
     ON work_offers(queue_id, status);
 
+-- A consequential command can lose its acknowledgment on the way back to the
+-- caller. This record lets the identical retry replay the original result
+-- instead of creating a second lease, candidate, verdict or event. Only the
+-- request digest is retained, never the raw payload, and project_id is stored
+-- as '' rather than NULL so the uniqueness scope holds for unscoped commands.
+CREATE TABLE IF NOT EXISTS idempotency_records (
+    record_id TEXT PRIMARY KEY,
+    idempotency_key TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    actor_role TEXT NOT NULL,
+    project_id TEXT NOT NULL DEFAULT '',
+    operation TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('IN_PROGRESS', 'COMPLETED')),
+    response TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    expires_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idempotency_records_scope
+    ON idempotency_records(actor_id, project_id, operation, idempotency_key);
+CREATE INDEX IF NOT EXISTS idempotency_records_expiry
+    ON idempotency_records(expires_at);
+
 CREATE TABLE IF NOT EXISTS audit_events (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     event_id TEXT NOT NULL UNIQUE,
