@@ -34,6 +34,35 @@ def test_health_board_and_security_headers(tmp_path: Path) -> None:
     assert board.headers["x-content-type-options"] == "nosniff"
 
 
+def test_board_exposes_the_active_ticket_owner_and_awaiting_role(tmp_path: Path) -> None:
+    """The read-only board tells operators who exclusively owns a ticket phase."""
+    app = create_app(database_path=tmp_path / "api.db", local_mode=True, seed_demo=True)
+    developer_headers = headers("developer", "developer-board-01")
+
+    with TestClient(app) as client:
+        discovered = client.get(
+            "/api/v1/metadata/discover",
+            params={"project_id": "demo"},
+            headers=developer_headers,
+        ).json()["data"]
+        ticket = discovered["features"][0]["tickets"][0]
+        claim = client.post(
+            f"/api/v1/tickets/{ticket['ticket_id']}/leases",
+            headers=developer_headers,
+            json={"expected_version": ticket["version"], "lease_seconds": 900},
+        ).json()["data"]
+        board = client.get("/api/v1/projects/demo/board").json()["data"]
+
+    active_ticket = board["columns"]["DEV_IN_PROGRESS"][0]
+    assert active_ticket["owner"] == {
+        "state": "active",
+        "agent_id": "developer-board-01",
+        "role": "developer",
+        "lease_expires_at": claim["lease"]["expires_at"],
+        "awaiting_role": None,
+    }
+
+
 def test_local_mode_write_requires_valid_role_headers(tmp_path: Path) -> None:
     app = create_app(database_path=tmp_path / "api.db", local_mode=True)
     payload = {
@@ -92,6 +121,9 @@ def test_ui_is_served(tmp_path: Path) -> None:
     assert 'method: "POST"' not in script.text
     assert "agent-activity" in script.text
     assert "/dispatch" in script.text
+    assert "ticket.owner" in script.text
+    assert "Current owner" in script.text
+    assert "ticket-owner" in script.text
     assert '["MERGE_READY", "Integration"]' in script.text
     assert '"integrator.merge_candidate"' in script.text
     assert "new URLSearchParams(window.location.search)" in script.text
