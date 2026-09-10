@@ -37,6 +37,48 @@ function initials(value) {
   return value.split(/[-\s]/).filter(Boolean).map(part => part[0]).join("").slice(0, 2).toUpperCase();
 }
 
+function roleLabel(role) {
+  const labels = { planner: "Planner", developer: "Developer", qa: "QA", integrator: "Integrator" };
+  return labels[role] || role || "Unassigned";
+}
+
+function workflowRole(ticket) {
+  if (["BACKLOG", "BLOCKED"].includes(ticket.status)) return "planner";
+  if (["QA_READY", "QA_IN_PROGRESS"].includes(ticket.status)) return "qa";
+  if (["VERIFIED", "MERGE_READY"].includes(ticket.status)) return "integrator";
+  if (["READY", "REWORK", "DEV_IN_PROGRESS"].includes(ticket.status)) return ticket.required_role;
+  return null;
+}
+
+function ticketOwner(ticket) {
+  const owner = ticket.owner || {
+    state: ticket.lease_agent_id ? "active" : ticket.status === "BLOCKED" ? "blocked" : ticket.status === "BACKLOG" ? "planning" : "unassigned",
+    agent_id: ticket.lease_agent_id || null,
+    role: ticket.lease_role || null,
+    lease_expires_at: ticket.lease_expires_at || null,
+    awaiting_role: ticket.lease_agent_id ? null : workflowRole(ticket),
+  };
+  const role = owner.role || owner.awaiting_role || null;
+  return { ...owner, role, roleLabel: roleLabel(role) };
+}
+
+function ownerStatus(owner) {
+  if (owner.state === "active") return "Active lease";
+  if (owner.state === "expired") return "Lease expired";
+  if (owner.state === "blocked") return "Needs Planner decision";
+  if (owner.state === "planning") return "Planner review";
+  if (!owner.role) return "No active owner";
+  return `Awaiting ${owner.roleLabel}`;
+}
+
+function ownerTiming(owner) {
+  if (!owner.lease_expires_at) return "No exclusive lease";
+  const expiry = new Date(owner.lease_expires_at);
+  if (Number.isNaN(expiry.getTime())) return "Lease time unavailable";
+  const formatted = expiry.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return owner.state === "expired" ? `Expired ${formatted}` : `Until ${formatted}`;
+}
+
 function showError(message) {
   errorBanner.textContent = message;
   errorBanner.hidden = false;
@@ -103,12 +145,16 @@ function renderBoard() {
 }
 
 function ticketCard(ticket) {
-  const agent = ticket.lease_agent_id;
+  const owner = ticketOwner(ticket);
   const selected = state.selectedTicketId === ticket.ticket_id ? " selected" : "";
   return `<button class="ticket${selected}" data-ticket-id="${escapeHtml(ticket.ticket_id)}">
     <span class="ticket-top"><span class="ticket-key">${escapeHtml(ticket.ticket_id)}</span><span class="badge">${escapeHtml(ticket.feature_title)}</span></span>
     <span class="ticket-title">${escapeHtml(ticket.title)}</span>
-    <span class="ticket-foot"><span class="meta">${ticket.evidence_count} evidence · ${ticket.dependency_count} dependencies</span><span class="avatar">${escapeHtml(initials(agent))}</span></span>
+    <span class="ticket-owner ${escapeHtml(owner.state)}" aria-label="Current owner: ${escapeHtml(owner.agent_id || "unassigned")}; ${escapeHtml(ownerStatus(owner))}">
+      <span class="avatar">${escapeHtml(initials(owner.agent_id))}</span>
+      <span class="owner-copy"><span class="owner-state">${escapeHtml(ownerStatus(owner))}</span><b>${escapeHtml(owner.agent_id || "No active agent")}</b><span class="owner-role">${escapeHtml(owner.roleLabel)} · ${escapeHtml(ownerTiming(owner))}</span></span>
+    </span>
+    <span class="ticket-foot"><span class="meta">${ticket.evidence_count} evidence · ${ticket.dependency_count} dependencies</span></span>
   </button>`;
 }
 
@@ -117,6 +163,7 @@ function selectTicket(ticketId) {
   const ticket = tickets.find(item => item.ticket_id === ticketId);
   if (!ticket) return;
   state.selectedTicketId = ticketId;
+  const owner = ticketOwner(ticket);
   boardElement.querySelectorAll(".ticket").forEach(button => button.classList.toggle("selected", button.dataset.ticketId === ticketId));
   const relatedCalls = (state.activity?.calls || []).filter(call => {
     const target = call.input_summary?.target || {};
@@ -126,9 +173,9 @@ function selectTicket(ticketId) {
     <h2>${escapeHtml(ticket.title)}</h2>
     <span class="badge">${escapeHtml(ticket.status)}</span>
     <div class="detail-grid">
-      <div class="detail-stat"><span class="meta">Role</span><b>${escapeHtml(ticket.required_role)}</b></div>
+      <div class="detail-stat"><span class="meta">Required role</span><b>${escapeHtml(roleLabel(ticket.required_role))}</b></div>
       <div class="detail-stat"><span class="meta">Version</span><b>${ticket.version}</b></div>
-      <div class="detail-stat"><span class="meta">Lease</span><b>${escapeHtml(ticket.lease_agent_id || "Unassigned")}</b></div>
+      <div class="detail-stat"><span class="meta">Current owner</span><b>${escapeHtml(owner.agent_id || "Unassigned")}</b><span class="detail-owner">${escapeHtml(owner.roleLabel)} · ${escapeHtml(ownerStatus(owner))} · ${escapeHtml(ownerTiming(owner))}</span></div>
       <div class="detail-stat"><span class="meta">Candidate</span><b>${escapeHtml(ticket.candidate_commit ? ticket.candidate_commit.slice(0, 8) : "None")}</b></div>
     </div>
     <h3>Objective</h3><p>${escapeHtml(ticket.objective)}</p>

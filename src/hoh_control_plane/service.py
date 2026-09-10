@@ -2315,6 +2315,9 @@ class ControlPlaneService:
                 (project_id,),
             ).fetchall()
             tickets = [_row(row) for row in rows]
+            for ticket in tickets:
+                assert ticket is not None
+                ticket["owner"] = self._board_ticket_owner(ticket)
             features = [
                 _row(row)
                 for row in connection.execute(
@@ -2342,6 +2345,50 @@ class ControlPlaneService:
             "columns": dict(columns),
             "recent_events": events,
         }
+
+    @staticmethod
+    def _board_ticket_owner(ticket: dict[str, Any]) -> dict[str, Any]:
+        """Describe a ticket's live exclusive lease without treating stale data as ownership."""
+        agent_id = ticket["lease_agent_id"]
+        role = ticket["lease_role"]
+        expires_at = ticket["lease_expires_at"]
+        if agent_id is None:
+            status = TicketStatus(ticket["status"])
+            return {
+                "state": (
+                    "blocked"
+                    if status is TicketStatus.BLOCKED
+                    else "planning"
+                    if status is TicketStatus.BACKLOG
+                    else "unassigned"
+                ),
+                "agent_id": None,
+                "role": None,
+                "lease_expires_at": None,
+                "awaiting_role": ControlPlaneService._board_awaiting_role(ticket),
+            }
+        expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        return {
+            "state": "active" if expiry > _now() else "expired",
+            "agent_id": agent_id,
+            "role": role,
+            "lease_expires_at": expires_at,
+            "awaiting_role": None,
+        }
+
+    @staticmethod
+    def _board_awaiting_role(ticket: dict[str, Any]) -> str | None:
+        """Return the workflow role that can move an unleased ticket forward."""
+        status = TicketStatus(ticket["status"])
+        if status in {TicketStatus.BACKLOG, TicketStatus.BLOCKED}:
+            return Role.PLANNER.value
+        if status in {TicketStatus.QA_READY, TicketStatus.QA_IN_PROGRESS}:
+            return Role.QA.value
+        if status in {TicketStatus.VERIFIED, TicketStatus.MERGE_READY}:
+            return Role.INTEGRATOR.value
+        if status in {TicketStatus.READY, TicketStatus.REWORK, TicketStatus.DEV_IN_PROGRESS}:
+            return ticket["required_role"]
+        return None
 
     def list_events(self, actor: Actor, project_id: str, after: int = 0) -> dict[str, Any]:
         require_project(actor, project_id)
