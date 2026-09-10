@@ -33,16 +33,16 @@ REQUIRED_FILES = (
 MARKDOWN_LINK = re.compile(r"\]\(([^)]+)\)")
 TOOL_REFERENCE = re.compile(r"`([a-z_]+\.[a-z_]+)`")
 BACKTICKED_PATH = re.compile(r"`([A-Za-z0-9_.][A-Za-z0-9_./-]*/[A-Za-z0-9_./-]*)`")
-# Repository assets the base skill's wakeup reference names by path, which the
-# installer therefore has to ship beside that skill.
-COMPANION_PATHS = ("deploy/codex", "deploy/claude-code", "docs/ROLE_WAKEUPS.md")
 # Directories holding material a skill tells an agent to open. A skill may also
 # name a source path, but only as an example of a ticket's write scope, which is
 # subject matter rather than something the installed agent has to be given.
 ASSET_PREFIXES = ("deploy/", "docs/")
 # Absolute local paths and credential material must never ship inside a skill.
+# A drive letter is matched with one or two backslashes because JSON and TOML
+# assets escape their separators, and a pattern that assumed a single backslash
+# is exactly how an unportable asset slipped through an earlier review.
 FORBIDDEN_CONTENT = re.compile(
-    r"(?:[A-Za-z]:\\Users\\|[A-Za-z]:\\HoH|/home/[a-z]|/Users/[a-z]|"
+    r"(?:[A-Za-z]:\\{1,2}[A-Za-z0-9_.-]|/home/[a-z]|/Users/[a-z]|"
     r"(?:bearer|api[_-]?key|password)\s*[:=]\s*\S)",
     re.IGNORECASE,
 )
@@ -67,16 +67,6 @@ def _installed_relative_paths(role_skill: str) -> set[str]:
         for path in skill_directory.rglob("*"):
             if path.is_file():
                 paths.add(path.relative_to(SKILL_ROOT).as_posix())
-    for companion in COMPANION_PATHS:
-        source = REPOSITORY_ROOT / companion
-        if source.is_dir():
-            paths.update(
-                f"{BASE_SKILL}/{companion}/{child.relative_to(source).as_posix()}"
-                for child in source.rglob("*")
-                if child.is_file()
-            )
-        else:
-            paths.add(f"{BASE_SKILL}/{companion}")
     return paths
 
 
@@ -115,39 +105,76 @@ def test_skill_references_resolve_inside_the_installed_tree() -> None:
     assert unresolved == []
 
 
-def test_backticked_repository_paths_are_shipped_with_the_skill() -> None:
-    """A skill may name a repository path only when the installer also ships it.
+def test_nothing_outside_the_skill_tree_is_installed() -> None:
+    """The installer may only distribute portable skill files.
 
-    Markdown links are not the only way a skill sends an agent to a file: the
-    wakeup reference names its templates as backticked paths. An installed agent
-    has no repository, so every such path must arrive with the install.
+    A previous attempt shipped the deploy/ and docs/ assets the wakeup reference
+    names, so an installed agent could follow it without the repository. Every
+    one of those files hardcodes an absolute host path, so distributing them put
+    local workspace topology inside the installed artifact. Until the reference
+    text itself can change, the installer stays limited to skills/.
     """
-    unshipped: list[str] = []
+    instructions = [
+        line.strip()
+        for line in INSTALL_SCRIPT.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    copies = [line for line in instructions if "Copy-Item" in line]
+
+    assert len(copies) == 1
+    assert 'Copy-Item -Path (Join-Path $source "*")' in copies[0]
+    assert not any("$repoRoot" in line and "Copy-Item" in line for line in instructions)
+
+
+def test_no_repository_asset_named_by_a_skill_is_portable_enough_to_ship() -> None:
+    """Guards the gap that let an unportable file be distributed unnoticed.
+
+    If a future change makes the installer ship an asset a skill names, this
+    records why that is unsafe today: the named files are host-specific.
+    """
+    unportable: dict[str, int] = {}
     for document in _skill_markdown():
-        skill_name = document.relative_to(SKILL_ROOT).parts[0]
-        installed = _installed_relative_paths(
-            skill_name if skill_name != BASE_SKILL else "hoh-developer"
-        )
         for candidate in BACKTICKED_PATH.findall(document.read_text(encoding="utf-8")):
             relative = candidate.rstrip("/")
             if not relative.startswith(ASSET_PREFIXES):
                 continue
-            # A file the worker is told to create is not a repository asset.
-            if not (REPOSITORY_ROOT / relative).exists():
+            source = REPOSITORY_ROOT / relative
+            if not source.exists():
                 continue
-            expected = f"{BASE_SKILL}/{relative}"
-            if not any(
-                path == expected or path.startswith(f"{expected}/") for path in installed
-            ):
-                unshipped.append(f"{document.relative_to(REPOSITORY_ROOT)} -> {candidate}")
+            named = [source] if source.is_file() else [
+                child for child in source.rglob("*") if child.is_file()
+            ]
+            for asset in named:
+                if FORBIDDEN_CONTENT.search(asset.read_text(encoding="utf-8", errors="ignore")):
+                    unportable[asset.relative_to(REPOSITORY_ROOT).as_posix()] = 1
 
-    assert unshipped == []
+    # These are exactly the assets a later scope extension has to make portable
+    # before the wakeup reference can point at installed copies of them.
+    assert set(unportable) == {
+        "deploy/claude-code/hoh-developer.mcp.json",
+        "deploy/claude-code/hoh-planner.mcp.json",
+        "deploy/claude-code/hoh-qa.mcp.json",
+        "deploy/codex/hoh-developer.toml",
+        "deploy/codex/hoh-planner.toml",
+        "deploy/codex/hoh-qa.toml",
+        "docs/ROLE_WAKEUPS.md",
+    }
 
 
-@pytest.mark.parametrize("companion", COMPANION_PATHS)
-def test_every_wakeup_asset_the_base_skill_names_exists(companion: str) -> None:
-    assert (REPOSITORY_ROOT / companion).exists()
-    assert companion.replace("/", "\\") in INSTALL_SCRIPT.read_text(encoding="utf-8")
+def test_no_installed_file_carries_a_local_path_or_credential() -> None:
+    """Scan everything the installer distributes, not only skills/*.md.
+
+    The earlier scan covered skill documents only, which is how an unportable
+    companion asset reached an installed tree without failing a test.
+    """
+    offenders: list[str] = []
+    for role_skill in ROLE_SKILLS:
+        for relative in sorted(_installed_relative_paths(role_skill)):
+            source = SKILL_ROOT / relative
+            if FORBIDDEN_CONTENT.search(source.read_text(encoding="utf-8", errors="ignore")):
+                offenders.append(relative)
+
+    assert offenders == []
 
 
 def test_skills_only_name_registered_mcp_tools() -> None:
@@ -246,14 +273,6 @@ def test_project_scope_installation_copies_the_whole_tree(
     (staged_repository / "scripts").mkdir(parents=True)
     shutil.copytree(SKILL_ROOT, staged_repository / "skills")
     shutil.copy(INSTALL_SCRIPT, staged_repository / "scripts" / INSTALL_SCRIPT.name)
-    for companion in COMPANION_PATHS:
-        source = REPOSITORY_ROOT / companion
-        destination = staged_repository / companion
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if source.is_dir():
-            shutil.copytree(source, destination)
-        else:
-            shutil.copy(source, destination)
 
     for target, client_directory in (("Codex", ".codex"), ("ClaudeCode", ".claude")):
         completed = subprocess.run(
