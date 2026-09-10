@@ -32,6 +32,14 @@ REQUIRED_FILES = (
 )
 MARKDOWN_LINK = re.compile(r"\]\(([^)]+)\)")
 TOOL_REFERENCE = re.compile(r"`([a-z_]+\.[a-z_]+)`")
+BACKTICKED_PATH = re.compile(r"`([A-Za-z0-9_.][A-Za-z0-9_./-]*/[A-Za-z0-9_./-]*)`")
+# Repository assets the base skill's wakeup reference names by path, which the
+# installer therefore has to ship beside that skill.
+COMPANION_PATHS = ("deploy/codex", "deploy/claude-code", "docs/ROLE_WAKEUPS.md")
+# Directories holding material a skill tells an agent to open. A skill may also
+# name a source path, but only as an example of a ticket's write scope, which is
+# subject matter rather than something the installed agent has to be given.
+ASSET_PREFIXES = ("deploy/", "docs/")
 # Absolute local paths and credential material must never ship inside a skill.
 FORBIDDEN_CONTENT = re.compile(
     r"(?:[A-Za-z]:\\Users\\|[A-Za-z]:\\HoH|/home/[a-z]|/Users/[a-z]|"
@@ -52,13 +60,23 @@ def _registered_tool_names() -> set[str]:
 
 
 def _installed_relative_paths(role_skill: str) -> set[str]:
-    """The files install-agent-skill.ps1 copies for one role."""
+    """The files install-agent-skill.ps1 copies for one role, relative to its target root."""
     paths: set[str] = set()
     for skill_name in (BASE_SKILL, role_skill):
         skill_directory = SKILL_ROOT / skill_name
         for path in skill_directory.rglob("*"):
             if path.is_file():
                 paths.add(path.relative_to(SKILL_ROOT).as_posix())
+    for companion in COMPANION_PATHS:
+        source = REPOSITORY_ROOT / companion
+        if source.is_dir():
+            paths.update(
+                f"{BASE_SKILL}/{companion}/{child.relative_to(source).as_posix()}"
+                for child in source.rglob("*")
+                if child.is_file()
+            )
+        else:
+            paths.add(f"{BASE_SKILL}/{companion}")
     return paths
 
 
@@ -95,6 +113,41 @@ def test_skill_references_resolve_inside_the_installed_tree() -> None:
                 unresolved.append(f"{document.relative_to(REPOSITORY_ROOT)} -> {link}")
 
     assert unresolved == []
+
+
+def test_backticked_repository_paths_are_shipped_with_the_skill() -> None:
+    """A skill may name a repository path only when the installer also ships it.
+
+    Markdown links are not the only way a skill sends an agent to a file: the
+    wakeup reference names its templates as backticked paths. An installed agent
+    has no repository, so every such path must arrive with the install.
+    """
+    unshipped: list[str] = []
+    for document in _skill_markdown():
+        skill_name = document.relative_to(SKILL_ROOT).parts[0]
+        installed = _installed_relative_paths(
+            skill_name if skill_name != BASE_SKILL else "hoh-developer"
+        )
+        for candidate in BACKTICKED_PATH.findall(document.read_text(encoding="utf-8")):
+            relative = candidate.rstrip("/")
+            if not relative.startswith(ASSET_PREFIXES):
+                continue
+            # A file the worker is told to create is not a repository asset.
+            if not (REPOSITORY_ROOT / relative).exists():
+                continue
+            expected = f"{BASE_SKILL}/{relative}"
+            if not any(
+                path == expected or path.startswith(f"{expected}/") for path in installed
+            ):
+                unshipped.append(f"{document.relative_to(REPOSITORY_ROOT)} -> {candidate}")
+
+    assert unshipped == []
+
+
+@pytest.mark.parametrize("companion", COMPANION_PATHS)
+def test_every_wakeup_asset_the_base_skill_names_exists(companion: str) -> None:
+    assert (REPOSITORY_ROOT / companion).exists()
+    assert companion.replace("/", "\\") in INSTALL_SCRIPT.read_text(encoding="utf-8")
 
 
 def test_skills_only_name_registered_mcp_tools() -> None:
@@ -193,6 +246,14 @@ def test_project_scope_installation_copies_the_whole_tree(
     (staged_repository / "scripts").mkdir(parents=True)
     shutil.copytree(SKILL_ROOT, staged_repository / "skills")
     shutil.copy(INSTALL_SCRIPT, staged_repository / "scripts" / INSTALL_SCRIPT.name)
+    for companion in COMPANION_PATHS:
+        source = REPOSITORY_ROOT / companion
+        destination = staged_repository / companion
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_dir():
+            shutil.copytree(source, destination)
+        else:
+            shutil.copy(source, destination)
 
     for target, client_directory in (("Codex", ".codex"), ("ClaudeCode", ".claude")):
         completed = subprocess.run(

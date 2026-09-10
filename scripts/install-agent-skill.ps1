@@ -43,5 +43,28 @@ foreach ($skillName in $skillNames) {
     Copy-Item -Path (Join-Path $source "*") -Destination $destination -Recurse -Force
 }
 
+# The base skill's wakeup reference names repository-relative paths. Ship those
+# assets beside the base skill so an installed agent can finish wakeup setup from
+# the installed artifact alone, instead of being sent to a repository it may not
+# have. The layout mirrors the repository so the referenced paths still resolve.
+$companionRoot = Join-Path $targetRoot "hoh-control-plane"
+$companionPaths = @("deploy\codex", "deploy\claude-code", "docs\ROLE_WAKEUPS.md")
+
+foreach ($companionPath in $companionPaths) {
+    $companionSource = Join-Path $repoRoot $companionPath
+    if (-not (Test-Path -LiteralPath $companionSource)) {
+        throw "Wakeup asset referenced by the base skill is missing: $companionSource"
+    }
+    $companionDestination = Join-Path $companionRoot $companionPath
+    $companionParent = Split-Path -Parent $companionDestination
+    New-Item -ItemType Directory -Force -Path $companionParent | Out-Null
+    if (Test-Path -LiteralPath $companionSource -PathType Container) {
+        New-Item -ItemType Directory -Force -Path $companionDestination | Out-Null
+        Copy-Item -Path (Join-Path $companionSource "*") -Destination $companionDestination -Recurse -Force
+    } else {
+        Copy-Item -Path $companionSource -Destination $companionDestination -Force
+    }
+}
+
 Write-Host "Installed $($skillNames -join ', ') for $Target at $targetRoot"
 Write-Host "Restart the agent client so it discovers the copied skills."
