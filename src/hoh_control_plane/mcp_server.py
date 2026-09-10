@@ -246,21 +246,25 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
         )
 
     @server.tool(name="feature.get_context", structured_output=True)
-    def feature_get_context(feature_ref: str) -> dict[str, Any]:
+    def feature_get_context(
+        feature_ref: str, token_budget: int | None = None
+    ) -> dict[str, Any]:
         """Resolve a typed feature reference into role-aware progress and context."""
         return invoke(
             "feature.get_context",
-            {"feature_ref": feature_ref},
-            lambda: service.get_feature_context(actor, feature_ref),
+            {"feature_ref": feature_ref, "token_budget": token_budget},
+            lambda: service.get_feature_context(actor, feature_ref, token_budget),
         )
 
     @server.tool(name="ticket.get_context", structured_output=True)
-    def ticket_get_context(ticket_ref: str) -> dict[str, Any]:
-        """Resolve a typed ticket reference including dependencies, candidate and QA evidence."""
+    def ticket_get_context(
+        ticket_ref: str, token_budget: int | None = None
+    ) -> dict[str, Any]:
+        """Resolve a role-bounded ticket packet with candidate, evidence and omissions."""
         return invoke(
             "ticket.get_context",
-            {"ticket_ref": ticket_ref},
-            lambda: service.get_ticket_context(actor, ticket_ref),
+            {"ticket_ref": ticket_ref, "token_budget": token_budget},
+            lambda: service.get_ticket_context(actor, ticket_ref, token_budget),
         )
 
     if actor.role in {Role.DEVELOPER, Role.QA, Role.INTEGRATOR}:

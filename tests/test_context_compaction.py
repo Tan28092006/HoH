@@ -1,0 +1,361 @@
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from hoh_control_plane.domain import Actor, AuthorizationError, Role, ValidationError
+from hoh_control_plane.service import MIN_TOKEN_BUDGET
+
+
+# Below the protected floor: forces every optional section out of the packet.
+TIGHT_BUDGET = 400
+# Above the protected floor: compaction can actually reach this budget.
+FIT_BUDGET = 2_500
+
+
+def _git(path: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(path), *arguments],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _repository(tmp_path: Path) -> Path:
+    repository = tmp_path / "checkout-repository"
+    repository.mkdir(parents=True)
+    _git(repository, "init", "--initial-branch=main")
+    _git(repository, "config", "user.email", "hoh-tests@example.invalid")
+    _git(repository, "config", "user.name", "HoH Tests")
+    (repository / "README.md").write_text("# Checkout\n", encoding="utf-8")
+    _git(repository, "add", "README.md")
+    _git(repository, "commit", "-m", "Initial checkout")
+    return repository
+
+
+def _version(service, actor, ticket_id: str) -> int:
+    return service.get_ticket_context(actor, ticket_id)["ticket"]["version"]
+
+
+def _rich_ticket(service, actors, seeded, tmp_path: Path, *, checkpoints: int = 12):
+    """A ticket carrying a candidate, QA findings, a worktree and a verbose history."""
+    repository = _repository(tmp_path)
+    service.configure_repository(actors["planner"], "project-1", str(repository))
+    ticket = seeded["ticket"]
+    claim = service.claim_ticket(
+        actors["developer"], ticket["ticket_id"], ticket["version"], 900
+    )
+    lease_id = claim["lease"]["lease_id"]
+    prepared = service.prepare_worktree(
+        actors["developer"], ticket["ticket_id"], lease_id, claim["ticket"]["version"]
+    )
+    worktree = Path(prepared["worktree"]["worktree_path"])
+    retry = worktree / "src" / "checkout" / "retry.txt"
+    retry.parent.mkdir(parents=True)
+    retry.write_text("safe retry\n", encoding="utf-8")
+    _git(worktree, "add", "src/checkout/retry.txt")
+    _git(worktree, "commit", "-m", "Implement safe retry")
+
+    for index in range(checkpoints):
+        service.append_progress(
+            actors["developer"],
+            ticket["ticket_id"],
+            lease_id,
+            f"Checkpoint {index}: "
+            + "verbose developer narration that a bounded packet should compact. " * 12,
+        )
+    decision = service.append_planner_context(
+        actors["planner"],
+        entry_type="design_decision",
+        content="Durable decision: a retry must stay idempotent for the same order id.",
+        ticket_id=ticket["ticket_id"],
+    )
+
+    candidate = service.submit_candidate(
+        actors["developer"],
+        ticket["ticket_id"],
+        lease_id,
+        _version(service, actors["developer"], ticket["ticket_id"]),
+        _git(worktree, "rev-parse", "HEAD"),
+        prepared["worktree"]["base_commit"],
+        prepared["worktree"]["branch_ref"],
+        ["Retry implementation is ready for QA."],
+    )
+    qa_claim = service.claim_qa(
+        actors["qa"], ticket["ticket_id"], candidate["ticket"]["version"], 900
+    )
+    service.submit_qa_verdict(
+        actors["qa"],
+        ticket["ticket_id"],
+        qa_claim["lease"]["lease_id"],
+        candidate["candidate"]["candidate_id"],
+        qa_claim["ticket"]["version"],
+        "failed",
+        [
+            {
+                "criterion": ticket["acceptance_criteria"][0],
+                "status": "failed",
+                "severity": "high",
+                "observation": "The retry still duplicates an order under load.",
+                "evidence": [
+                    {
+                        "type": "test_result",
+                        "observation": "duplicate order observed",
+                        "storage_ref": "evidence://qa/duplicate-order.json",
+                    }
+                ],
+            }
+        ],
+    )
+    return ticket, candidate, decision
+
+
+def _all_roles(actors) -> dict[str, Actor]:
+    return {
+        "developer": actors["developer"],
+        "qa": actors["qa"],
+        "planner": actors["planner"],
+        "integrator": actors["integrator"],
+    }
+
+
+def test_every_role_receives_the_bounded_context_envelope(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    ticket, _candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
+
+    for actor in _all_roles(actors).values():
+        context = service.get_ticket_context(actor, ticket["ticket_id"])
+
+        assert context["context_snapshot_id"].startswith("ctxsnap_")
+        assert context["generated_at"].endswith("Z")
+        assert context["context_version"] == context["ticket"]["version"]
+        assert context["token_budget"] > 0
+        assert isinstance(context["omitted_sections"], list)
+        assert context["role"] == actor.role.value
+
+
+def test_context_snapshot_id_is_deterministic_and_role_specific(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """The same state and packet must always compile to the same snapshot identity."""
+    ticket, _candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
+
+    first = service.get_ticket_context(
+        actors["developer"], ticket["ticket_id"], token_budget=TIGHT_BUDGET
+    )
+    second = service.get_ticket_context(
+        actors["developer"], ticket["ticket_id"], token_budget=TIGHT_BUDGET
+    )
+    qa_packet = service.get_ticket_context(
+        actors["qa"], ticket["ticket_id"], token_budget=TIGHT_BUDGET
+    )
+
+    assert first["context_snapshot_id"] == second["context_snapshot_id"]
+    assert first["omitted_sections"] == second["omitted_sections"]
+    assert first["context_snapshot_id"] != qa_packet["context_snapshot_id"]
+
+
+def test_compaction_retains_criteria_constraints_candidate_sha_and_findings(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """Over budget, the safety-critical fields survive for every role."""
+    ticket, candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
+
+    for actor in _all_roles(actors).values():
+        context = service.get_ticket_context(
+            actor, ticket["ticket_id"], token_budget=TIGHT_BUDGET
+        )
+
+        assert context["ticket"]["acceptance_criteria"] == ticket["acceptance_criteria"]
+        assert (
+            context["ticket"]["preservation_constraints"]
+            == ticket["preservation_constraints"]
+        )
+        assert context["candidate"]["commit_sha"] == candidate["candidate"]["commit_sha"]
+        assert context["known_failures"][0]["status"] == "failed"
+        assert (
+            context["known_failures"][0]["evidence"][0]["storage_ref"]
+            == "evidence://qa/duplicate-order.json"
+        )
+
+
+def test_packet_fits_a_budget_above_the_protected_floor(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    ticket, _candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
+
+    for actor in _all_roles(actors).values():
+        full = service.get_ticket_context(actor, ticket["ticket_id"])
+        bounded = service.get_ticket_context(
+            actor, ticket["ticket_id"], token_budget=FIT_BUDGET
+        )
+
+        assert full["estimated_tokens"] > FIT_BUDGET
+        assert bounded["estimated_tokens"] <= FIT_BUDGET
+        assert bounded["omitted_sections"]
+
+
+def test_role_critical_sections_survive_a_budget_below_the_protected_floor(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """A budget smaller than the safety floor shrinks the packet, never the floor."""
+    ticket, _candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
+
+    developer = service.get_ticket_context(
+        actors["developer"], ticket["ticket_id"], token_budget=MIN_TOKEN_BUDGET
+    )
+    qa = service.get_ticket_context(
+        actors["qa"], ticket["ticket_id"], token_budget=MIN_TOKEN_BUDGET
+    )
+    planner = service.get_ticket_context(
+        actors["planner"], ticket["ticket_id"], token_budget=MIN_TOKEN_BUDGET
+    )
+
+    assert developer["worktree"]["branch_ref"].startswith("hoh/")
+    assert developer["worktree"]["base_commit"]
+    assert qa["worktree"]["worktree_path"]
+    assert planner["feature"]["feature_id"] == ticket["feature_id"]
+    for context in (developer, qa, planner):
+        assert context["ticket"]["acceptance_criteria"]
+        assert context["candidate"]["commit_sha"]
+
+
+def test_developer_packet_keeps_workspace_identity_before_low_priority_sections(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    ticket, _candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
+
+    context = service.get_ticket_context(
+        actors["developer"], ticket["ticket_id"], token_budget=TIGHT_BUDGET
+    )
+
+    assert context["worktree"]["branch_ref"].startswith("hoh/")
+    assert context["worktree"]["base_commit"]
+    omitted = {entry["section"] for entry in context["omitted_sections"]}
+    assert "worktree" not in omitted
+    assert omitted
+
+
+def test_qa_packet_keeps_candidate_identity_and_test_interface(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    ticket, candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
+
+    context = service.get_ticket_context(
+        actors["qa"], ticket["ticket_id"], token_budget=TIGHT_BUDGET
+    )
+
+    assert context["candidate"]["candidate_id"] == candidate["candidate"]["candidate_id"]
+    assert context["candidate"]["base_commit"] == candidate["candidate"]["base_commit"]
+    assert context["candidate"]["branch_ref"] == candidate["candidate"]["branch_ref"]
+    omitted = {entry["section"] for entry in context["omitted_sections"]}
+    assert "candidate" not in omitted
+
+
+def test_verbose_history_becomes_a_checkpoint_with_typed_references(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """Nothing is silently deleted: dropped history is still addressable."""
+    ticket, _candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
+
+    full = service.get_ticket_context(actors["developer"], ticket["ticket_id"])
+    bounded = service.get_ticket_context(
+        actors["developer"], ticket["ticket_id"], token_budget=TIGHT_BUDGET
+    )
+
+    verbose_before = [
+        entry for entry in full["context_entries"] if entry["entry_type"] == "progress_update"
+    ]
+    assert len(verbose_before) >= 12
+
+    entries_omitted = [
+        entry for entry in bounded["omitted_sections"] if entry["section"] == "context_entries"
+    ]
+    assert len(entries_omitted) == 1
+    references = entries_omitted[0]["references"]
+    assert references
+    assert all(reference.startswith("ctx:entry:") for reference in references)
+    assert entries_omitted[0]["omitted_count"] == len(references)
+
+    retained_ids = {entry["entry_id"] for entry in bounded["context_entries"]}
+    referenced_ids = {reference.removeprefix("ctx:entry:") for reference in references}
+    original_ids = {entry["entry_id"] for entry in full["context_entries"]}
+    assert retained_ids | referenced_ids == original_ids
+
+
+def test_durable_decisions_are_never_dropped_for_verbose_history(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    ticket, _candidate, decision = _rich_ticket(service, actors, seeded, tmp_path)
+
+    context = service.get_ticket_context(
+        actors["developer"], ticket["ticket_id"], token_budget=TIGHT_BUDGET
+    )
+
+    retained = {entry["entry_id"]: entry for entry in context["context_entries"]}
+    assert decision["entry_id"] in retained
+    assert retained[decision["entry_id"]]["content"] == decision["content"]
+
+
+def test_compacted_history_preserves_entry_provenance(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """A shortened checkpoint keeps who wrote it, when, and what it points at."""
+    ticket, _candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
+
+    full = service.get_ticket_context(actors["developer"], ticket["ticket_id"])
+    bounded = service.get_ticket_context(
+        actors["developer"], ticket["ticket_id"], token_budget=TIGHT_BUDGET
+    )
+    original = {entry["entry_id"]: entry for entry in full["context_entries"]}
+
+    for entry in bounded["context_entries"]:
+        source = original[entry["entry_id"]]
+        assert entry["entry_type"] == source["entry_type"]
+        assert entry["actor_id"] == source["actor_id"]
+        assert entry["actor_role"] == source["actor_role"]
+        assert entry["created_at"] == source["created_at"]
+        assert entry["source_ref"] == source["source_ref"]
+        assert entry["artifact_commit"] == source["artifact_commit"]
+        assert source["content"].startswith(entry["content"].removesuffix("..."))
+
+
+def test_token_budget_outside_the_supported_range_is_rejected(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    ticket, _candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
+
+    with pytest.raises(ValidationError, match="budget"):
+        service.get_ticket_context(actors["developer"], ticket["ticket_id"], token_budget=1)
+
+
+def test_bounded_context_still_enforces_cross_project_authorization(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    ticket, _candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
+    outsider = Actor("dev-99", Role.DEVELOPER, frozenset({"project-2"}))
+
+    with pytest.raises(AuthorizationError):
+        service.get_ticket_context(outsider, ticket["ticket_id"], token_budget=TIGHT_BUDGET)
+
+
+def test_feature_context_exposes_the_same_bounded_envelope(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    _ticket, _candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
+
+    context = service.get_feature_context(
+        actors["planner"], "payment-retry", token_budget=TIGHT_BUDGET
+    )
+
+    assert context["context_snapshot_id"].startswith("ctxsnap_")
+    assert context["generated_at"].endswith("Z")
+    assert context["context_version"] == context["feature"]["version"]
+    assert context["token_budget"] == TIGHT_BUDGET
+    assert isinstance(context["omitted_sections"], list)
+    assert context["estimated_tokens"] <= TIGHT_BUDGET

@@ -40,6 +40,78 @@ JSON_FIELDS = {
 }
 COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
 
+MIN_TOKEN_BUDGET = 200
+MAX_TOKEN_BUDGET = 200_000
+DEFAULT_TOKEN_BUDGET = 8_000
+_CHECKPOINT_CHARS = 200
+
+# Narration accumulates without bound; every other entry type is a durable
+# decision that compaction may shorten but must never drop.
+_VERBOSE_ENTRY_TYPES = frozenset({"progress_update", "qa_test_run"})
+
+# Artifact identity and open findings stay in every packet, so these sections
+# are compacted to essentials rather than omitted.
+_PROTECTED_SECTIONS = frozenset({"ticket", "candidate", "known_failures"})
+
+# What each role cannot act safely without: a Developer that lost its branch and
+# base commit, or QA that lost the worktree it must execute in, would do damage
+# a smaller packet never justifies.
+_ROLE_REQUIRED_SECTIONS: dict[Role, frozenset[str]] = {
+    Role.DEVELOPER: frozenset({"worktree"}),
+    Role.QA: frozenset({"worktree", "test_runs"}),
+    Role.PLANNER: frozenset({"feature", "dependencies"}),
+    Role.INTEGRATOR: frozenset({"test_runs"}),
+}
+
+# Least important last: compaction walks each list in reverse.
+_TICKET_SECTION_PRIORITY: dict[Role, tuple[str, ...]] = {
+    Role.DEVELOPER: (
+        "worktree",
+        "known_failures",
+        "context_entries",
+        "candidate",
+        "dependencies",
+        "feature",
+        "test_runs",
+    ),
+    Role.QA: (
+        "candidate",
+        "test_runs",
+        "known_failures",
+        "worktree",
+        "context_entries",
+        "dependencies",
+        "feature",
+    ),
+    Role.PLANNER: (
+        "feature",
+        "dependencies",
+        "known_failures",
+        "context_entries",
+        "candidate",
+        "test_runs",
+        "worktree",
+    ),
+    Role.INTEGRATOR: (
+        "candidate",
+        "known_failures",
+        "test_runs",
+        "feature",
+        "dependencies",
+        "worktree",
+        "context_entries",
+    ),
+}
+_FALLBACK_SECTION_PRIORITY = (
+    "candidate",
+    "known_failures",
+    "context_entries",
+    "worktree",
+    "dependencies",
+    "feature",
+    "test_runs",
+)
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -51,6 +123,42 @@ def _iso(value: datetime | None = None) -> str:
 
 def _id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex}"
+
+
+def _serialize(payload: Any) -> str:
+    return json.dumps(payload, sort_keys=True, default=str)
+
+
+def _estimate_tokens(payload: Any) -> int:
+    """Deterministic size proxy; exact tokenizer parity is not what the budget guards."""
+    return len(_serialize(payload)) // 4
+
+
+def _snapshot_id(payload: dict[str, Any]) -> str:
+    """Identify a compiled packet by its content so equal state compiles equal."""
+    material = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"context_snapshot_id", "generated_at"}
+    }
+    digest = hashlib.sha256(_serialize(material).encode("utf-8")).hexdigest()
+    return f"ctxsnap_{digest[:32]}"
+
+
+def _checkpoint(text: str) -> str:
+    if len(text) <= _CHECKPOINT_CHARS:
+        return text
+    return text[:_CHECKPOINT_CHARS] + "..."
+
+
+def _validated_budget(token_budget: int | None) -> int:
+    if token_budget is None:
+        return DEFAULT_TOKEN_BUDGET
+    if not MIN_TOKEN_BUDGET <= token_budget <= MAX_TOKEN_BUDGET:
+        raise ValidationError(
+            f"Context token budget must be between {MIN_TOKEN_BUDGET} and {MAX_TOKEN_BUDGET}"
+        )
+    return token_budget
 
 
 def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -902,7 +1010,10 @@ class ControlPlaneService:
                 queues.append(queue)
         return {"agents": agents, "queues": queues}
 
-    def get_feature_context(self, actor: Actor, feature_ref: str) -> dict[str, Any]:
+    def get_feature_context(
+        self, actor: Actor, feature_ref: str, token_budget: int | None = None
+    ) -> dict[str, Any]:
+        budget = _validated_budget(token_budget)
         feature_id = self._strip_ref(feature_ref, "feature")
         with self.store.connection() as connection:
             feature = self._one(
@@ -922,9 +1033,10 @@ class ControlPlaneService:
                 if ticket["status"] in {TicketStatus.VERIFIED.value, TicketStatus.DONE.value}
                 for constraint in ticket["acceptance_criteria"]
             ]
-        return {
-            "context_snapshot_id": _id("ctxsnap"),
+        payload = {
             "context_ref": f"ctx:feature:{feature_id}:v{feature['version']}",
+            "context_version": feature["version"],
+            "role": actor.role.value,
             "feature": feature,
             "tickets": tickets,
             "verified_behaviors": verified,
@@ -933,8 +1045,19 @@ class ControlPlaneService:
                 for ticket in tickets
             ),
         }
+        return self._compile_context(
+            payload,
+            token_budget=budget,
+            priority=("tickets", "verified_behaviors"),
+            reference_prefix=f"ctx:feature:{feature_id}",
+            compactors=(self._compact_feature_rollup,),
+            protected=frozenset({"feature"}),
+        )
 
-    def get_ticket_context(self, actor: Actor, ticket_ref: str) -> dict[str, Any]:
+    def get_ticket_context(
+        self, actor: Actor, ticket_ref: str, token_budget: int | None = None
+    ) -> dict[str, Any]:
+        budget = _validated_budget(token_budget)
         ticket_id = self._strip_ref(ticket_ref, "ticket")
         with self.store.connection() as connection:
             project_id = self._project_for_ticket(connection, ticket_id)
@@ -1022,9 +1145,9 @@ class ControlPlaneService:
                     (ticket_id,),
                 ).fetchall()
             ]
-        return {
-            "context_snapshot_id": _id("ctxsnap"),
+        payload = {
             "context_ref": f"ctx:ticket:{ticket_id}:v{ticket['version']}",
+            "context_version": ticket["version"],
             "role": actor.role.value,
             "project_id": project_id,
             "feature": feature,
@@ -1035,8 +1158,191 @@ class ControlPlaneService:
             "worktree": worktree,
             "test_runs": test_runs,
             "known_failures": failures,
-            "omitted_sections": [],
         }
+        return self._compile_context(
+            payload,
+            token_budget=budget,
+            priority=_TICKET_SECTION_PRIORITY.get(actor.role, _FALLBACK_SECTION_PRIORITY),
+            reference_prefix=f"ctx:ticket:{ticket_id}",
+            compactors=(self._compact_history, self._compact_artifacts),
+            protected=_PROTECTED_SECTIONS
+            | _ROLE_REQUIRED_SECTIONS.get(actor.role, frozenset()),
+        )
+
+    def _compile_context(
+        self,
+        payload: dict[str, Any],
+        *,
+        token_budget: int,
+        priority: tuple[str, ...],
+        reference_prefix: str,
+        compactors: tuple[Any, ...],
+        protected: frozenset[str],
+    ) -> dict[str, Any]:
+        """Fit a packet to its budget, shortening narration before dropping sections.
+
+        Protected sections are never dropped, so a packet can still exceed a budget
+        smaller than that floor: a Developer without acceptance criteria, or QA
+        without the frozen candidate SHA, is more dangerous than an oversized packet.
+        """
+        omitted: list[dict[str, Any]] = []
+        payload["token_budget"] = token_budget
+        payload["omitted_sections"] = omitted
+        payload["generated_at"] = _iso()
+        # Same-width placeholders so the envelope is measured, not added after the
+        # packet has already been fitted to its budget.
+        payload["estimated_tokens"] = token_budget
+        payload["context_snapshot_id"] = f"ctxsnap_{'0' * 32}"
+
+        for compact in compactors:
+            if _estimate_tokens(payload) <= token_budget:
+                break
+            compact(payload, omitted, token_budget)
+
+        for section in reversed(priority):
+            if _estimate_tokens(payload) <= token_budget:
+                break
+            if section == "context_entries":
+                self._drop_verbose_entries(payload, omitted, token_budget)
+                continue
+            if section in protected:
+                continue
+            value = payload.get(section)
+            if not value:
+                continue
+            omitted.append(
+                {
+                    "section": section,
+                    "reason": "token_budget",
+                    "omitted_count": len(value) if isinstance(value, list) else 1,
+                    "references": [f"{reference_prefix}:{section}"],
+                }
+            )
+            payload[section] = [] if isinstance(value, list) else None
+
+        omitted.sort(key=lambda entry: (entry["section"], entry["reason"]))
+        payload["estimated_tokens"] = _estimate_tokens(payload)
+        payload["context_snapshot_id"] = _snapshot_id(payload)
+        return payload
+
+    def _compact_history(
+        self, payload: dict[str, Any], omitted: list[dict[str, Any]], token_budget: int
+    ) -> None:
+        """Shorten narration to a checkpoint, keeping every entry's provenance."""
+        references = [
+            f"ctx:entry:{entry['entry_id']}"
+            for entry in payload.get("context_entries") or []
+            if entry["entry_type"] in _VERBOSE_ENTRY_TYPES
+            and len(entry["content"]) > _CHECKPOINT_CHARS
+        ]
+        if not references:
+            return
+        for entry in payload["context_entries"]:
+            if entry["entry_type"] in _VERBOSE_ENTRY_TYPES:
+                entry["content"] = _checkpoint(entry["content"])
+        omitted.append(
+            {
+                "section": "context_entries.content",
+                "reason": "compacted_to_checkpoint",
+                "omitted_count": len(references),
+                "references": references,
+            }
+        )
+
+    def _compact_artifacts(
+        self, payload: dict[str, Any], omitted: list[dict[str, Any]], token_budget: int
+    ) -> None:
+        """Keep artifact identity and finding state; shorten only their narration."""
+        candidate = payload.get("candidate")
+        if candidate and candidate.get("developer_claims"):
+            omitted.append(
+                {
+                    "section": "candidate.developer_claims",
+                    "reason": "compacted_to_reference",
+                    "omitted_count": len(candidate["developer_claims"]),
+                    "references": [
+                        f"ctx:candidate:{candidate['candidate_id']}:developer_claims"
+                    ],
+                }
+            )
+            candidate["developer_claims"] = []
+
+        references = [
+            f"ctx:finding:{finding['finding_id']}"
+            for finding in payload.get("known_failures") or []
+            if len(finding["observation"]) > _CHECKPOINT_CHARS
+        ]
+        if not references:
+            return
+        for finding in payload["known_failures"]:
+            finding["observation"] = _checkpoint(finding["observation"])
+        omitted.append(
+            {
+                "section": "known_failures.observation",
+                "reason": "compacted_to_checkpoint",
+                "omitted_count": len(references),
+                "references": references,
+            }
+        )
+
+    def _compact_feature_rollup(
+        self, payload: dict[str, Any], omitted: list[dict[str, Any]], token_budget: int
+    ) -> None:
+        """Reduce feature tickets to a rollup row plus a typed reference each."""
+        tickets = payload.get("tickets") or []
+        if not tickets:
+            return
+        payload["tickets"] = [
+            {
+                "ticket_id": ticket["ticket_id"],
+                "title": ticket["title"],
+                "status": ticket["status"],
+                "priority": ticket["priority"],
+                "required_role": ticket["required_role"],
+                "dependency_ids": ticket["dependency_ids"],
+            }
+            for ticket in tickets
+        ]
+        omitted.append(
+            {
+                "section": "tickets.detail",
+                "reason": "compacted_to_rollup",
+                "omitted_count": len(tickets),
+                "references": [f"ctx:ticket:{ticket['ticket_id']}" for ticket in tickets],
+            }
+        )
+
+    def _drop_verbose_entries(
+        self, payload: dict[str, Any], omitted: list[dict[str, Any]], token_budget: int
+    ) -> None:
+        """Drop the oldest narration first; durable decisions always stay."""
+        entries = payload.get("context_entries")
+        if not entries:
+            return
+        # Attached before dropping so each reference it keeps is itself measured;
+        # otherwise the packet is refitted and then grown past its budget again.
+        record: dict[str, Any] = {
+            "section": "context_entries",
+            "reason": "token_budget",
+            "omitted_count": 0,
+            "references": [],
+        }
+        omitted.append(record)
+        while _estimate_tokens(payload) > token_budget:
+            index = next(
+                (
+                    position
+                    for position, entry in enumerate(entries)
+                    if entry["entry_type"] in _VERBOSE_ENTRY_TYPES
+                ),
+                None,
+            )
+            if index is None:
+                break
+            record["references"].append(f"ctx:entry:{entries.pop(index)['entry_id']}")
+            record["omitted_count"] += 1
+        if not record["references"]:
+            omitted.remove(record)
 
     def claim_ticket(
         self,

@@ -554,3 +554,33 @@ async def test_invoke_normalizes_a_raw_sqlite_error_instead_of_leaking_it(
 
     assert "foreign key" not in str(excinfo.value).lower()
     assert "constraint" not in str(excinfo.value).lower()
+
+
+@pytest.mark.anyio
+async def test_ticket_context_tool_accepts_a_declared_token_budget(
+    service, actors, seeded
+) -> None:
+    """The caller declares the budget; the packet reports how it was fitted."""
+    ticket_id = seeded["ticket"]["ticket_id"]
+    developer_server = create_mcp_server(service, actors["developer"])
+
+    _content, default_packet = await developer_server.call_tool(
+        "ticket.get_context", {"ticket_ref": f"ticket:{ticket_id}"}
+    )
+    _bounded_content, bounded_packet = await developer_server.call_tool(
+        "ticket.get_context",
+        {"ticket_ref": f"ticket:{ticket_id}", "token_budget": 300},
+    )
+
+    assert default_packet["token_budget"] > bounded_packet["token_budget"]
+    assert bounded_packet["token_budget"] == 300
+    assert bounded_packet["context_version"] == bounded_packet["ticket"]["version"]
+    assert bounded_packet["context_snapshot_id"].startswith("ctxsnap_")
+    assert bounded_packet["generated_at"].endswith("Z")
+    assert isinstance(bounded_packet["omitted_sections"], list)
+
+    with pytest.raises(ToolError):
+        await developer_server.call_tool(
+            "ticket.get_context",
+            {"ticket_ref": f"ticket:{ticket_id}", "token_budget": 1},
+        )
