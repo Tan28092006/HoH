@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 from dataclasses import dataclass
@@ -11,6 +12,12 @@ from hoh_control_plane.domain import ValidationError
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 _GIT_COMMAND_TIMEOUT_SECONDS = 15
 
+CLEAN_CHECKPOINT = "clean_checkpoint"
+DIRTY = "dirty"
+MISSING = "missing"
+UNVERIFIED = "unverified"
+BASE_DRIFT = "base_drift"
+
 
 @dataclass(frozen=True, slots=True)
 class PreparedWorktree:
@@ -18,6 +25,23 @@ class PreparedWorktree:
     worktree_path: str
     branch_ref: str
     base_commit: str
+
+
+@dataclass(frozen=True, slots=True)
+class WorktreeCheckpoint:
+    """Read-only verdict about an abandoned worktree a replacement may inherit."""
+
+    status: str
+    head_commit: str | None
+    detail: str
+    untracked_paths: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryArtifact:
+    path: str
+    sha256: str
+    byte_size: int
 
 
 class GitWorktreeManager:
@@ -101,6 +125,125 @@ class GitWorktreeManager:
         if result.returncode not in {0, 1}:
             raise ValidationError("Unable to determine Git commit ancestry")
         return result.returncode == 0
+
+    def inspect_checkpoint(
+        self,
+        *,
+        repository_path: str,
+        worktree_path: str,
+        expected_branch: str,
+        expected_base_commit: str,
+        default_branch: str,
+    ) -> WorktreeCheckpoint:
+        """Classify an abandoned worktree without mutating it or trusting its contents.
+
+        Every unhappy path returns a verdict instead of raising so a takeover can
+        fail closed on code transfer and still record why.
+        """
+        try:
+            worktree = self._existing_directory(worktree_path, "worktree")
+        except ValidationError:
+            return WorktreeCheckpoint(
+                MISSING, None, "The prior worktree directory is missing."
+            )
+        if not worktree.is_relative_to(self.worktree_root):
+            return WorktreeCheckpoint(
+                UNVERIFIED, None, "The prior worktree is outside the HoH worktree root."
+            )
+        try:
+            repository = Path(self.validate_repository(repository_path))
+            toplevel = self._git(worktree, "rev-parse", "--show-toplevel", check=False)
+            if toplevel.returncode != 0 or Path(toplevel.stdout.strip()).resolve() != worktree:
+                return WorktreeCheckpoint(
+                    UNVERIFIED, None, "The prior worktree is no longer a Git worktree root."
+                )
+            active_branch = self._git(worktree, "branch", "--show-current", check=False)
+            if active_branch.stdout.strip() != expected_branch:
+                return WorktreeCheckpoint(
+                    UNVERIFIED, None, "The prior worktree left its assigned branch."
+                )
+            head = self._resolve_commit(worktree, "HEAD")
+            # --untracked-files=all names each abandoned file instead of collapsing
+            # a whole directory to one entry, so nothing is silently lost.
+            status = self._git(
+                worktree, "status", "--porcelain", "--untracked-files=all", check=False
+            )
+            if status.returncode != 0:
+                return WorktreeCheckpoint(
+                    UNVERIFIED, head, "The prior worktree status could not be read."
+                )
+            if status.stdout.strip():
+                return WorktreeCheckpoint(
+                    DIRTY,
+                    head,
+                    "The prior worktree holds uncommitted changes.",
+                    self._untracked_paths(status.stdout),
+                )
+            if not self._is_ancestor(repository, expected_base_commit, head):
+                return WorktreeCheckpoint(
+                    UNVERIFIED,
+                    head,
+                    "The prior branch head does not descend from its recorded base commit.",
+                )
+            if not self._is_ancestor(repository, f"refs/heads/{default_branch}", head):
+                return WorktreeCheckpoint(
+                    BASE_DRIFT,
+                    head,
+                    "The prior checkpoint no longer descends from the default branch.",
+                )
+        except ValidationError as error:
+            return WorktreeCheckpoint(
+                UNVERIFIED, None, f"The prior worktree could not be verified: {error}"
+            )
+        return WorktreeCheckpoint(
+            CLEAN_CHECKPOINT, head, "The prior worktree is clean at a verified checkpoint."
+        )
+
+    def capture_recovery_patch(
+        self, *, worktree_path: str, destination: Path
+    ) -> RecoveryArtifact | None:
+        """Persist a private checksummed patch of tracked uncommitted work.
+
+        The old worktree is only read: nothing is staged, committed or merged, and
+        the payload never reaches the database or an activity log.
+        """
+        try:
+            worktree = self._existing_directory(worktree_path, "worktree")
+        except ValidationError:
+            return None
+        patch = self._git(worktree, "diff", "HEAD", "--binary", check=False)
+        if patch.returncode != 0 or not patch.stdout:
+            return None
+        payload = patch.stdout.encode("utf-8")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+        return RecoveryArtifact(
+            path=str(destination),
+            sha256=hashlib.sha256(payload).hexdigest(),
+            byte_size=len(payload),
+        )
+
+    def _is_ancestor(self, repository: Path, ancestor: str, descendant: str) -> bool:
+        result = self._git(
+            repository,
+            "merge-base",
+            "--is-ancestor",
+            self._resolve_commit(repository, ancestor),
+            descendant,
+            check=False,
+        )
+        if result.returncode not in {0, 1}:
+            raise ValidationError("Unable to determine Git commit ancestry")
+        return result.returncode == 0
+
+    @staticmethod
+    def _untracked_paths(status_output: str) -> tuple[str, ...]:
+        paths = {
+            line[3:].strip().strip('"').replace("\\", "/")
+            for line in status_output.splitlines()
+            if line.startswith("?? ")
+        }
+        return tuple(sorted(paths))
 
     def verify_candidate(
         self,

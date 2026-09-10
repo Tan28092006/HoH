@@ -6,6 +6,7 @@ import re
 import sqlite3
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -21,10 +22,12 @@ from hoh_control_plane.domain import (
     require_project,
     require_role,
 )
-from hoh_control_plane.git_worktrees import GitWorktreeManager
+from hoh_control_plane.git_worktrees import CLEAN_CHECKPOINT, DIRTY, GitWorktreeManager
 from hoh_control_plane.qa_runner import ProjectTestRunner, TestExecution
 from hoh_control_plane.store import SQLiteStore
 
+
+_SAFE_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 JSON_FIELDS = {
     "acceptance_criteria",
@@ -161,6 +164,19 @@ def _validated_budget(token_budget: int | None) -> int:
     return token_budget
 
 
+def _safe_path_segment(value: str, field: str) -> str:
+    if not _SAFE_PATH_SEGMENT_RE.fullmatch(value):
+        raise ValidationError(f"{field} cannot be used in a recovery artifact path")
+    return value
+
+
+def _bounded_join(values: tuple[str, ...] | list[str], limit: int = 20) -> str:
+    joined = ", ".join(values[:limit])
+    if len(values) > limit:
+        joined += f", and {len(values) - limit} more"
+    return joined
+
+
 def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
@@ -177,6 +193,9 @@ class ControlPlaneService:
         self.store = store
         self.git_worktrees = GitWorktreeManager(store.path.parent / "worktrees")
         self.project_tests = ProjectTestRunner(store.path.parent / "evidence")
+        # Recovery patches stay outside the worktree root so no agent can reach
+        # another agent's abandoned work through its own assigned worktree.
+        self.recovery_root = store.path.parent / "recovery"
 
     def create_project(
         self,
@@ -1369,9 +1388,27 @@ class ControlPlaneService:
         lease_id: str,
         expected_version: int,
     ) -> dict[str, Any]:
-        """Create one ticket-and-agent-bound Git worktree for active Developer work."""
+        """Create one ticket-and-agent-bound Git worktree for active Developer work.
+
+        Inspecting a replaced Developer's worktree shells out to Git, so it runs
+        between two short transactions rather than inside the write lock.
+        """
         require_role(actor, Role.DEVELOPER)
-        with self.store.connection(immediate=True) as connection:
+        snapshot = self._worktree_preparation_snapshot(
+            actor, ticket_id, lease_id, expected_version
+        )
+        if snapshot["reused"] is not None:
+            return snapshot["reused"]
+        takeover = self._plan_worktree_takeover(snapshot)
+        return self._assign_worktree(
+            actor, ticket_id, lease_id, expected_version, snapshot, takeover
+        )
+
+    def _worktree_preparation_snapshot(
+        self, actor: Actor, ticket_id: str, lease_id: str, expected_version: int
+    ) -> dict[str, Any]:
+        """Authorize the request and read what the Git inspection needs."""
+        with self.store.connection() as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             self._expect_version(ticket, expected_version)
             if ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:
@@ -1394,32 +1431,113 @@ class ControlPlaneService:
                     "SELECT * FROM worktrees WHERE ticket_id = ?", (ticket_id,)
                 ).fetchone()
             )
-            handoff_mode: str | None = None
-            start_commit: str | None = None
-            if existing is not None:
-                if existing["agent_id"] == actor.agent_id:
-                    return {"ticket": ticket, "worktree": existing, "reused": True}
-                if ticket["candidate_commit"] is None:
-                    raise ConflictError(
-                        "Ticket worktree can only hand off after a frozen candidate exists"
-                    )
-                candidate_is_current = self.git_worktrees.commit_descends_from(
-                    repository_path=repository["repository_path"],
-                    ancestor_commit=f"refs/heads/{project['default_branch']}",
-                    descendant_commit=ticket["candidate_commit"],
+            reused = None
+            if existing is not None and existing["agent_id"] == actor.agent_id:
+                reused = {"ticket": ticket, "worktree": existing, "reused": True}
+            return {
+                "ticket": ticket,
+                "project_id": project_id,
+                "project": project,
+                "repository": repository,
+                "existing": existing,
+                "reused": reused,
+            }
+
+    def _plan_worktree_takeover(self, snapshot: dict[str, Any]) -> dict[str, Any] | None:
+        """Decide what a replacement Developer may safely inherit from a predecessor."""
+        existing = snapshot["existing"]
+        if existing is None:
+            return None
+        ticket = snapshot["ticket"]
+        repository_path = snapshot["repository"]["repository_path"]
+        default_branch = snapshot["project"]["default_branch"]
+        if ticket["candidate_commit"] is not None:
+            candidate_is_current = self.git_worktrees.commit_descends_from(
+                repository_path=repository_path,
+                ancestor_commit=f"refs/heads/{default_branch}",
+                descendant_commit=ticket["candidate_commit"],
+            )
+            return {
+                "handoff_mode": "candidate_continuation" if candidate_is_current else "rebase_required",
+                "start_commit": ticket["candidate_commit"] if candidate_is_current else None,
+                "checkpoint": None,
+                "artifact": None,
+            }
+
+        checkpoint = self.git_worktrees.inspect_checkpoint(
+            repository_path=repository_path,
+            worktree_path=existing["worktree_path"],
+            expected_branch=existing["branch_ref"],
+            expected_base_commit=existing["base_commit"],
+            default_branch=default_branch,
+        )
+        if checkpoint.status == CLEAN_CHECKPOINT:
+            return {
+                "handoff_mode": "checkpoint_continuation",
+                "start_commit": checkpoint.head_commit,
+                "checkpoint": checkpoint,
+                "artifact": None,
+            }
+        artifact = None
+        if checkpoint.status == DIRTY:
+            artifact = self.git_worktrees.capture_recovery_patch(
+                worktree_path=existing["worktree_path"],
+                destination=self._recovery_artifact_path(
+                    snapshot["project_id"], ticket["ticket_id"], existing["agent_id"]
+                ),
+            )
+        return {
+            "handoff_mode": "recovery_required",
+            "start_commit": None,
+            "checkpoint": checkpoint,
+            "artifact": artifact,
+        }
+
+    def _recovery_artifact_path(self, project_id: str, ticket_id: str, agent_id: str) -> Path:
+        segments = [
+            _safe_path_segment(project_id, "project_id"),
+            _safe_path_segment(ticket_id, "ticket_id"),
+            _safe_path_segment(agent_id, "agent_id"),
+        ]
+        return self.recovery_root.joinpath(*segments) / f"{_id('recovery')}.patch"
+
+    def _assign_worktree(
+        self,
+        actor: Actor,
+        ticket_id: str,
+        lease_id: str,
+        expected_version: int,
+        snapshot: dict[str, Any],
+        takeover: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Create the new worktree and record the assignment under one write lock."""
+        with self.store.connection(immediate=True) as connection:
+            ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._expect_version(ticket, expected_version)
+            if ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:
+                raise ConflictError("Worktrees can only be prepared for active development work")
+            self._require_active_lease(connection, actor, ticket_id, lease_id)
+            existing = _row(
+                connection.execute(
+                    "SELECT * FROM worktrees WHERE ticket_id = ?", (ticket_id,)
+                ).fetchone()
+            )
+            if existing is not None and existing["agent_id"] == actor.agent_id:
+                return {"ticket": ticket, "worktree": existing, "reused": True}
+            inspected = None if snapshot["existing"] is None else snapshot["existing"]["branch_ref"]
+            current = None if existing is None else existing["branch_ref"]
+            if current != inspected:
+                raise ConflictError(
+                    "Ticket worktree assignment changed while it was being prepared"
                 )
-                if candidate_is_current:
-                    start_commit = ticket["candidate_commit"]
-                    handoff_mode = "candidate_continuation"
-                else:
-                    handoff_mode = "rebase_required"
+
             prepared = self.git_worktrees.prepare(
-                repository_path=repository["repository_path"],
-                default_branch=project["default_branch"],
+                repository_path=snapshot["repository"]["repository_path"],
+                default_branch=snapshot["project"]["default_branch"],
                 project_id=project_id,
                 ticket_id=ticket_id,
                 agent_id=actor.agent_id,
-                start_commit=start_commit,
+                start_commit=None if takeover is None else takeover["start_commit"],
             )
             timestamp = _iso()
             if existing is None:
@@ -1443,7 +1561,7 @@ class ControlPlaneService:
                     ),
                 )
                 event_type = "worktree.prepared"
-                event_payload = {"branch_ref": prepared.branch_ref}
+                event_payload: dict[str, Any] = {"branch_ref": prepared.branch_ref}
             else:
                 connection.execute(
                     """
@@ -1463,39 +1581,55 @@ class ControlPlaneService:
                         ticket_id,
                     ),
                 )
+                connection.execute(
+                    """
+                    UPDATE worktree_assignments SET released_at = ?
+                    WHERE ticket_id = ? AND released_at IS NULL
+                    """,
+                    (timestamp, ticket_id),
+                )
+                assert takeover is not None
                 event_type = "worktree.handed_off"
                 event_payload = {
                     "previous_agent_id": existing["agent_id"],
                     "previous_branch_ref": existing["branch_ref"],
                     "branch_ref": prepared.branch_ref,
                     "rejected_candidate_commit": ticket["candidate_commit"],
-                    "seed_commit": start_commit or prepared.base_commit,
-                    "handoff_mode": handoff_mode,
+                    "seed_commit": takeover["start_commit"] or prepared.base_commit,
+                    "handoff_mode": takeover["handoff_mode"],
                 }
-                if handoff_mode == "rebase_required":
-                    connection.execute(
-                        """
-                        INSERT INTO context_entries
-                            (entry_id, project_id, feature_id, ticket_id, entry_type, content,
-                             source_ref, artifact_commit, actor_id, actor_role, created_at)
-                        VALUES (?, ?, ?, ?, 'worktree_handoff', ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            _id("ctx"),
-                            project_id,
-                            ticket["feature_id"],
-                            ticket_id,
-                            "Rejected candidate diverges from the current default branch. "
-                            "The new Developer worktree starts at current main; inspect the "
-                            "frozen candidate and explicitly rebase, cherry-pick, or reimplement "
-                            "the required changes. No automatic merge was performed.",
-                            f"candidate:{ticket['candidate_commit']}",
-                            ticket["candidate_commit"],
-                            actor.agent_id,
-                            actor.role.value,
-                            timestamp,
-                        ),
-                    )
+                self._record_handoff_context(
+                    connection,
+                    actor,
+                    project_id,
+                    ticket,
+                    existing,
+                    prepared,
+                    takeover,
+                    snapshot["project"]["default_branch"],
+                    timestamp,
+                )
+            connection.execute(
+                """
+                INSERT INTO worktree_assignments
+                    (assignment_id, ticket_id, project_id, agent_id, worktree_path, branch_ref,
+                     base_commit, seed_commit, handoff_mode, previous_agent_id, assigned_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _id("wtassign"),
+                    ticket_id,
+                    project_id,
+                    actor.agent_id,
+                    prepared.worktree_path,
+                    prepared.branch_ref,
+                    prepared.base_commit,
+                    None if takeover is None else takeover["start_commit"],
+                    None if takeover is None else takeover["handoff_mode"],
+                    None if existing is None else existing["agent_id"],
+                    timestamp,
+                ),
+            )
             self._event(
                 connection,
                 actor,
@@ -1510,6 +1644,91 @@ class ControlPlaneService:
                 connection, "SELECT * FROM worktrees WHERE ticket_id = ?", (ticket_id,)
             )
             return {"ticket": ticket, "worktree": worktree, "reused": False}
+
+    def _record_handoff_context(
+        self,
+        connection: sqlite3.Connection,
+        actor: Actor,
+        project_id: str,
+        ticket: dict[str, Any],
+        previous: dict[str, Any],
+        prepared: Any,
+        takeover: dict[str, Any],
+        default_branch: str,
+        timestamp: str,
+    ) -> None:
+        """Leave the replacement a durable, redacted account of what was inherited."""
+        mode = takeover["handoff_mode"]
+        if mode == "candidate_continuation":
+            return
+        lineage = (
+            f"Replaced Developer {previous['agent_id']} held branch {previous['branch_ref']} "
+            f"at base {previous['base_commit']}."
+        )
+        if mode == "rebase_required":
+            entry_type = "worktree_handoff"
+            source_ref = f"candidate:{ticket['candidate_commit']}"
+            artifact_commit = ticket["candidate_commit"]
+            content = (
+                "Rejected candidate diverges from the current default branch. "
+                "The new Developer worktree starts at current main; inspect the "
+                "frozen candidate and explicitly rebase, cherry-pick, or reimplement "
+                "the required changes. No automatic merge was performed. " + lineage
+            )
+        elif mode == "checkpoint_continuation":
+            entry_type = "worktree_handoff"
+            source_ref = f"worktree:{previous['branch_ref']}"
+            artifact_commit = takeover["start_commit"]
+            content = (
+                f"{lineage} That worktree was clean at verified checkpoint "
+                f"{takeover['start_commit']}, so replacement branch {prepared.branch_ref} "
+                "is seeded from that commit. The prior worktree stays read-only and its "
+                "branch can no longer freeze a candidate."
+            )
+        else:
+            entry_type = "worktree_recovery"
+            checkpoint = takeover["checkpoint"]
+            artifact = takeover["artifact"]
+            source_ref = None if artifact is None else artifact.path
+            artifact_commit = checkpoint.head_commit
+            parts = [
+                f"Failed closed on code transfer. {lineage} {checkpoint.detail} "
+                f"Replacement branch {prepared.branch_ref} starts from current "
+                f"{default_branch}; nothing from the prior worktree was trusted, "
+                "staged, committed or merged."
+            ]
+            if artifact is not None:
+                parts.append(
+                    f"A private recovery patch was retained: sha256={artifact.sha256} "
+                    f"bytes={artifact.byte_size}. Review and apply it explicitly, or discard it."
+                )
+            if checkpoint.untracked_paths:
+                parts.append(
+                    "Untracked paths left behind (names only): "
+                    + _bounded_join(checkpoint.untracked_paths)
+                )
+            content = " ".join(parts)
+        connection.execute(
+            """
+            INSERT INTO context_entries
+                (entry_id, project_id, feature_id, ticket_id, entry_type, content,
+                 source_ref, artifact_commit, actor_id, actor_role, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _id("ctx"),
+                project_id,
+                ticket["feature_id"],
+                ticket["ticket_id"],
+                entry_type,
+                content,
+                source_ref,
+                artifact_commit,
+                actor.agent_id,
+                actor.role.value,
+                timestamp,
+            ),
+        )
 
     def queue_worktree_provision(
         self,

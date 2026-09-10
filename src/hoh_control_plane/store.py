@@ -169,6 +169,26 @@ CREATE TABLE IF NOT EXISTS worktrees (
     last_verified_at TEXT
 );
 
+-- `worktrees` holds only the single active assignment, so a takeover would
+-- otherwise erase who previously held the ticket. Assignment history is kept
+-- append-only beside it and is never rewritten.
+CREATE TABLE IF NOT EXISTS worktree_assignments (
+    assignment_id TEXT PRIMARY KEY,
+    ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    agent_id TEXT NOT NULL,
+    worktree_path TEXT NOT NULL,
+    branch_ref TEXT NOT NULL,
+    base_commit TEXT NOT NULL,
+    seed_commit TEXT,
+    handoff_mode TEXT,
+    previous_agent_id TEXT,
+    assigned_at TEXT NOT NULL,
+    released_at TEXT
+);
+CREATE INDEX IF NOT EXISTS worktree_assignments_ticket_assigned
+    ON worktree_assignments(ticket_id, assigned_at);
+
 -- Worktree creation can invoke external Git operations. Keep that work out
 -- of a synchronous MCP request while preserving its Developer lease and
 -- a durable polling record.

@@ -1,14 +1,26 @@
 from __future__ import annotations
 
+import hashlib
+import shutil
 import subprocess
 from unittest.mock import patch
 from pathlib import Path
 
 import pytest
 
-from hoh_control_plane.domain import ConflictError, ValidationError
+from hoh_control_plane.domain import (
+    Actor,
+    AuthorizationError,
+    ConflictError,
+    DomainError,
+    Role,
+    ValidationError,
+)
 from hoh_control_plane.git_worktrees import GitWorktreeManager
 from hoh_control_plane import worktree_worker
+
+
+_SCHEDULER = Actor("scheduler-01", Role.ADMIN, frozenset({"*"}))
 
 
 def _git(path: Path, *arguments: str) -> str:
@@ -520,4 +532,292 @@ def test_planner_cannot_change_repository_after_a_ticket_has_a_worktree(
     with pytest.raises(ConflictError, match="cannot change"):
         service.configure_repository(
             actors["planner"], "project-1", str(replacement_repository)
+        )
+
+
+def _abandoned_first_developer(service, actors, seeded, tmp_path: Path):
+    """Give the first Developer a worktree they will lose before freezing a candidate."""
+    repository = _repository(tmp_path)
+    service.configure_repository(actors["planner"], "project-1", str(repository))
+    ticket = seeded["ticket"]
+    claim = service.claim_ticket(
+        actors["developer"], ticket["ticket_id"], ticket["version"], 900
+    )
+    worktree = service.prepare_worktree(
+        actors["developer"],
+        ticket["ticket_id"],
+        claim["lease"]["lease_id"],
+        claim["ticket"]["version"],
+    )["worktree"]
+    return repository, ticket, claim, worktree
+
+
+def _expire_lease(service, lease_id: str) -> None:
+    with service.store.connection(immediate=True) as connection:
+        connection.execute(
+            "UPDATE leases SET expires_at = ? WHERE lease_id = ?",
+            ("2000-01-01T00:00:00+00:00", lease_id),
+        )
+
+
+def _take_over(service, actors, ticket_id: str, agent: str = "developer_2"):
+    """Recover the expired lease the way the scheduler does, then claim as a replacement."""
+    sweep = service.sweep_expired_leases(_SCHEDULER)
+    version = next(
+        entry["version"] for entry in sweep["requeued"] if entry["ticket_id"] == ticket_id
+    )
+    claim = service.claim_ticket(actors[agent], ticket_id, version, 900)
+    prepared = service.prepare_worktree(
+        actors[agent], ticket_id, claim["lease"]["lease_id"], claim["ticket"]["version"]
+    )
+    return claim, prepared
+
+
+def _context_entries(service, actor, ticket_id: str, entry_type: str) -> list[dict]:
+    entries = service.get_ticket_context(actor, f"ticket:{ticket_id}")["context_entries"]
+    return [entry for entry in entries if entry["entry_type"] == entry_type]
+
+
+def test_expired_lease_takeover_seeds_the_replacement_from_a_clean_checkpoint(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """Committed work must survive a lost lease even with no frozen candidate."""
+    repository, ticket, first_claim, first_worktree = _abandoned_first_developer(
+        service, actors, seeded, tmp_path
+    )
+    old_path = Path(first_worktree["worktree_path"])
+    retry_path = old_path / "src" / "checkout" / "retry.txt"
+    retry_path.parent.mkdir(parents=True)
+    retry_path.write_text("checkpointed work\n", encoding="utf-8")
+    _git(old_path, "add", "src/checkout/retry.txt")
+    _git(old_path, "commit", "-m", "Checkpoint before the lease expired")
+    checkpoint = _git(old_path, "rev-parse", "HEAD")
+    _expire_lease(service, first_claim["lease"]["lease_id"])
+
+    _claim, prepared = _take_over(service, actors, ticket["ticket_id"])
+    replacement = prepared["worktree"]
+    new_path = Path(replacement["worktree_path"])
+
+    assert replacement["agent_id"] == "dev-02"
+    assert new_path != old_path
+    assert replacement["branch_ref"] != first_worktree["branch_ref"]
+    assert _git(new_path, "rev-parse", "HEAD") == checkpoint
+    assert (new_path / "src" / "checkout" / "retry.txt").read_text(
+        encoding="utf-8"
+    ) == "checkpointed work\n"
+    assert _git(old_path, "rev-parse", "HEAD") == checkpoint
+
+    handoff = _context_entries(
+        service, actors["developer_2"], ticket["ticket_id"], "worktree_handoff"
+    )
+    assert len(handoff) == 1
+    assert handoff[0]["artifact_commit"] == checkpoint
+    content = handoff[0]["content"]
+    assert "dev-01" in content
+    assert first_worktree["branch_ref"] in content
+    assert first_worktree["base_commit"] in content
+
+
+def test_takeover_fails_closed_and_records_recovery_evidence_for_a_dirty_worktree(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """Uncommitted work is never trusted, never silently lost and never logged raw."""
+    repository, ticket, first_claim, first_worktree = _abandoned_first_developer(
+        service, actors, seeded, tmp_path
+    )
+    old_path = Path(first_worktree["worktree_path"])
+    (old_path / "README.md").write_text(
+        "# Checkout\nuncommitted-secret-body\n", encoding="utf-8"
+    )
+    stray = old_path / "src" / "checkout" / "stray.txt"
+    stray.parent.mkdir(parents=True)
+    stray.write_text("untracked-secret-body\n", encoding="utf-8")
+    current_main = _git(repository, "rev-parse", "main")
+    _expire_lease(service, first_claim["lease"]["lease_id"])
+
+    _claim, prepared = _take_over(service, actors, ticket["ticket_id"])
+    new_path = Path(prepared["worktree"]["worktree_path"])
+
+    assert _git(new_path, "rev-parse", "HEAD") == current_main
+    assert prepared["worktree"]["base_commit"] == current_main
+    assert not (new_path / "src" / "checkout" / "stray.txt").exists()
+    assert "uncommitted-secret-body" not in (new_path / "README.md").read_text(
+        encoding="utf-8"
+    )
+
+    recovery = _context_entries(
+        service, actors["developer_2"], ticket["ticket_id"], "worktree_recovery"
+    )
+    assert len(recovery) == 1
+    content = recovery[0]["content"]
+    assert "uncommitted-secret-body" not in content
+    assert "untracked-secret-body" not in content
+    assert "dev-01" in content
+    assert first_worktree["branch_ref"] in content
+    assert "src/checkout/stray.txt" in content
+
+    artifact = Path(recovery[0]["source_ref"])
+    assert artifact.is_file()
+    assert hashlib.sha256(artifact.read_bytes()).hexdigest() in content
+    assert not artifact.is_relative_to(service.git_worktrees.worktree_root)
+
+
+def test_takeover_fails_closed_when_the_prior_worktree_is_missing(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """A vanished worktree gives the replacement current main, not a silent success."""
+    repository, ticket, first_claim, first_worktree = _abandoned_first_developer(
+        service, actors, seeded, tmp_path
+    )
+    current_main = _git(repository, "rev-parse", "main")
+    shutil.rmtree(Path(first_worktree["worktree_path"]))
+    _expire_lease(service, first_claim["lease"]["lease_id"])
+
+    _claim, prepared = _take_over(service, actors, ticket["ticket_id"])
+
+    assert _git(Path(prepared["worktree"]["worktree_path"]), "rev-parse", "HEAD") == current_main
+    recovery = _context_entries(
+        service, actors["developer_2"], ticket["ticket_id"], "worktree_recovery"
+    )
+    assert len(recovery) == 1
+    assert recovery[0]["source_ref"] is None
+    assert "missing" in recovery[0]["content"]
+
+
+def test_takeover_appends_assignment_history_without_overwriting_the_prior_record(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """Who held which branch, and when, stays auditable across a takeover."""
+    _repository_path, ticket, first_claim, first_worktree = _abandoned_first_developer(
+        service, actors, seeded, tmp_path
+    )
+    _expire_lease(service, first_claim["lease"]["lease_id"])
+    _claim, prepared = _take_over(service, actors, ticket["ticket_id"])
+
+    with service.store.connection() as connection:
+        rows = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM worktree_assignments WHERE ticket_id = ? ORDER BY assigned_at ASC",
+                (ticket["ticket_id"],),
+            ).fetchall()
+        ]
+
+    assert [row["agent_id"] for row in rows] == ["dev-01", "dev-02"]
+    assert rows[0]["branch_ref"] == first_worktree["branch_ref"]
+    assert rows[0]["worktree_path"] == first_worktree["worktree_path"]
+    assert rows[0]["released_at"] is not None
+    assert rows[1]["branch_ref"] == prepared["worktree"]["branch_ref"]
+    assert rows[1]["released_at"] is None
+
+
+def test_the_prior_branch_is_never_accepted_for_a_candidate_after_takeover(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """Neither the replaced Developer nor their branch can freeze a candidate."""
+    _repository_path, ticket, first_claim, first_worktree = _abandoned_first_developer(
+        service, actors, seeded, tmp_path
+    )
+    old_path = Path(first_worktree["worktree_path"])
+    retry_path = old_path / "src" / "checkout" / "retry.txt"
+    retry_path.parent.mkdir(parents=True)
+    retry_path.write_text("checkpointed work\n", encoding="utf-8")
+    _git(old_path, "add", "src/checkout/retry.txt")
+    _git(old_path, "commit", "-m", "Checkpoint before the lease expired")
+    checkpoint = _git(old_path, "rev-parse", "HEAD")
+    _expire_lease(service, first_claim["lease"]["lease_id"])
+    replacement_claim, prepared = _take_over(service, actors, ticket["ticket_id"])
+
+    with pytest.raises(DomainError):
+        service.submit_candidate(
+            actors["developer"],
+            ticket["ticket_id"],
+            first_claim["lease"]["lease_id"],
+            prepared["ticket"]["version"],
+            checkpoint,
+            first_worktree["base_commit"],
+            first_worktree["branch_ref"],
+            ["Late submission from the replaced Developer."],
+        )
+
+    with pytest.raises(ValidationError, match="branch"):
+        service.submit_candidate(
+            actors["developer_2"],
+            ticket["ticket_id"],
+            replacement_claim["lease"]["lease_id"],
+            prepared["ticket"]["version"],
+            checkpoint,
+            first_worktree["base_commit"],
+            first_worktree["branch_ref"],
+            ["Submitting from the prior Developer's branch."],
+        )
+
+    context = service.get_ticket_context(
+        actors["developer_2"], f"ticket:{ticket['ticket_id']}"
+    )
+    assert context["candidate"] is None
+
+
+def test_worktree_preparation_rejects_an_expired_developer_lease(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    repository = _repository(tmp_path)
+    service.configure_repository(actors["planner"], "project-1", str(repository))
+    ticket = seeded["ticket"]
+    claim = service.claim_ticket(
+        actors["developer"], ticket["ticket_id"], ticket["version"], 900
+    )
+    _expire_lease(service, claim["lease"]["lease_id"])
+
+    with pytest.raises(ConflictError, match="expired"):
+        service.prepare_worktree(
+            actors["developer"],
+            ticket["ticket_id"],
+            claim["lease"]["lease_id"],
+            claim["ticket"]["version"],
+        )
+
+
+def test_takeover_rejects_a_developer_outside_the_project(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    _repository_path, ticket, first_claim, _first_worktree = _abandoned_first_developer(
+        service, actors, seeded, tmp_path
+    )
+    _expire_lease(service, first_claim["lease"]["lease_id"])
+    replacement_claim, _prepared = _take_over(service, actors, ticket["ticket_id"])
+    outsider = Actor("dev-99", Role.DEVELOPER, frozenset({"project-2"}))
+
+    with pytest.raises(AuthorizationError):
+        service.prepare_worktree(
+            outsider,
+            ticket["ticket_id"],
+            replacement_claim["lease"]["lease_id"],
+            replacement_claim["ticket"]["version"],
+        )
+
+
+def test_replacement_candidate_is_still_bound_to_the_ticket_write_scope(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    _repository_path, ticket, first_claim, _first_worktree = _abandoned_first_developer(
+        service, actors, seeded, tmp_path
+    )
+    _expire_lease(service, first_claim["lease"]["lease_id"])
+    replacement_claim, prepared = _take_over(service, actors, ticket["ticket_id"])
+    new_path = Path(prepared["worktree"]["worktree_path"])
+    (new_path / "unscoped.txt").write_text("outside the write scope\n", encoding="utf-8")
+    _git(new_path, "add", "unscoped.txt")
+    _git(new_path, "commit", "-m", "Change a path outside the ticket scope")
+
+    with pytest.raises(ValidationError, match="write scope"):
+        service.submit_candidate(
+            actors["developer_2"],
+            ticket["ticket_id"],
+            replacement_claim["lease"]["lease_id"],
+            prepared["ticket"]["version"],
+            _git(new_path, "rev-parse", "HEAD"),
+            prepared["worktree"]["base_commit"],
+            prepared["worktree"]["branch_ref"],
+            ["Touches a path outside the declared write scope."],
         )
