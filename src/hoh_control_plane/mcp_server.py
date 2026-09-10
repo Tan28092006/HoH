@@ -37,6 +37,25 @@ def _start_qa_test_worker(database_path: Path, test_run_id: str) -> None:
     )
 
 
+def _start_worktree_provision_worker(database_path: Path, provision_id: str) -> None:
+    """Launch Git worktree setup away from the synchronous MCP stdio request."""
+    subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "hoh_control_plane.worktree_worker",
+            "--database",
+            str(database_path),
+            "--provision-id",
+            provision_id,
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+
+
 def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
     """Create the smallest MCP tool surface permitted for one authenticated role."""
     server = FastMCP(
@@ -353,16 +372,52 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
         def dev_prepare_worktree(
             ticket_id: str, lease_id: str, expected_version: int
         ) -> dict[str, Any]:
-            """Create the ticket-bound Git worktree required by a repository-configured project."""
+            """Queue ticket-bound Git worktree setup and return a durable provision ID."""
             arguments = {
                 "ticket_id": ticket_id,
                 "lease_id": lease_id,
                 "expected_version": expected_version,
             }
+
+            def queue_and_start() -> dict[str, Any]:
+                queued = service.queue_worktree_provision(actor, **arguments)
+                provision = queued.get("provision")
+                if provision is None or provision["status"] != "QUEUED":
+                    return queued
+                try:
+                    _start_worktree_provision_worker(service.store.path, provision["provision_id"])
+                except OSError as error:
+                    service.fail_queued_worktree_provision(
+                        provision["provision_id"],
+                        f"Could not start the isolated worktree worker: {error}",
+                    )
+                    raise ValidationError("Could not start the isolated worktree worker") from error
+                return queued
+
             return invoke(
                 "dev.prepare_worktree",
                 arguments,
-                lambda: service.prepare_worktree(actor, **arguments),
+                queue_and_start,
+            )
+
+        @server.tool(name="dev.get_worktree_provision", structured_output=True)
+        def dev_get_worktree_provision(
+            ticket_id: str,
+            lease_id: str,
+            provision_id: str,
+            lease_seconds: int = 900,
+        ) -> dict[str, Any]:
+            """Poll a queued worktree provision and renew the Developer lease."""
+            arguments = {
+                "ticket_id": ticket_id,
+                "lease_id": lease_id,
+                "provision_id": provision_id,
+                "lease_seconds": lease_seconds,
+            }
+            return invoke(
+                "dev.get_worktree_provision",
+                arguments,
+                lambda: service.get_worktree_provision(actor, **arguments),
             )
 
         @server.tool(name="dev.append_progress", structured_output=True)

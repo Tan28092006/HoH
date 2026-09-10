@@ -167,9 +167,18 @@ candidate.
 Developer flow for a configured repository is now mandatory:
 
 1. Claim the Developer ticket.
-2. Call `dev.prepare_worktree` using the lease ID and ticket version.
-3. Make changes only in its returned `worktree_path` and `branch_ref`.
-4. Commit the work there and submit that exact `HEAD` with `dev.submit_candidate`.
+2. Call `dev.prepare_worktree` using the lease ID and ticket version. It returns
+   immediately with either a reused `worktree` or a queued `provision_id`.
+3. When provisioned asynchronously, poll `dev.get_worktree_provision` with the
+   same lease until status is `COMPLETED` or `FAILED`. Every poll renews the
+   Developer lease.
+4. Make changes only after `COMPLETED`, and only in the returned
+   `worktree_path` and `branch_ref` owned by that Developer.
+5. Commit the work there and submit that exact `HEAD` with `dev.submit_candidate`.
+
+Git setup runs in a detached local worker rather than holding the MCP stdio
+request open. A failed provision is durable and attributable to its lease; do
+not retry blindly or reuse another Developer's worktree.
 
 QA then claims the candidate and calls `qa.run_project_tests`. It validates the
 frozen worktree, persists a durable `test_run_id`, starts a detached worker and

@@ -139,6 +139,27 @@ CREATE TABLE IF NOT EXISTS worktrees (
     last_verified_at TEXT
 );
 
+-- Worktree creation can invoke external Git operations. Keep that work out
+-- of a synchronous MCP request while preserving its Developer lease and
+-- a durable polling record.
+CREATE TABLE IF NOT EXISTS worktree_provision_jobs (
+    provision_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
+    lease_id TEXT NOT NULL,
+    expected_version INTEGER NOT NULL,
+    requested_by TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('QUEUED', 'RUNNING', 'COMPLETED', 'FAILED')),
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS worktree_provision_jobs_ticket_created
+    ON worktree_provision_jobs(ticket_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS worktree_provision_jobs_one_active_ticket
+    ON worktree_provision_jobs(ticket_id) WHERE status IN ('QUEUED', 'RUNNING');
+
 CREATE TABLE IF NOT EXISTS qa_test_runs (
     test_run_id TEXT PRIMARY KEY,
     candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),

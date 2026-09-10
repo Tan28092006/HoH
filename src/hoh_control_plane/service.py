@@ -1125,6 +1125,221 @@ class ControlPlaneService:
             )
             return {"ticket": ticket, "worktree": worktree, "reused": False}
 
+    def queue_worktree_provision(
+        self,
+        actor: Actor,
+        ticket_id: str,
+        lease_id: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        """Queue potentially slow Git worktree setup for an isolated worker."""
+        require_role(actor, Role.DEVELOPER)
+        with self.store.connection(immediate=True) as connection:
+            ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._expect_version(ticket, expected_version)
+            if ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:
+                raise ConflictError("Worktrees can only be prepared for active development work")
+            self._require_active_lease(connection, actor, ticket_id, lease_id)
+            existing = _row(
+                connection.execute(
+                    "SELECT * FROM worktrees WHERE ticket_id = ?", (ticket_id,)
+                ).fetchone()
+            )
+            if existing is not None and existing["agent_id"] == actor.agent_id:
+                return {"ticket": ticket, "worktree": existing, "provision": None, "reused": True}
+            active = _row(
+                connection.execute(
+                    """
+                    SELECT * FROM worktree_provision_jobs
+                    WHERE ticket_id = ? AND status IN ('QUEUED', 'RUNNING')
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (ticket_id,),
+                ).fetchone()
+            )
+            if active is not None:
+                if active["requested_by"] != actor.agent_id or active["lease_id"] != lease_id:
+                    raise ConflictError("Ticket already has an active worktree provision")
+                return {"ticket": ticket, "provision": active, "reused": False}
+
+            provision_id = _id("worktree_job")
+            timestamp = _iso()
+            connection.execute(
+                """
+                INSERT INTO worktree_provision_jobs
+                    (provision_id, project_id, ticket_id, lease_id, expected_version,
+                     requested_by, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', ?)
+                """,
+                (
+                    provision_id,
+                    project_id,
+                    ticket_id,
+                    lease_id,
+                    expected_version,
+                    actor.agent_id,
+                    timestamp,
+                ),
+            )
+            self._event(
+                connection,
+                actor,
+                project_id,
+                "worktree.provision_queued",
+                "ticket",
+                ticket_id,
+                ticket["version"],
+                {"provision_id": provision_id},
+            )
+            return {
+                "ticket": ticket,
+                "provision": self._worktree_provision_job(connection, provision_id),
+                "reused": False,
+            }
+
+    def get_worktree_provision(
+        self,
+        actor: Actor,
+        ticket_id: str,
+        lease_id: str,
+        provision_id: str,
+        lease_seconds: int = 900,
+    ) -> dict[str, Any]:
+        """Poll a worktree provision job while renewing its exclusive Developer lease."""
+        require_role(actor, Role.DEVELOPER)
+        if not 30 <= lease_seconds <= 3600:
+            raise ValidationError("Lease duration must be between 30 and 3600 seconds")
+        with self.store.connection(immediate=True) as connection:
+            ticket, _project_id = self._authorized_ticket(connection, actor, ticket_id)
+            if ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:
+                raise ConflictError("Ticket is not in active development")
+            self._require_active_lease(connection, actor, ticket_id, lease_id)
+            provision = self._worktree_provision_job(connection, provision_id)
+            if provision["ticket_id"] != ticket_id or provision["lease_id"] != lease_id:
+                raise AuthorizationError("Worktree provision does not belong to this Developer lease")
+            if provision["requested_by"] != actor.agent_id:
+                raise AuthorizationError("Worktree provision belongs to another Developer")
+            timestamp = _now()
+            connection.execute(
+                "UPDATE leases SET heartbeat_at = ?, expires_at = ? WHERE lease_id = ?",
+                (_iso(timestamp), _iso(timestamp + timedelta(seconds=lease_seconds)), lease_id),
+            )
+            worktree = _row(
+                connection.execute("SELECT * FROM worktrees WHERE ticket_id = ?", (ticket_id,)).fetchone()
+            )
+            return {
+                "ticket": self._ticket(connection, ticket_id),
+                "lease": self._lease(connection, lease_id),
+                "provision": provision,
+                "worktree": worktree,
+            }
+
+    def execute_queued_worktree_provision(self, provision_id: str) -> dict[str, Any]:
+        """Worker-only Git setup for a previously authorized Developer job."""
+        preflight_error: str | None = None
+        with self.store.connection(immediate=True) as connection:
+            provision = self._worktree_provision_job(connection, provision_id)
+            if provision["status"] != "QUEUED":
+                return provision
+            actor = Actor(
+                provision["requested_by"], Role.DEVELOPER, frozenset({provision["project_id"]})
+            )
+            ticket = self._ticket(connection, provision["ticket_id"])
+            if ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:
+                preflight_error = "Ticket is no longer in active development before worktree setup."
+            else:
+                try:
+                    self._require_active_lease(
+                        connection, actor, provision["ticket_id"], provision["lease_id"]
+                    )
+                    self._expect_version(ticket, provision["expected_version"])
+                except DomainError as error:
+                    preflight_error = str(error)
+            if preflight_error is None:
+                connection.execute(
+                    """
+                    UPDATE worktree_provision_jobs
+                    SET status = 'RUNNING', started_at = ? WHERE provision_id = ?
+                    """,
+                    (_iso(), provision_id),
+                )
+
+        if preflight_error is not None:
+            return self.fail_queued_worktree_provision(provision_id, preflight_error)
+
+        try:
+            self.prepare_worktree(
+                actor,
+                provision["ticket_id"],
+                provision["lease_id"],
+                provision["expected_version"],
+            )
+        except DomainError as error:
+            return self.fail_queued_worktree_provision(provision_id, str(error))
+
+        with self.store.connection(immediate=True) as connection:
+            completed = self._worktree_provision_job(connection, provision_id)
+            if completed["status"] != "RUNNING":
+                return completed
+            timestamp = _iso()
+            connection.execute(
+                """
+                UPDATE worktree_provision_jobs
+                SET status = 'COMPLETED', error_message = NULL, completed_at = ?
+                WHERE provision_id = ?
+                """,
+                (timestamp, provision_id),
+            )
+            ticket = self._ticket(connection, completed["ticket_id"])
+            actor = Actor(
+                completed["requested_by"], Role.DEVELOPER, frozenset({completed["project_id"]})
+            )
+            self._event(
+                connection,
+                actor,
+                completed["project_id"],
+                "worktree.provision_completed",
+                "ticket",
+                completed["ticket_id"],
+                ticket["version"],
+                {"provision_id": provision_id},
+            )
+            return self._worktree_provision_job(connection, provision_id)
+
+    def fail_queued_worktree_provision(
+        self, provision_id: str, error_message: str
+    ) -> dict[str, Any]:
+        """Persist a worker error so the owning Developer can decide how to proceed."""
+        self._bounded_text(error_message, "worktree_provision.error_message", 4000)
+        with self.store.connection(immediate=True) as connection:
+            provision = self._worktree_provision_job(connection, provision_id)
+            if provision["status"] in {"COMPLETED", "FAILED"}:
+                return provision
+            timestamp = _iso()
+            connection.execute(
+                """
+                UPDATE worktree_provision_jobs
+                SET status = 'FAILED', error_message = ?, completed_at = ?
+                WHERE provision_id = ?
+                """,
+                (error_message, timestamp, provision_id),
+            )
+            ticket = self._ticket(connection, provision["ticket_id"])
+            actor = Actor(
+                provision["requested_by"], Role.DEVELOPER, frozenset({provision["project_id"]})
+            )
+            self._event(
+                connection,
+                actor,
+                provision["project_id"],
+                "worktree.provision_failed",
+                "ticket",
+                provision["ticket_id"],
+                ticket["version"],
+                {"provision_id": provision_id},
+            )
+            return self._worktree_provision_job(connection, provision_id)
+
     def claim_qa(
         self,
         actor: Actor,
@@ -1773,6 +1988,15 @@ class ControlPlaneService:
                 for key in ("exit_code", "timed_out", "duration_ms", "storage_ref", "report_path")
             })
         return job
+
+    def _worktree_provision_job(
+        self, connection: sqlite3.Connection, provision_id: str
+    ) -> dict[str, Any]:
+        return self._one(
+            connection,
+            "SELECT * FROM worktree_provision_jobs WHERE provision_id = ?",
+            (provision_id,),
+        )
 
     def submit_candidate(
         self,
