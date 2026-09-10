@@ -255,6 +255,14 @@ async def test_planner_updates_blocked_ticket_write_scope_with_version_and_audit
             ["../secrets/**"],
             "Reject path traversal in write scope.",
         )
+    with pytest.raises(ValidationError, match="repository-relative"):
+        service.update_ticket_write_scope(
+            planner,
+            ticket["ticket_id"],
+            updated["ticket"]["version"],
+            ["/outside-the-repository/**"],
+            "Reject an absolute write scope.",
+        )
 
 
 @pytest.mark.anyio
