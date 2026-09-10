@@ -95,6 +95,16 @@ class ConflictError(DomainError):
     status_code = 409
 
 
+class ReleasePolicyError(ConflictError):
+    """The current candidate does not satisfy the standing release policy.
+
+    Distinct from a plain state conflict because the caller needs to know which
+    gate refused; the machine-readable reason travels in details["reason"].
+    """
+
+    code = "release_policy_blocked"
+
+
 class IdempotencyConflictError(ConflictError):
     """The caller reused an idempotency key that cannot replay this exact request.
 

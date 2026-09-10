@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -29,9 +30,34 @@ def _repository(tmp_path: Path) -> Path:
     return repository
 
 
+REGRESSION_COMMAND = ["python", "-c", "pass"]
+
+
+def record_regression_run(service, candidate_id: str, ticket_id: str, exit_code: int = 0) -> None:
+    """Seed the registered regression evidence the release policy requires.
+
+    The control plane only writes a qa_test_runs row for a run whose resolved
+    source was the frozen candidate, so seeding one here stands in for that run
+    without executing it in every merge-mechanics test.
+    """
+    digest = hashlib.sha256("\0".join(REGRESSION_COMMAND).encode()).hexdigest()
+    with service.store.connection(immediate=True) as connection:
+        connection.execute(
+            """
+            INSERT INTO qa_test_runs
+                (test_run_id, candidate_id, ticket_id, command_digest, exit_code, timed_out,
+                 duration_ms, storage_ref, report_path, executed_by, created_at)
+            VALUES (?, ?, ?, ?, ?, 0, 10, 'evidence://local/run.json', 'run.json', 'qa-01', ?)
+            """,
+            (f"testrun_{candidate_id[-8:]}_{exit_code}", candidate_id, ticket_id, digest,
+             exit_code, "2026-01-01T00:00:00Z"),
+        )
+
+
 def _candidate_ready_for_integration(service, actors, seeded, tmp_path: Path):
     repository = _repository(tmp_path)
     service.configure_repository(actors["planner"], "project-1", str(repository))
+    service.configure_test_command(actors["planner"], "project-1", REGRESSION_COMMAND, 60)
     ticket = seeded["ticket"]
     development = service.claim_ticket(
         actors["developer"], ticket["ticket_id"], ticket["version"], 900
@@ -84,6 +110,9 @@ def _candidate_ready_for_integration(service, actors, seeded, tmp_path: Path):
             }
             for index, criterion in enumerate(ticket["acceptance_criteria"], start=1)
         ],
+    )
+    record_regression_run(
+        service, candidate["candidate"]["candidate_id"], ticket["ticket_id"]
     )
     return repository, ticket, candidate, verified
 
@@ -143,20 +172,25 @@ def test_merge_worker_fast_forwards_then_poll_reports_completed(
         assert final_ticket["status"] == "DONE"
 
 
-def test_merge_worker_requeues_rework_when_mainline_has_drifted(
+def test_merge_worker_requeues_rework_when_mainline_drifts_after_queueing(
     service, actors, seeded, tmp_path: Path
 ) -> None:
+    """Drift that appears between queueing and execution is the worker's race to lose.
+
+    Drift present before queueing is refused by the release policy instead, so
+    this exercises the window the gate cannot close.
+    """
     repository, ticket, _candidate, verified = _candidate_ready_for_integration(
         service, actors, seeded, tmp_path
     )
-    (repository / "mainline.txt").write_text("new mainline work\n", encoding="utf-8")
-    _git(repository, "add", "mainline.txt")
-    _git(repository, "commit", "-m", "Advance mainline")
     integration = _claimed_for_integration(service, actors, ticket, verified)
     queued = service.queue_merge_candidate(
         actors["integrator"], ticket["ticket_id"],
         integration["lease"]["lease_id"], integration["ticket"]["version"],
     )
+    (repository / "mainline.txt").write_text("new mainline work\n", encoding="utf-8")
+    _git(repository, "add", "mainline.txt")
+    _git(repository, "commit", "-m", "Advance mainline")
 
     completed = service.execute_queued_merge(queued["merge_job"]["merge_job_id"])
 

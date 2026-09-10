@@ -24,6 +24,7 @@ from hoh_control_plane.domain import (
     NotFoundError,
     PlannerJobStatus,
     PlannerJobType,
+    ReleasePolicyError,
     Role,
     TicketStatus,
     ValidationError,
@@ -2339,6 +2340,209 @@ class ControlPlaneService:
             )
             return {"ticket": self._ticket(connection, ticket_id), "merge_status": "merged"}
 
+    def _release_policy_snapshot(
+        self, actor: Actor, ticket_id: str
+    ) -> dict[str, Any]:
+        """Read everything the gate judges, without holding a write lock."""
+        with self.store.connection() as connection:
+            ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            project = self._one(
+                connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+            )
+            repository = _row(
+                connection.execute(
+                    "SELECT * FROM project_repositories WHERE project_id = ?", (project_id,)
+                ).fetchone()
+            )
+            candidate = _row(
+                connection.execute(
+                    "SELECT * FROM candidates WHERE ticket_id = ? AND commit_sha = ?",
+                    (ticket_id, ticket["candidate_commit"]),
+                ).fetchone()
+            )
+            if candidate is None:
+                raise ReleasePolicyError(
+                    "No frozen candidate matches the ticket's current artifact",
+                    {"reason": "candidate_identity_mismatch"},
+                )
+            candidate_id = candidate["candidate_id"]
+            findings = [
+                _row(row)
+                for row in connection.execute(
+                    "SELECT * FROM qa_findings WHERE candidate_id = ?", (candidate_id,)
+                ).fetchall()
+            ]
+            evidence = [
+                _row(row)
+                for row in connection.execute(
+                    "SELECT * FROM evidence WHERE candidate_id = ?", (candidate_id,)
+                ).fetchall()
+            ]
+            test_runs = [
+                _row(row)
+                for row in connection.execute(
+                    "SELECT * FROM qa_test_runs WHERE candidate_id = ? ORDER BY created_at ASC",
+                    (candidate_id,),
+                ).fetchall()
+            ]
+            profile = _row(
+                connection.execute(
+                    "SELECT * FROM candidate_test_profiles WHERE candidate_id = ?",
+                    (candidate_id,),
+                ).fetchone()
+            )
+            gates = [
+                _row(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM context_entries
+                    WHERE ticket_id = ? AND superseded_by IS NULL
+                      AND entry_type IN ('integration_hold', 'integration_authorization')
+                    ORDER BY created_at ASC
+                    """,
+                    (ticket_id,),
+                ).fetchall()
+            ]
+            verified_event = connection.execute(
+                """
+                SELECT 1 FROM audit_events
+                WHERE aggregate_id = ? AND event_type = 'ticket.verified'
+                  AND payload LIKE ?
+                """,
+                (ticket_id, f'%"{candidate_id}"%'),
+            ).fetchone()
+        return {
+            "ticket": ticket,
+            "project": project,
+            "project_id": project_id,
+            "repository": repository,
+            "candidate": candidate,
+            "findings": findings,
+            "evidence": evidence,
+            "test_runs": test_runs,
+            "profile": profile,
+            "gates": gates,
+            "qa_verified": verified_event is not None,
+        }
+
+    def _require_release_evidence(self, snapshot: dict[str, Any]) -> None:
+        """Judge release eligibility from durable evidence only, never from claims."""
+        ticket = snapshot["ticket"]
+        candidate = snapshot["candidate"]
+        if snapshot["repository"] is None:
+            raise ValidationError("Project repository is required before integrating a candidate")
+        if not snapshot["qa_verified"]:
+            raise ReleasePolicyError(
+                "This candidate has no recorded QA verification for its ticket",
+                {"reason": "ticket_not_verified"},
+            )
+
+        unverified = sorted(
+            {
+                str(finding["status"])
+                for finding in snapshot["findings"]
+                if finding["status"] != "verified"
+            }
+        )
+        if unverified:
+            raise ReleasePolicyError(
+                "The candidate carries QA findings that are not verified",
+                {"reason": "unverified_qa_finding", "statuses": unverified},
+            )
+        evidenced = {
+            (str(item["criterion"]))
+            for item in snapshot["evidence"]
+        }
+        verified_criteria = {
+            str(finding["criterion"])
+            for finding in snapshot["findings"]
+            if finding["status"] == "verified" and str(finding["criterion"]) in evidenced
+        }
+        missing = sorted(set(ticket["acceptance_criteria"]) - verified_criteria)
+        if missing:
+            raise ReleasePolicyError(
+                "Every mandatory acceptance criterion needs candidate-bound QA evidence",
+                {"reason": "missing_qa_evidence", "criteria": missing},
+            )
+
+        # A qa_test_runs row is only written for a run whose resolved source was
+        # the frozen candidate, so its presence is the source-identity proof.
+        profile = snapshot["profile"]
+        if profile is None:
+            raise ReleasePolicyError(
+                "The candidate has no registered regression command to satisfy",
+                {"reason": "regression_run_missing"},
+            )
+        digest = hashlib.sha256("\0".join(profile["test_command"]).encode()).hexdigest()
+        matching = [run for run in snapshot["test_runs"] if run["command_digest"] == digest]
+        if not matching:
+            raise ReleasePolicyError(
+                "No registered regression run was recorded against this candidate",
+                {"reason": "regression_run_missing"},
+            )
+        if not any(run["exit_code"] == 0 and not run["timed_out"] for run in matching):
+            raise ReleasePolicyError(
+                "The registered regression run did not complete successfully",
+                {"reason": "regression_run_failed"},
+            )
+
+        holds = [
+            entry
+            for entry in snapshot["gates"]
+            if entry["entry_type"] == "integration_hold"
+            and entry["artifact_commit"] in (None, candidate["commit_sha"])
+        ]
+        if holds:
+            latest_hold = holds[-1]["created_at"]
+            # Only an authorization naming this exact SHA can clear a hold; one
+            # issued for another artifact says nothing about this candidate.
+            cleared = any(
+                entry["entry_type"] == "integration_authorization"
+                and entry["artifact_commit"] == candidate["commit_sha"]
+                and entry["created_at"] > latest_hold
+                for entry in snapshot["gates"]
+            )
+            if not cleared:
+                raise ReleasePolicyError(
+                    "A current integration hold blocks this candidate",
+                    {"reason": "integration_hold", "entry_id": holds[-1]["entry_id"]},
+                )
+
+    def _require_mergeable_identity(self, snapshot: dict[str, Any]) -> None:
+        """Confirm the exact candidate still fast-forwards current main.
+
+        Git runs here, deliberately outside any transaction, so no write lock is
+        held while the repository is inspected.
+        """
+        repository_path = snapshot["repository"]["repository_path"]
+        default_branch = snapshot["project"]["default_branch"]
+        candidate = snapshot["candidate"]
+        mainline = f"refs/heads/{default_branch}"
+        base = candidate["base_commit"]
+        base_is_current_main = self.git_worktrees.commit_descends_from(
+            repository_path=repository_path,
+            ancestor_commit=mainline,
+            descendant_commit=base,
+        ) and self.git_worktrees.commit_descends_from(
+            repository_path=repository_path,
+            ancestor_commit=base,
+            descendant_commit=mainline,
+        )
+        if not base_is_current_main:
+            raise ReleasePolicyError(
+                "Mainline moved after this candidate was based",
+                {"reason": "base_drift"},
+            )
+        if not self.git_worktrees.commit_descends_from(
+            repository_path=repository_path,
+            ancestor_commit=mainline,
+            descendant_commit=candidate["commit_sha"],
+        ):
+            raise ReleasePolicyError(
+                "This candidate would not fast-forward the default branch",
+                {"reason": "not_fast_forward"},
+            )
+
     def queue_merge_candidate(
         self,
         actor: Actor,
@@ -2348,6 +2552,12 @@ class ControlPlaneService:
     ) -> dict[str, Any]:
         """Durably acknowledge integration before the detached Git merge worker runs."""
         require_role(actor, Role.INTEGRATOR)
+        # The standing release policy is judged before anything is queued, and the
+        # Git half runs without a write lock held.
+        snapshot = self._release_policy_snapshot(actor, ticket_id)
+        if snapshot["ticket"]["status"] == TicketStatus.MERGE_READY.value:
+            self._require_release_evidence(snapshot)
+            self._require_mergeable_identity(snapshot)
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             self._expect_version(ticket, expected_version)
