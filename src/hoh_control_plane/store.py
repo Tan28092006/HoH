@@ -5,6 +5,36 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from hoh_control_plane.domain import DomainError
+
+
+class ContentionError(DomainError):
+    """The database could not acquire its write lock under concurrent load.
+
+    This is the one documented, retryable error a caller sees instead of a raw
+    SQLite "database is locked"/"database is busy" message: no statement in the
+    attempted transaction ran, so retrying the same request from scratch is safe
+    and is expected to succeed once the competing writer finishes.
+    """
+
+    code = "database_contention"
+    status_code = 503
+
+
+# SQLite's own busy handler (set by connect(timeout=...) and PRAGMA busy_timeout
+# below) already blocks a single BEGIN IMMEDIATE for this long before raising --
+# it is a brief, self-clearing wait for a short-lived local transaction, not a
+# way to mask a slow external operation that should never run inside a
+# transaction in the first place (see connection() below). The bounded
+# retry/backoff policy this budget participates in lives one layer up, in
+# mcp_server.invoke(), which retries the whole call after a ContentionError.
+_DEFAULT_BUSY_TIMEOUT_SECONDS = 10.0
+
+
+def _is_lock_contention(error: sqlite3.OperationalError) -> bool:
+    message = str(error).lower()
+    return "locked" in message or "busy" in message
+
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -348,10 +378,23 @@ CREATE INDEX IF NOT EXISTS agent_tool_calls_project_sequence
 
 
 class SQLiteStore:
-    """Small transactional store for the MVP control plane."""
+    """Small transactional store for the local-pilot control plane.
 
-    def __init__(self, path: str | Path) -> None:
+    This is single-machine, local-pilot storage: one SQLite file on this disk,
+    guarded by short, in-process write transactions with WAL-mode concurrent
+    reads. It assumes every reader and writer runs on this machine against this
+    file -- it is not a multi-machine-safe store, must never be placed on a
+    network share, and is expected to be replaced by a PostgreSQL-backed store
+    (see HOH-204) before agents span machines.
+    """
+
+    def __init__(
+        self, path: str | Path, *, busy_timeout_seconds: float = _DEFAULT_BUSY_TIMEOUT_SECONDS
+    ) -> None:
         self.path = Path(path)
+        # Overridable so tests can exercise real lock-wait-then-fail behavior in
+        # well under a second instead of waiting out the production default.
+        self.busy_timeout_seconds = busy_timeout_seconds
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -360,7 +403,7 @@ class SQLiteStore:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = NORMAL")
             connection.executescript(SCHEMA)
-            connection.execute("BEGIN IMMEDIATE")
+            self._begin_immediate(connection)
             self._migrate_qa_test_job_lease_foreign_key(connection)
 
     @staticmethod
@@ -421,17 +464,45 @@ class SQLiteStore:
 
     @contextmanager
     def connection(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path, timeout=10)
+        connection = sqlite3.connect(self.path, timeout=self.busy_timeout_seconds)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 10000")
+        connection.execute(
+            f"PRAGMA busy_timeout = {int(self.busy_timeout_seconds * 1000)}"
+        )
         try:
             if immediate:
-                connection.execute("BEGIN IMMEDIATE")
+                self._begin_immediate(connection)
             yield connection
             connection.commit()
+        except sqlite3.OperationalError as error:
+            connection.rollback()
+            if _is_lock_contention(error):
+                raise ContentionError(
+                    "The database is busy with another operation; retry this request."
+                ) from error
+            raise
         except Exception:
             connection.rollback()
             raise
         finally:
             connection.close()
+
+    @staticmethod
+    def _begin_immediate(connection: sqlite3.Connection) -> None:
+        """Acquire the write lock before any statement in the transaction runs.
+
+        SQLite's busy handler already waits up to busy_timeout_seconds inside this
+        single call. A caller whose wait is exhausted gets ContentionError, a clean
+        domain error that is always safe to retry from scratch -- since nothing has
+        executed yet, a retry can never re-apply a partial mutation. The bounded
+        retry/backoff policy across attempts lives in mcp_server.invoke().
+        """
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as error:
+            if not _is_lock_contention(error):
+                raise
+            raise ContentionError(
+                "The database is busy with another operation; retry this request."
+            ) from error

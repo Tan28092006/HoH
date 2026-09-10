@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -494,3 +495,52 @@ def test_artifact_mismatch_fails_the_job_without_a_candidate_verdict_and_allows_
 
     assert completed["status"] == "COMPLETED"
     assert completed["exit_code"] == 0
+
+
+def test_concurrent_queue_project_tests_calls_never_create_duplicate_active_jobs(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """Two threads racing to queue the same candidate's project tests must never
+    both succeed: SQLite's serialized writers plus the active-job guard leave
+    exactly one QUEUED job, and the loser sees the existing ConflictError -- not
+    a raw database error and not a second active job.
+    """
+    ticket, _candidate, qa_claim = _candidate_waiting_for_qa(
+        service, actors, seeded, tmp_path, [sys.executable, "-c", "print('passed')"]
+    )
+
+    results: list[dict | Exception] = []
+    barrier = threading.Barrier(2)
+
+    def _attempt() -> None:
+        barrier.wait(timeout=5)
+        try:
+            results.append(
+                service.queue_project_tests(
+                    actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"]
+                )
+            )
+        except Exception as error:  # noqa: BLE001 - captured for assertion below
+            results.append(error)
+
+    threads = [threading.Thread(target=_attempt) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    successes = [result for result in results if isinstance(result, dict)]
+    failures = [result for result in results if isinstance(result, Exception)]
+    assert len(successes) == 1, f"exactly one attempt should win the race: {results}"
+    assert len(failures) == 1
+    assert isinstance(failures[0], ConflictError)
+    assert "active project test run" in str(failures[0])
+    with service.store.connection() as connection:
+        active_jobs = connection.execute(
+            """
+            SELECT COUNT(*) AS n FROM qa_test_jobs
+            WHERE ticket_id = ? AND status IN ('QUEUED', 'RUNNING')
+            """,
+            (ticket["ticket_id"],),
+        ).fetchone()["n"]
+    assert active_jobs == 1

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
+
+from mcp.server.fastmcp.exceptions import ToolError
 
 import hoh_control_plane.mcp_server as mcp_server
 from hoh_control_plane.domain import Actor, ConflictError, Role, ValidationError
 from hoh_control_plane.mcp_server import create_mcp_server
 from hoh_control_plane.service import ControlPlaneService
-from hoh_control_plane.store import SQLiteStore
+from hoh_control_plane.store import ContentionError, SQLiteStore
 
 
 @pytest.mark.anyio
@@ -482,3 +486,70 @@ async def test_developer_and_qa_mcp_flow_records_test_run_and_verdict(tmp_path) 
     assert verdict["ticket"]["status"] == "VERIFIED"
     context = service.get_ticket_context(planner, "DEV-102")
     assert any(entry["entry_type"] == "qa_test_run" for entry in context["context_entries"])
+
+
+@pytest.mark.anyio
+async def test_invoke_retries_a_database_contention_error_before_succeeding(
+    service, actors, monkeypatch
+) -> None:
+    """A transient ContentionError must never reach the caller as long as a
+    later attempt of the same call succeeds within the bounded retry budget.
+    """
+    calls: list[int] = []
+
+    def flaky_capabilities(_actor):
+        calls.append(1)
+        if len(calls) < 3:
+            raise ContentionError("database is busy")
+        return {"ok": True}
+
+    monkeypatch.setattr(service, "capabilities", flaky_capabilities)
+
+    _, result = await create_mcp_server(service, actors["developer"]).call_tool(
+        "identity.get_capabilities", {}
+    )
+
+    assert len(calls) == 3
+    assert result["capabilities"] == {"ok": True}
+
+
+@pytest.mark.anyio
+async def test_invoke_raises_after_exhausting_the_contention_retry_budget(
+    service, actors, monkeypatch
+) -> None:
+    """The retry budget is bounded: persistent contention must still surface as
+    the same clean, documented, retryable error -- never an infinite wait.
+    """
+
+    def always_busy(_actor):
+        raise ContentionError("database is busy")
+
+    monkeypatch.setattr(service, "capabilities", always_busy)
+
+    with pytest.raises(ToolError, match="database is busy"):
+        await create_mcp_server(service, actors["developer"]).call_tool(
+            "identity.get_capabilities", {}
+        )
+
+
+@pytest.mark.anyio
+async def test_invoke_normalizes_a_raw_sqlite_error_instead_of_leaking_it(
+    service, actors, monkeypatch
+) -> None:
+    """A foreign-key or lock error that reaches this boundary without an
+    existing service-layer translation must never expose raw driver text
+    through MCP.
+    """
+
+    def raises_integrity_error(_actor):
+        raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
+
+    monkeypatch.setattr(service, "capabilities", raises_integrity_error)
+
+    with pytest.raises(ToolError) as excinfo:
+        await create_mcp_server(service, actors["developer"]).call_tool(
+            "identity.get_capabilities", {}
+        )
+
+    assert "foreign key" not in str(excinfo.value).lower()
+    assert "constraint" not in str(excinfo.value).lower()

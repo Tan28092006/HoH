@@ -1,20 +1,42 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar
 
 from mcp.server.fastmcp import FastMCP
 
-from hoh_control_plane.domain import Actor, DomainError, Role, ValidationError
+from hoh_control_plane.domain import Actor, ConflictError, DomainError, Role, ValidationError
 from hoh_control_plane.service import ControlPlaneService
-from hoh_control_plane.store import SQLiteStore
+from hoh_control_plane.store import ContentionError, SQLiteStore
 
 
 Result = TypeVar("Result")
+
+# ContentionError only ever comes from a transaction that never began (the write
+# lock was never acquired), so no partial mutation exists to duplicate; retrying
+# the whole call from scratch is safe. store.py already retries lock acquisition
+# internally before raising it, so this is a second, coarser bounded layer.
+_CONTENTION_RETRY_ATTEMPTS = 3
+_CONTENTION_RETRY_BASE_SECONDS = 0.1
+
+
+def _run_with_contention_retry(operation: Callable[[], Result]) -> Result:
+    delay = _CONTENTION_RETRY_BASE_SECONDS
+    for attempt in range(_CONTENTION_RETRY_ATTEMPTS):
+        try:
+            return operation()
+        except ContentionError:
+            if attempt == _CONTENTION_RETRY_ATTEMPTS - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2
+    raise AssertionError("unreachable")  # pragma: no cover
 _TARGET_KEYS = ("project_id", "feature_id", "ticket_id", "feature_ref", "ticket_ref")
 
 
@@ -91,7 +113,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
         project_id = _project_for_call(service, actor, arguments)
         summary = _safe_input_summary(arguments)
         try:
-            result = operation()
+            result = _run_with_contention_retry(operation)
         except DomainError as error:
             service.record_tool_call(
                 actor,
@@ -102,6 +124,22 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 error_code=error.code,
             )
             raise
+        except (sqlite3.OperationalError, sqlite3.IntegrityError) as error:
+            # Safety net: normalize any raw driver error that reaches this boundary
+            # without an existing service-layer translation (e.g. a foreign-key
+            # violation this call site has no bespoke message for), so a caller
+            # never sees internal storage-engine text through MCP.
+            service.record_tool_call(
+                actor,
+                tool_name=tool_name,
+                project_id=project_id,
+                input_summary=summary,
+                outcome="rejected",
+                error_code="database_error",
+            )
+            raise ConflictError(
+                "This change conflicts with the current database state; retry the request."
+            ) from error
         except Exception:
             service.record_tool_call(
                 actor,
