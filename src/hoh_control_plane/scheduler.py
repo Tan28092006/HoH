@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from hoh_control_plane.domain import Actor, Role
+from hoh_control_plane.planner_wakeup import deliver_pending
 from hoh_control_plane.service import ControlPlaneService
 from hoh_control_plane.store import SQLiteStore
 
@@ -18,7 +19,10 @@ def sweep_once(database_path: str | Path) -> dict[str, object]:
     scheduler = Actor("hoh-scheduler", Role.ADMIN, frozenset({"*"}))
     recovered = service.sweep_expired_leases(scheduler)
     dispatch = service.dispatch_pending_work(scheduler)
-    return {**recovered, "dispatch": dispatch}
+    # An urgent Planner problem should not wait for the next backlog scan; a
+    # failed attempt simply leaves the request pending for the following sweep.
+    wakeups = deliver_pending(service)
+    return {**recovered, "dispatch": dispatch, "planner_wakeups": wakeups}
 
 
 def main() -> None:

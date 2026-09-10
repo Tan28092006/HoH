@@ -465,6 +465,38 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 lambda: service.update_ticket_write_scope(actor, **arguments),
             )
 
+        @server.tool(name="planner.list_interventions", structured_output=True)
+        def planner_list_interventions(
+            project_id: str, include_acknowledged: bool = False
+        ) -> dict[str, Any]:
+            """Read pending and delivered intervention requests waiting on a Planner."""
+            arguments = {
+                "project_id": project_id,
+                "include_acknowledged": include_acknowledged,
+            }
+            return invoke(
+                "planner.list_interventions",
+                arguments,
+                lambda: {
+                    "interventions": service.list_planner_interventions(actor, **arguments)
+                },
+            )
+
+        @server.tool(name="planner.acknowledge_intervention", structured_output=True)
+        def planner_acknowledge_intervention(
+            intervention_id: str, idempotency_key: str | None = None
+        ) -> dict[str, Any]:
+            """Confirm a wakeup was received. This is not a planning decision."""
+            arguments = {"intervention_id": intervention_id}
+            return invoke(
+                "planner.acknowledge_intervention",
+                arguments,
+                lambda: {
+                    "intervention": service.acknowledge_planner_intervention(actor, **arguments)
+                },
+                idempotency_key,
+            )
+
         @server.tool(name="planner.claim_job", structured_output=True)
         def planner_claim_job(
             planner_job_id: str,

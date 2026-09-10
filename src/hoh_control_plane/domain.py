@@ -36,6 +36,20 @@ class PlannerJobStatus(StrEnum):
 class PlannerJobType(StrEnum):
     QA_FAILURE = "qa_failure"
     DEVELOPER_BLOCKER = "developer_blocker"
+    INTEGRATION_CONFLICT = "integration_conflict"
+
+
+class InterventionStatus(StrEnum):
+    """Delivery state of a Planner wakeup, never the state of the decision itself."""
+
+    PENDING = "PENDING"
+    DELIVERED = "DELIVERED"
+    ACKNOWLEDGED = "ACKNOWLEDGED"
+
+
+class InterventionSeverity(StrEnum):
+    HIGH = "high"
+    NORMAL = "normal"
 
 
 # A retired ticket keeps its history but leaves dispatch for good. These groups are

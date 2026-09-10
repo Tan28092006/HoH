@@ -69,6 +69,48 @@ channel automatically: it would add an external message ingress and needs a
 separate authentication review. Use the loop first; add a channel only when the
 team wants a managed, allowlisted push path.
 
+## Urgent Planner intervention requests
+
+Role wakeups above are polling: a worker asks for work on its own schedule. That
+is fine for a queue, but a Developer who cannot make a safe next code action, a
+QA failure, or an Integrator conflict needs a Planner sooner than the next scan.
+
+When one of those signals opens a Planner job, the control plane also raises one
+intervention request for it. The request carries pointers only - project, ticket
+and context reference, event class, severity, artifact identity and evidence
+references - never claims, observations, logs, secrets or lease identifiers. A
+Planner reads the evidence itself through the ticket, under its own role checks.
+
+One open Planner job has at most one live request. Repeated progress notes,
+polling, queued submissions, ordinary rework and the same unresolved blocker do
+not raise another. Materially new evidence updates the existing request and
+makes it eligible for one more delivery.
+
+`python -m hoh_control_plane.planner_wakeup --database <path>` delivers pending
+requests, and `scripts/start-scheduler.ps1` already runs it on each sweep.
+Delivery is at-least-once and acknowledges **delivery only**: the Planner job
+stays open until an authorized Planner resolves it, and no wakeup can claim a
+ticket, change code or mutate project state.
+
+Configuration:
+
+- `HOH_PLANNER_WAKEUP_URL` - optional loopback endpoint (`127.0.0.1`,
+  `localhost` or `::1`). Any other host is refused rather than called, because
+  this pilot has no authenticated multi-machine transport.
+- `HOH_PLANNER_WAKEUP_SECRET` - optional shared secret. When set, each envelope
+  carries an HMAC-SHA256 signature over its kind, nonce, issue time and payload,
+  so a receiver can reject forged or replayed envelopes.
+
+Codex Desktop exposes no external wake API, so **the fallback is local**: with no
+endpoint configured, each request is written as a bounded JSON envelope under
+`data/notifications/`. An operator, a desktop notifier or a polling worker reads
+that directory. If the endpoint is offline the request simply stays pending, and
+the ordinary Planner heartbeat still finds the job by polling.
+
+Pending and delivered requests appear as read-only operational state in the
+Dispatch view and through `planner.list_interventions`; a Planner may confirm
+receipt with `planner.acknowledge_intervention`.
+
 ## Multi-machine behavior
 
 On the current trusted-local SQLite deployment, all workers must share the

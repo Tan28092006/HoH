@@ -423,7 +423,9 @@ CREATE TABLE IF NOT EXISTS planner_jobs (
     planner_job_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(project_id),
     ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
-    job_type TEXT NOT NULL CHECK (job_type IN ('qa_failure', 'developer_blocker')),
+    job_type TEXT NOT NULL CHECK (
+        job_type IN ('qa_failure', 'developer_blocker', 'integration_conflict')
+    ),
     status TEXT NOT NULL CHECK (status IN ('READY', 'IN_PROGRESS', 'RESOLVED')),
     summary TEXT NOT NULL,
     candidate_id TEXT REFERENCES candidates(candidate_id),
@@ -455,6 +457,40 @@ CREATE TABLE IF NOT EXISTS planner_job_leases (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS planner_job_leases_one_per_job
     ON planner_job_leases(planner_job_id);
+
+-- A Planner job is durable but silent: without this, an urgent blocker waits for
+-- the next backlog scan. One intervention request per open Planner job carries a
+-- bounded, redacted pointer to the evidence so an adapter can wake a Planner.
+-- It records delivery, never the planning decision, and never ticket ownership.
+CREATE TABLE IF NOT EXISTS planner_interventions (
+    intervention_id TEXT PRIMARY KEY,
+    planner_job_id TEXT NOT NULL REFERENCES planner_jobs(planner_job_id),
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
+    event_class TEXT NOT NULL CHECK (
+        event_class IN ('developer_blocker', 'qa_failure', 'integration_conflict')
+    ),
+    severity TEXT NOT NULL CHECK (severity IN ('high', 'normal')),
+    context_ref TEXT NOT NULL,
+    artifact_commit TEXT,
+    candidate_id TEXT,
+    evidence_refs TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('PENDING', 'DELIVERED', 'ACKNOWLEDGED')),
+    delivery_attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    nonce TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    delivered_at TEXT,
+    acknowledged_at TEXT,
+    acknowledged_by TEXT
+);
+-- One live request per planning problem: repeated evidence updates it instead of
+-- waking a Planner again for the same unresolved decision.
+CREATE UNIQUE INDEX IF NOT EXISTS planner_interventions_one_open_per_job
+    ON planner_interventions(planner_job_id) WHERE status IN ('PENDING', 'DELIVERED');
+CREATE INDEX IF NOT EXISTS planner_interventions_project_status
+    ON planner_interventions(project_id, status, created_at);
 
 CREATE TABLE IF NOT EXISTS audit_events (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -515,6 +551,65 @@ class SQLiteStore:
             connection.executescript(SCHEMA)
             self._begin_immediate(connection)
             self._migrate_qa_test_job_lease_foreign_key(connection)
+            self._migrate_planner_job_types(connection)
+
+    @staticmethod
+    def _migrate_planner_job_types(connection: sqlite3.Connection) -> None:
+        """Widen the planner job kinds without discarding existing planning work.
+
+        A database created before Integrator outcomes became a planning source
+        still carries the narrower CHECK, which SQLite cannot alter in place.
+        """
+        definition = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'planner_jobs'"
+        ).fetchone()
+        if definition is None or "integration_conflict" in definition["sql"]:
+            return
+
+        columns = (
+            "planner_job_id, project_id, ticket_id, job_type, status, summary, candidate_id, "
+            "evidence_refs, context_entry_id, created_by, created_at, updated_at, resolution, "
+            "resolved_by, resolved_at"
+        )
+        connection.execute("DROP INDEX IF EXISTS planner_jobs_project_status")
+        connection.execute("DROP INDEX IF EXISTS planner_jobs_one_open_per_ticket")
+        connection.execute("ALTER TABLE planner_jobs RENAME TO planner_jobs_legacy")
+        connection.execute(
+            """
+            CREATE TABLE planner_jobs (
+                planner_job_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(project_id),
+                ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
+                job_type TEXT NOT NULL CHECK (
+                    job_type IN ('qa_failure', 'developer_blocker', 'integration_conflict')
+                ),
+                status TEXT NOT NULL CHECK (status IN ('READY', 'IN_PROGRESS', 'RESOLVED')),
+                summary TEXT NOT NULL,
+                candidate_id TEXT REFERENCES candidates(candidate_id),
+                evidence_refs TEXT NOT NULL,
+                context_entry_id TEXT REFERENCES context_entries(entry_id),
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                resolution TEXT,
+                resolved_by TEXT,
+                resolved_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            f"INSERT INTO planner_jobs ({columns}) SELECT {columns} FROM planner_jobs_legacy"
+        )
+        connection.execute("DROP TABLE planner_jobs_legacy")
+        connection.execute(
+            "CREATE INDEX planner_jobs_project_status ON planner_jobs(project_id, status, created_at)"
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX planner_jobs_one_open_per_ticket
+                ON planner_jobs(ticket_id) WHERE status IN ('READY', 'IN_PROGRESS')
+            """
+        )
 
     @staticmethod
     def _migrate_qa_test_job_lease_foreign_key(connection: sqlite3.Connection) -> None:
