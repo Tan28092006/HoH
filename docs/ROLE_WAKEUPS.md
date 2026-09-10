@@ -96,7 +96,10 @@ Configuration:
 
 - `HOH_PLANNER_WAKEUP_URL` - optional loopback endpoint (`127.0.0.1`,
   `localhost` or `::1`). Any other host is refused rather than called, because
-  this pilot has no authenticated multi-machine transport.
+  this pilot has no authenticated multi-machine transport. Redirects are refused
+  too: an allowlisted endpoint answering 3xx cannot send the wakeup on to an
+  unvalidated host, since checking only the configured URL would otherwise let a
+  redirect escape the allowlist.
 - `HOH_PLANNER_WAKEUP_SECRET` - **required whenever an endpoint is configured.**
   Each envelope carries an HMAC-SHA256 signature over its kind, nonce, issue time
   and payload, so a receiver can reject forged or replayed envelopes. Configuring

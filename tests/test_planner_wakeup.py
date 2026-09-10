@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import socket
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
@@ -261,8 +264,8 @@ def test_a_registered_endpoint_is_never_sent_an_unsigned_envelope(
     monkeypatch.setenv(planner_wakeup.ENDPOINT_VARIABLE, "http://127.0.0.1:8765/wake")
     monkeypatch.delenv(planner_wakeup.SECRET_VARIABLE, raising=False)
     monkeypatch.setattr(
-        planner_wakeup.urllib.request,
-        "urlopen",
+        planner_wakeup,
+        "_open_endpoint",
         lambda *_args, **_kwargs: pytest.fail(
             "An unauthenticated envelope must never reach a registered endpoint"
         ),
@@ -307,7 +310,7 @@ def test_a_registered_endpoint_receives_a_signed_envelope(
         sent.append(json.loads(request.data.decode("utf-8")))
         return _Response()
 
-    monkeypatch.setattr(planner_wakeup.urllib.request, "urlopen", capture)
+    monkeypatch.setattr(planner_wakeup, "_open_endpoint", capture)
 
     result = deliver_pending(service)
 
@@ -315,6 +318,65 @@ def test_a_registered_endpoint_receives_a_signed_envelope(
     assert sent[0]["signature"]
     assert sent[0]["nonce"]
     assert _interventions(service)[0]["status"] == "DELIVERED"
+
+
+def test_an_allowlisted_endpoint_cannot_redirect_delivery_to_another_host(
+    service, actors, seeded, monkeypatch
+) -> None:
+    """Validating the configured URL is not enough if urllib then follows a 302.
+
+    A real loopback server answers with a redirect to a non-loopback host. The
+    adapter must refuse the hop rather than resolve or contact that target.
+    """
+    _blocked(service, actors, seeded)
+
+    class _Redirector(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):  # noqa: N802
+            # Drain the request body before answering. Replying to an unread
+            # request lets Windows reset the connection, which would surface as a
+            # socket error instead of the redirect this test is about.
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.send_response(302)
+            self.send_header("Location", "http://outside.invalid/next")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args):  # keep the test output quiet
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), _Redirector)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    resolved: list[str] = []
+    real_getaddrinfo = socket.getaddrinfo
+
+    def watched_getaddrinfo(host, *args, **kwargs):
+        resolved.append(host)
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", watched_getaddrinfo)
+    monkeypatch.setenv(
+        planner_wakeup.ENDPOINT_VARIABLE, f"http://127.0.0.1:{server.server_port}/wake"
+    )
+    monkeypatch.setenv(planner_wakeup.SECRET_VARIABLE, "shared-secret")
+
+    try:
+        result = deliver_pending(service)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    pending = _interventions(service)[0]
+
+    assert result["delivered"] == []
+    assert len(result["failed"]) == 1
+    assert "redirect" in pending["last_error"].lower()
+    assert pending["status"] == "PENDING"
+    assert "outside.invalid" not in resolved
+    # The planning problem survives the refused delivery.
+    assert service.discover_planner_jobs(actors["planner"], "project-1")[0]["status"] == "READY"
 
 
 def test_the_envelope_is_signed_and_replay_identifiable() -> None:
@@ -345,8 +407,8 @@ def test_a_disallowed_endpoint_fails_delivery_instead_of_calling_it(
     _blocked(service, actors, seeded)
     monkeypatch.setenv(planner_wakeup.ENDPOINT_VARIABLE, "http://example.com/wake")
     monkeypatch.setattr(
-        planner_wakeup.urllib.request,
-        "urlopen",
+        planner_wakeup,
+        "_open_endpoint",
         lambda *_args, **_kwargs: pytest.fail("A disallowed endpoint must never be called"),
     )
 

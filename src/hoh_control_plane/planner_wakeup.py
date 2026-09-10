@@ -42,6 +42,28 @@ class SigningSecretMissing(ValueError):
     """A registered endpoint was configured without the secret that authenticates it."""
 
 
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Refuse any redirect rather than following it to an unvalidated host.
+
+    Validating the configured URL is not enough on its own: urllib follows a
+    redirect automatically, so an allowlisted loopback endpoint answering 302
+    could otherwise send the wakeup to any host. A wakeup receiver has no reason
+    to redirect, so the safe answer is to refuse instead of re-validating a hop.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        raise EndpointNotAllowed(
+            f"Planner wakeup endpoint attempted a redirect to {newurl}"
+        )
+
+
+def _open_endpoint(request: urllib.request.Request):
+    """Single seam for endpoint delivery, so no caller can bypass the guard."""
+    return urllib.request.build_opener(_RefuseRedirects).open(
+        request, timeout=DELIVERY_TIMEOUT_SECONDS
+    )
+
+
 def validate_endpoint(endpoint: str) -> str:
     parsed = urlparse(endpoint)
     if parsed.scheme not in {"http", "https"} or parsed.hostname not in ALLOWED_HOSTS:
@@ -125,7 +147,7 @@ def deliver_once(
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=DELIVERY_TIMEOUT_SECONDS) as response:
+        with _open_endpoint(request) as response:
             if response.status >= 400:
                 raise urllib.error.HTTPError(
                     endpoint, response.status, "rejected", response.headers, None
