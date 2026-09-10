@@ -1561,6 +1561,270 @@ class ControlPlaneService:
             )
             return {"ticket": self._ticket(connection, ticket_id), "merge_status": "merged"}
 
+    def queue_merge_candidate(
+        self,
+        actor: Actor,
+        ticket_id: str,
+        lease_id: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        """Durably acknowledge integration before the detached Git merge worker runs."""
+        require_role(actor, Role.INTEGRATOR)
+        with self.store.connection(immediate=True) as connection:
+            ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._expect_version(ticket, expected_version)
+            if ticket["status"] != TicketStatus.MERGE_READY.value:
+                raise ConflictError("Ticket is not ready for integration")
+            self._require_active_lease(connection, actor, ticket_id, lease_id)
+            repository = _row(
+                connection.execute(
+                    "SELECT * FROM project_repositories WHERE project_id = ?", (project_id,)
+                ).fetchone()
+            )
+            if repository is None:
+                raise ValidationError("Project repository is required before integrating a candidate")
+            candidate = self._one(
+                connection,
+                "SELECT * FROM candidates WHERE ticket_id = ? AND commit_sha = ?",
+                (ticket_id, ticket["candidate_commit"]),
+            )
+            active = _row(
+                connection.execute(
+                    """SELECT * FROM merge_jobs
+                       WHERE ticket_id = ? AND status IN ('QUEUED', 'RUNNING')
+                       ORDER BY created_at DESC LIMIT 1""",
+                    (ticket_id,),
+                ).fetchone()
+            )
+            if active is not None:
+                if (
+                    active["requested_by"] == actor.agent_id
+                    and active["lease_id"] == lease_id
+                    and active["candidate_id"] == candidate["candidate_id"]
+                ):
+                    return {
+                        "ticket": ticket,
+                        "merge_job": self._merge_job(connection, active["merge_job_id"]),
+                    }
+                raise ConflictError("Ticket already has an active merge job")
+            merge_job_id = _id("merge_job")
+            timestamp = _iso()
+            connection.execute(
+                """INSERT INTO merge_jobs
+                   (merge_job_id, project_id, ticket_id, lease_id, expected_version, candidate_id,
+                    requested_by, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'QUEUED', ?)""",
+                (
+                    merge_job_id, project_id, ticket_id, lease_id, expected_version,
+                    candidate["candidate_id"], actor.agent_id, timestamp,
+                ),
+            )
+            self._event(
+                connection, actor, project_id, "integration.merge_queued", "ticket",
+                ticket_id, ticket["version"], {"merge_job_id": merge_job_id},
+            )
+            return {
+                "ticket": self._ticket(connection, ticket_id),
+                "merge_job": self._merge_job(connection, merge_job_id),
+            }
+
+    def get_merge_candidate(
+        self,
+        actor: Actor,
+        ticket_id: str,
+        lease_id: str,
+        merge_job_id: str,
+        lease_seconds: int = 900,
+    ) -> dict[str, Any]:
+        """Poll one merge job and renew the caller's Integrator lease while active."""
+        require_role(actor, Role.INTEGRATOR)
+        if not 30 <= lease_seconds <= 3600:
+            raise ValidationError("Lease duration must be between 30 and 3600 seconds")
+        with self.store.connection(immediate=True) as connection:
+            ticket, _project_id = self._authorized_ticket(connection, actor, ticket_id)
+            job = self._merge_job(connection, merge_job_id)
+            if job["ticket_id"] != ticket_id or job["lease_id"] != lease_id:
+                raise AuthorizationError("Merge job does not belong to this Integrator lease")
+            if job["requested_by"] != actor.agent_id:
+                raise AuthorizationError("Merge job belongs to another Integrator")
+            lease: dict[str, Any] | None = None
+            if job["status"] in {"QUEUED", "RUNNING"}:
+                if ticket["status"] != TicketStatus.MERGE_READY.value:
+                    raise ConflictError("Ticket is not ready for integration")
+                self._require_active_lease(connection, actor, ticket_id, lease_id)
+                timestamp = _now()
+                connection.execute(
+                    "UPDATE leases SET heartbeat_at = ?, expires_at = ? WHERE lease_id = ?",
+                    (_iso(timestamp), _iso(timestamp + timedelta(seconds=lease_seconds)), lease_id),
+                )
+                lease = self._lease(connection, lease_id)
+            return {
+                "ticket": self._ticket(connection, ticket_id),
+                "lease": lease,
+                "merge_job": self._merge_job(connection, merge_job_id),
+            }
+
+    def execute_queued_merge(self, merge_job_id: str) -> dict[str, Any]:
+        """Worker-only Git fast-forward for a previously authorized merge job."""
+        preflight_error: str | None = None
+        with self.store.connection(immediate=True) as connection:
+            job = self._merge_job(connection, merge_job_id)
+            if job["status"] != "QUEUED":
+                return job
+            actor = Actor(job["requested_by"], Role.INTEGRATOR, frozenset({job["project_id"]}))
+            ticket = self._ticket(connection, job["ticket_id"])
+            try:
+                if ticket["status"] != TicketStatus.MERGE_READY.value:
+                    raise ConflictError(
+                        "Ticket is no longer ready for integration before the merge worker started"
+                    )
+                self._expect_version(ticket, job["expected_version"])
+                self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
+            except DomainError as error:
+                preflight_error = str(error)
+            if preflight_error is None:
+                connection.execute(
+                    "UPDATE merge_jobs SET status = 'RUNNING', started_at = ? WHERE merge_job_id = ?",
+                    (_iso(), merge_job_id),
+                )
+        if preflight_error is not None:
+            return self.fail_queued_merge(merge_job_id, preflight_error)
+        try:
+            repository, project, candidate = self._merge_git_inputs(merge_job_id)
+            if repository is None:
+                raise ValidationError("Project repository is required before integrating a candidate")
+            merged, mainline_commit = self.git_worktrees.fast_forward_default_branch(
+                repository_path=repository["repository_path"],
+                default_branch=project["default_branch"],
+                expected_base_commit=candidate["base_commit"],
+                candidate_commit=candidate["commit_sha"],
+            )
+            return self._complete_queued_merge(merge_job_id, merged, mainline_commit)
+        except DomainError as error:
+            return self.fail_queued_merge(merge_job_id, str(error))
+
+    def _merge_git_inputs(
+        self, merge_job_id: str
+    ) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
+        with self.store.connection() as connection:
+            job = self._merge_job(connection, merge_job_id)
+            repository = _row(
+                connection.execute(
+                    "SELECT * FROM project_repositories WHERE project_id = ?", (job["project_id"],)
+                ).fetchone()
+            )
+            project = self._one(
+                connection, "SELECT * FROM projects WHERE project_id = ?", (job["project_id"],)
+            )
+            candidate = self._one(
+                connection, "SELECT * FROM candidates WHERE candidate_id = ?", (job["candidate_id"],)
+            )
+            return repository, project, candidate
+
+    def _complete_queued_merge(
+        self, merge_job_id: str, merged: bool, mainline_commit: str
+    ) -> dict[str, Any]:
+        with self.store.connection(immediate=True) as connection:
+            job = self._merge_job(connection, merge_job_id)
+            if job["status"] != "RUNNING":
+                return job
+            actor = Actor(job["requested_by"], Role.INTEGRATOR, frozenset({job["project_id"]}))
+            ticket = self._ticket(connection, job["ticket_id"])
+            if ticket["status"] != TicketStatus.MERGE_READY.value:
+                raise ConflictError("Ticket changed while the merge worker ran")
+            self._expect_version(ticket, job["expected_version"])
+            self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
+            timestamp = _iso()
+            next_version = ticket["version"] + 1
+            connection.execute("DELETE FROM leases WHERE lease_id = ?", (job["lease_id"],))
+            if not merged:
+                reason = (
+                    "Mainline advanced after this candidate was based; rebase the candidate "
+                    "and submit a new QA candidate."
+                )
+                connection.execute(
+                    """
+                    INSERT INTO context_entries
+                        (entry_id, project_id, feature_id, ticket_id, entry_type, content,
+                         source_ref, artifact_commit, actor_id, actor_role, created_at)
+                    VALUES (?, ?, ?, ?, 'integration_base_drift', ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        _id("ctx"), job["project_id"], ticket["feature_id"], job["ticket_id"],
+                        reason, f"candidate:{job['candidate_id']}", mainline_commit,
+                        actor.agent_id, actor.role.value, timestamp,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE tickets
+                    SET status = ?, blocked_reason = ?, version = ?, updated_at = ?
+                    WHERE ticket_id = ?
+                    """,
+                    (TicketStatus.REWORK.value, reason, next_version, timestamp, job["ticket_id"]),
+                )
+                self._event(
+                    connection, actor, job["project_id"], "integration.base_drift", "ticket",
+                    job["ticket_id"], next_version,
+                    {"candidate_id": job["candidate_id"], "mainline_commit": mainline_commit},
+                )
+                rework_ticket = self._ticket(connection, job["ticket_id"])
+                self._queue_ticket(connection, actor, job["project_id"], rework_ticket)
+                connection.execute(
+                    """UPDATE merge_jobs
+                       SET status = 'COMPLETED', merge_status = 'base_drift', mainline_commit = ?,
+                           error_message = NULL, completed_at = ?
+                       WHERE merge_job_id = ?""",
+                    (mainline_commit, timestamp, merge_job_id),
+                )
+                return self._merge_job(connection, merge_job_id)
+            connection.execute(
+                """
+                UPDATE tickets
+                SET status = ?, blocked_reason = NULL, version = ?, updated_at = ?
+                WHERE ticket_id = ?
+                """,
+                (TicketStatus.DONE.value, next_version, timestamp, job["ticket_id"]),
+            )
+            self._event(
+                connection, actor, job["project_id"], "integration.completed", "ticket",
+                job["ticket_id"], next_version,
+                {"candidate_id": job["candidate_id"], "commit_sha": mainline_commit},
+            )
+            connection.execute(
+                """UPDATE merge_jobs
+                   SET status = 'COMPLETED', merge_status = 'merged', mainline_commit = ?,
+                       error_message = NULL, completed_at = ?
+                   WHERE merge_job_id = ?""",
+                (mainline_commit, timestamp, merge_job_id),
+            )
+            return self._merge_job(connection, merge_job_id)
+
+    def fail_queued_merge(self, merge_job_id: str, error_message: str) -> dict[str, Any]:
+        """Terminally record a merge worker failure without blocking Integrator polling."""
+        self._bounded_text(error_message, "merge_job.error_message", 4000)
+        with self.store.connection(immediate=True) as connection:
+            job = self._merge_job(connection, merge_job_id)
+            if job["status"] in {"COMPLETED", "FAILED"}:
+                return job
+            connection.execute(
+                """UPDATE merge_jobs SET status = 'FAILED', error_message = ?, completed_at = ?
+                   WHERE merge_job_id = ?""",
+                (error_message, _iso(), merge_job_id),
+            )
+            actor = Actor(job["requested_by"], Role.INTEGRATOR, frozenset({job["project_id"]}))
+            ticket = self._ticket(connection, job["ticket_id"])
+            self._event(
+                connection, actor, job["project_id"], "integration.merge_failed", "ticket",
+                job["ticket_id"], ticket["version"], {"merge_job_id": merge_job_id},
+            )
+            return self._merge_job(connection, merge_job_id)
+
+    def _merge_job(self, connection: sqlite3.Connection, merge_job_id: str) -> dict[str, Any]:
+        return self._one(
+            connection, "SELECT * FROM merge_jobs WHERE merge_job_id = ?", (merge_job_id,)
+        )
+
     def heartbeat(self, actor: Actor, lease_id: str, lease_seconds: int = 900) -> dict[str, Any]:
         if not 30 <= lease_seconds <= 3600:
             raise ValidationError("Lease duration must be between 30 and 3600 seconds")

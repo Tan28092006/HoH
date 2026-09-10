@@ -83,6 +83,7 @@ async def test_mcp_exposes_only_role_appropriate_tools(tmp_path) -> None:
         "work.heartbeat",
         "integrator.claim_candidate",
         "integrator.merge_candidate",
+        "integrator.get_merge_candidate",
     }.issubset(integrator_names)
     assert "dev.submit_candidate" not in integrator_names
     assert "qa.submit_verdict" not in integrator_names

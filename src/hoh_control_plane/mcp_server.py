@@ -97,6 +97,25 @@ def _start_candidate_submission_worker(database_path: Path, submission_id: str) 
     )
 
 
+def _start_merge_worker(database_path: Path, merge_job_id: str) -> None:
+    """Fast-forward the protected default branch away from the MCP stdio request."""
+    subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "hoh_control_plane.integration_worker",
+            "--database",
+            str(database_path),
+            "--merge-job-id",
+            merge_job_id,
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+
+
 def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
     """Create the smallest MCP tool surface permitted for one authenticated role."""
     server = FastMCP(
@@ -605,16 +624,49 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
         def integrator_merge_candidate(
             ticket_id: str, lease_id: str, expected_version: int
         ) -> dict[str, Any]:
-            """Fast-forward a verified candidate, or safely requeue it when main drifted."""
+            """Queue a durable merge job and return its merge_job_id before Git runs."""
             arguments = {
                 "ticket_id": ticket_id,
                 "lease_id": lease_id,
                 "expected_version": expected_version,
             }
+
+            def queue_and_start() -> dict[str, Any]:
+                queued = service.queue_merge_candidate(actor, **arguments)
+                try:
+                    _start_merge_worker(service.store.path, queued["merge_job"]["merge_job_id"])
+                except OSError as error:
+                    service.fail_queued_merge(
+                        queued["merge_job"]["merge_job_id"],
+                        f"Could not start the isolated integration merge worker: {error}",
+                    )
+                    raise ValidationError("Could not start the isolated integration merge worker") from error
+                return queued
+
             return invoke(
                 "integrator.merge_candidate",
                 arguments,
-                lambda: service.merge_candidate(actor, **arguments),
+                queue_and_start,
+            )
+
+        @server.tool(name="integrator.get_merge_candidate", structured_output=True)
+        def integrator_get_merge_candidate(
+            ticket_id: str,
+            lease_id: str,
+            merge_job_id: str,
+            lease_seconds: int = 900,
+        ) -> dict[str, Any]:
+            """Poll a queued merge job; every poll also renews the Integrator ticket lease."""
+            arguments = {
+                "ticket_id": ticket_id,
+                "lease_id": lease_id,
+                "merge_job_id": merge_job_id,
+                "lease_seconds": lease_seconds,
+            }
+            return invoke(
+                "integrator.get_merge_candidate",
+                arguments,
+                lambda: service.get_merge_candidate(actor, **arguments),
             )
 
     if actor.role in {Role.QA, Role.ADMIN}:
