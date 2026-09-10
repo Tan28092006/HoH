@@ -15,6 +15,54 @@
         "HOH_AGENT_ROLE": "developer",
         "HOH_PROJECT_IDS": "hoh-control-plane"
       }
+    },
+    "hoh-developer-02": {
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "D:\\HoH\\scripts\\start-mcp.ps1"
+      ],
+      "env": {
+        "HOH_DATABASE_PATH": "D:\\HoH\\data\\control-plane.db",
+        "HOH_AGENT_ID": "developer-claude-02",
+        "HOH_AGENT_ROLE": "developer",
+        "HOH_PROJECT_IDS": "hoh-control-plane"
+      }
+    },
+    "hoh-developer-03": {
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "D:\\HoH\\scripts\\start-mcp.ps1"
+      ],
+      "env": {
+        "HOH_DATABASE_PATH": "D:\\HoH\\data\\control-plane.db",
+        "HOH_AGENT_ID": "developer-claude-03",
+        "HOH_AGENT_ROLE": "developer",
+        "HOH_PROJECT_IDS": "hoh-control-plane"
+      }
+    },
+    "hoh-integrator": {
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "D:\\HoH\\scripts\\start-mcp.ps1"
+      ],
+      "env": {
+        "HOH_DATABASE_PATH": "D:\\HoH\\data\\control-plane.db",
+        "HOH_AGENT_ID": "integrator-claude-01",
+        "HOH_AGENT_ROLE": "integrator",
+        "HOH_PROJECT_IDS": "hoh-control-plane"
+      }
     }
   }
 }

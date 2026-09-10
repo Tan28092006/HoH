@@ -5,7 +5,7 @@ param(
     [string]$Target,
 
     [Parameter(Mandatory)]
-    [ValidateSet("planner", "developer", "qa")]
+    [ValidateSet("planner", "developer", "qa", "integrator")]
     [string]$Role,
 
     [ValidateSet("user", "project")]
