@@ -27,6 +27,17 @@ class TicketStatus(StrEnum):
     SUPERSEDED = "SUPERSEDED"
 
 
+class PlannerJobStatus(StrEnum):
+    READY = "READY"
+    IN_PROGRESS = "IN_PROGRESS"
+    RESOLVED = "RESOLVED"
+
+
+class PlannerJobType(StrEnum):
+    QA_FAILURE = "qa_failure"
+    DEVELOPER_BLOCKER = "developer_blocker"
+
+
 # A retired ticket keeps its history but leaves dispatch for good. These groups are
 # the shared lifecycle contract: the wider Planner lifecycle work extends them
 # rather than restating which states may be retired or are already closed.

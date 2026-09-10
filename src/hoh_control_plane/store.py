@@ -415,6 +415,47 @@ CREATE UNIQUE INDEX IF NOT EXISTS idempotency_records_scope
 CREATE INDEX IF NOT EXISTS idempotency_records_expiry
     ON idempotency_records(expires_at);
 
+-- A QA failure or a Developer blocker is evidence that someone must plan against.
+-- Recording it as its own durable job lets one Planner pick the problem up later
+-- without rescanning ticket history, and keeps that queue separate from the
+-- executable Developer/QA/Integrator queue in work_queue.
+CREATE TABLE IF NOT EXISTS planner_jobs (
+    planner_job_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
+    job_type TEXT NOT NULL CHECK (job_type IN ('qa_failure', 'developer_blocker')),
+    status TEXT NOT NULL CHECK (status IN ('READY', 'IN_PROGRESS', 'RESOLVED')),
+    summary TEXT NOT NULL,
+    candidate_id TEXT REFERENCES candidates(candidate_id),
+    evidence_refs TEXT NOT NULL,
+    context_entry_id TEXT REFERENCES context_entries(entry_id),
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolution TEXT,
+    resolved_by TEXT,
+    resolved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS planner_jobs_project_status
+    ON planner_jobs(project_id, status, created_at);
+-- One open planning problem per ticket: later evidence updates that job rather
+-- than queueing a second Planner into the same decision.
+CREATE UNIQUE INDEX IF NOT EXISTS planner_jobs_one_open_per_ticket
+    ON planner_jobs(ticket_id) WHERE status IN ('READY', 'IN_PROGRESS');
+
+-- Planner jobs lease separately from tickets: a ticket lease is the exclusive
+-- right to change an artifact, while this is the exclusive right to decide.
+CREATE TABLE IF NOT EXISTS planner_job_leases (
+    lease_id TEXT PRIMARY KEY,
+    planner_job_id TEXT NOT NULL REFERENCES planner_jobs(planner_job_id),
+    agent_id TEXT NOT NULL,
+    acquired_at TEXT NOT NULL,
+    heartbeat_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS planner_job_leases_one_per_job
+    ON planner_job_leases(planner_job_id);
+
 CREATE TABLE IF NOT EXISTS audit_events (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     event_id TEXT NOT NULL UNIQUE,

@@ -465,6 +465,41 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 lambda: service.update_ticket_write_scope(actor, **arguments),
             )
 
+        @server.tool(name="planner.claim_job", structured_output=True)
+        def planner_claim_job(
+            planner_job_id: str,
+            lease_seconds: int = 900,
+            idempotency_key: str | None = None,
+        ) -> dict[str, Any]:
+            """Take the single exclusive, timed lease on one queued planning decision."""
+            arguments = {"planner_job_id": planner_job_id, "lease_seconds": lease_seconds}
+            return invoke(
+                "planner.claim_job",
+                arguments,
+                lambda: service.claim_planner_job(actor, **arguments),
+                idempotency_key,
+            )
+
+        @server.tool(name="planner.resolve_job", structured_output=True)
+        def planner_resolve_job(
+            planner_job_id: str,
+            lease_id: str,
+            resolution: str,
+            idempotency_key: str | None = None,
+        ) -> dict[str, Any]:
+            """Close a planning decision and release its exclusive lease."""
+            arguments = {
+                "planner_job_id": planner_job_id,
+                "lease_id": lease_id,
+                "resolution": resolution,
+            }
+            return invoke(
+                "planner.resolve_job",
+                arguments,
+                lambda: service.resolve_planner_job(actor, **arguments),
+                idempotency_key,
+            )
+
         @server.tool(name="planner.cancel_ticket", structured_output=True)
         def planner_cancel_ticket(
             ticket_id: str,

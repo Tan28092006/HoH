@@ -20,6 +20,8 @@ from hoh_control_plane.domain import (
     DomainError,
     IdempotencyConflictError,
     NotFoundError,
+    PlannerJobStatus,
+    PlannerJobType,
     Role,
     TicketStatus,
     ValidationError,
@@ -1010,7 +1012,7 @@ class ControlPlaneService:
             ticket["recommended_calls"] = calls
             feature["tickets"].append(ticket)
 
-        return {
+        discovered = {
             "agent": {
                 "agent_id": actor.agent_id,
                 "role": actor.role.value,
@@ -1020,6 +1022,11 @@ class ControlPlaneService:
             "features": list(grouped.values()),
             "next_cursor": None,
         }
+        if actor.role in {Role.PLANNER, Role.ADMIN}:
+            # Planning decisions are their own queue: a Planner sees them beside,
+            # never mixed into, the tickets an execution role can claim.
+            discovered["planning_jobs"] = self.discover_planner_jobs(actor, project_id)
+        return discovered
 
     def capabilities(self, actor: Actor) -> list[str]:
         common = [
@@ -2743,7 +2750,22 @@ class ControlPlaneService:
                 connection, actor, project_id, "ticket.blocked", "ticket", ticket_id,
                 next_version, {"entry_id": entry_id},
             )
-            return {"ticket": self._ticket(connection, ticket_id), "context_entry_id": entry_id}
+            blocked_ticket = self._ticket(connection, ticket_id)
+            planner_job = self._open_planner_job(
+                connection,
+                actor,
+                project_id,
+                blocked_ticket,
+                job_type=PlannerJobType.DEVELOPER_BLOCKER,
+                summary=reason,
+                evidence_refs=[f"context:{entry_id}"],
+                context_entry_id=entry_id,
+            )
+            return {
+                "ticket": blocked_ticket,
+                "context_entry_id": entry_id,
+                "planner_job": planner_job,
+            }
 
     def record_test_run(
         self,
@@ -3592,6 +3614,7 @@ class ControlPlaneService:
                 next_status = TicketStatus.VERIFIED
             else:
                 next_status = TicketStatus.REWORK
+                known_failure_entry_id = _id("ctx")
                 connection.execute(
                     """
                     INSERT INTO context_entries
@@ -3600,7 +3623,7 @@ class ControlPlaneService:
                     VALUES (?, ?, ?, ?, 'known_failure', ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        _id("ctx"),
+                        known_failure_entry_id,
                         project_id,
                         ticket["feature_id"],
                         ticket_id,
@@ -3631,10 +3654,39 @@ class ControlPlaneService:
             verdict_ticket = self._ticket(connection, ticket_id)
             if verdict in {"passed", "failed"}:
                 self._queue_ticket(connection, actor, project_id, verdict_ticket)
+            planner_job = None
+            if verdict == "failed":
+                failed_findings = [
+                    row["finding_id"]
+                    for row in connection.execute(
+                        """
+                        SELECT finding_id FROM qa_findings
+                        WHERE candidate_id = ? AND status != 'verified'
+                        ORDER BY created_at ASC
+                        """,
+                        (candidate_id,),
+                    ).fetchall()
+                ]
+                planner_job = self._open_planner_job(
+                    connection,
+                    actor,
+                    project_id,
+                    verdict_ticket,
+                    job_type=PlannerJobType.QA_FAILURE,
+                    summary="QA rejected the frozen candidate; inspect the linked findings.",
+                    evidence_refs=[
+                        f"candidate:{candidate_id}",
+                        f"context:{known_failure_entry_id}",
+                        *(f"finding:{finding_id}" for finding_id in failed_findings),
+                    ],
+                    candidate_id=candidate_id,
+                    context_entry_id=known_failure_entry_id,
+                )
             return {
                 "ticket": verdict_ticket,
                 "candidate": candidate,
                 "verdict": verdict,
+                "planner_job": planner_job,
             }
 
     def board(self, project_id: str) -> dict[str, Any]:
@@ -3931,6 +3983,233 @@ class ControlPlaneService:
             )
             purged = cursor.rowcount
         return {"purged": max(purged, 0), "retention_seconds": IDEMPOTENCY_RETENTION_SECONDS}
+
+    def _open_planner_job(
+        self,
+        connection: sqlite3.Connection,
+        actor: Actor,
+        project_id: str,
+        ticket: dict[str, Any],
+        *,
+        job_type: PlannerJobType,
+        summary: str,
+        evidence_refs: list[str],
+        candidate_id: str | None = None,
+        context_entry_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Turn one piece of failure evidence into durable, claimable Planner work.
+
+        A ticket carries at most one open planning problem: when new evidence
+        arrives while a job is still open, it updates that job instead of queueing
+        a second Planner into the same decision.
+        """
+        timestamp = _iso()
+        existing = _row(
+            connection.execute(
+                """
+                SELECT * FROM planner_jobs
+                WHERE ticket_id = ? AND status IN ('READY', 'IN_PROGRESS')
+                """,
+                (ticket["ticket_id"],),
+            ).fetchone()
+        )
+        if existing is not None:
+            merged = list(dict.fromkeys([*existing["evidence_refs"], *evidence_refs]))
+            connection.execute(
+                """
+                UPDATE planner_jobs
+                SET summary = ?, evidence_refs = ?, candidate_id = COALESCE(?, candidate_id),
+                    context_entry_id = COALESCE(?, context_entry_id), updated_at = ?
+                WHERE planner_job_id = ?
+                """,
+                (
+                    summary,
+                    json.dumps(merged),
+                    candidate_id,
+                    context_entry_id,
+                    timestamp,
+                    existing["planner_job_id"],
+                ),
+            )
+            self._event(
+                connection, actor, project_id, "planner_job.evidence_added", "planner_job",
+                existing["planner_job_id"], ticket["version"],
+                {"ticket_id": ticket["ticket_id"], "job_type": job_type.value},
+            )
+            return self._planner_job(connection, existing["planner_job_id"])
+        planner_job_id = _id("plan")
+        connection.execute(
+            """
+            INSERT INTO planner_jobs
+                (planner_job_id, project_id, ticket_id, job_type, status, summary,
+                 candidate_id, evidence_refs, context_entry_id, created_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'READY', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                planner_job_id,
+                project_id,
+                ticket["ticket_id"],
+                job_type.value,
+                summary,
+                candidate_id,
+                json.dumps(evidence_refs),
+                context_entry_id,
+                actor.agent_id,
+                timestamp,
+                timestamp,
+            ),
+        )
+        self._event(
+            connection, actor, project_id, "planner_job.created", "planner_job", planner_job_id,
+            ticket["version"],
+            {
+                "ticket_id": ticket["ticket_id"],
+                "job_type": job_type.value,
+                "candidate_id": candidate_id,
+            },
+        )
+        return self._planner_job(connection, planner_job_id)
+
+    def discover_planner_jobs(
+        self, actor: Actor, project_id: str, *, include_resolved: bool = False
+    ) -> list[dict[str, Any]]:
+        """List planning work separately from the executable Developer/QA queue."""
+        require_project(actor, project_id)
+        with self.store.connection() as connection:
+            self._expire_planner_job_leases(connection)
+            statuses = (
+                ("READY", "IN_PROGRESS", "RESOLVED")
+                if include_resolved
+                else ("READY", "IN_PROGRESS")
+            )
+            rows = connection.execute(
+                f"""
+                SELECT planner_job_id FROM planner_jobs
+                WHERE project_id = ? AND status IN ({', '.join('?' for _ in statuses)})
+                ORDER BY created_at ASC
+                """,
+                (project_id, *statuses),
+            ).fetchall()
+            return [
+                self._planner_job(connection, str(row["planner_job_id"])) for row in rows
+            ]
+
+    def claim_planner_job(
+        self, actor: Actor, planner_job_id: str, lease_seconds: int = 900
+    ) -> dict[str, Any]:
+        """Take the single exclusive, timed lease on one planning decision."""
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        if not 30 <= lease_seconds <= 3600:
+            raise ValidationError("Lease duration must be between 30 and 3600 seconds")
+        with self.store.connection(immediate=True) as connection:
+            self._expire_planner_job_leases(connection)
+            job = self._planner_job(connection, planner_job_id)
+            require_project(actor, job["project_id"])
+            if job["status"] == PlannerJobStatus.RESOLVED.value:
+                raise ConflictError("Planner job is already resolved")
+            existing = connection.execute(
+                "SELECT 1 FROM planner_job_leases WHERE planner_job_id = ?", (planner_job_id,)
+            ).fetchone()
+            if existing is not None:
+                raise ConflictError("Planner job is already leased by another Planner")
+            timestamp = _now()
+            lease_id = _id("planlease")
+            connection.execute(
+                """
+                INSERT INTO planner_job_leases
+                    (lease_id, planner_job_id, agent_id, acquired_at, heartbeat_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lease_id,
+                    planner_job_id,
+                    actor.agent_id,
+                    _iso(timestamp),
+                    _iso(timestamp),
+                    _iso(timestamp + timedelta(seconds=lease_seconds)),
+                ),
+            )
+            connection.execute(
+                "UPDATE planner_jobs SET status = 'IN_PROGRESS', updated_at = ? WHERE planner_job_id = ?",
+                (_iso(timestamp), planner_job_id),
+            )
+            self._event(
+                connection, actor, job["project_id"], "planner_job.claimed", "planner_job",
+                planner_job_id, 1, {"lease_id": lease_id},
+            )
+            return {
+                "planner_job": self._planner_job(connection, planner_job_id),
+                "lease": self._one(
+                    connection,
+                    "SELECT * FROM planner_job_leases WHERE lease_id = ?",
+                    (lease_id,),
+                ),
+            }
+
+    def resolve_planner_job(
+        self, actor: Actor, planner_job_id: str, lease_id: str, resolution: str
+    ) -> dict[str, Any]:
+        """Close a planning decision and release its exclusive lease."""
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        self._bounded_text(resolution, "resolution", 4000)
+        with self.store.connection(immediate=True) as connection:
+            job = self._planner_job(connection, planner_job_id)
+            require_project(actor, job["project_id"])
+            lease = self._one(
+                connection, "SELECT * FROM planner_job_leases WHERE lease_id = ?", (lease_id,)
+            )
+            if lease["planner_job_id"] != planner_job_id:
+                raise AuthorizationError("Lease does not cover this planner job")
+            if lease["agent_id"] != actor.agent_id:
+                raise AuthorizationError("Planner job lease belongs to another actor")
+            if datetime.fromisoformat(lease["expires_at"].replace("Z", "+00:00")) <= _now():
+                raise ConflictError("Planner job lease has expired")
+            timestamp = _iso()
+            connection.execute(
+                """
+                UPDATE planner_jobs
+                SET status = 'RESOLVED', resolution = ?, resolved_by = ?, resolved_at = ?,
+                    updated_at = ?
+                WHERE planner_job_id = ?
+                """,
+                (resolution, actor.agent_id, timestamp, timestamp, planner_job_id),
+            )
+            connection.execute(
+                "DELETE FROM planner_job_leases WHERE lease_id = ?", (lease_id,)
+            )
+            self._event(
+                connection, actor, job["project_id"], "planner_job.resolved", "planner_job",
+                planner_job_id, 1, {"ticket_id": job["ticket_id"]},
+            )
+            return {"planner_job": self._planner_job(connection, planner_job_id)}
+
+    def _expire_planner_job_leases(self, connection: sqlite3.Connection) -> None:
+        """Return abandoned planning decisions to the ready queue."""
+        expired = connection.execute(
+            "SELECT planner_job_id FROM planner_job_leases WHERE expires_at <= ?", (_iso(),)
+        ).fetchall()
+        for row in expired:
+            connection.execute(
+                "DELETE FROM planner_job_leases WHERE planner_job_id = ?", (row["planner_job_id"],)
+            )
+            connection.execute(
+                """
+                UPDATE planner_jobs SET status = 'READY', updated_at = ?
+                WHERE planner_job_id = ? AND status = 'IN_PROGRESS'
+                """,
+                (_iso(), row["planner_job_id"]),
+            )
+
+    def _planner_job(self, connection: sqlite3.Connection, planner_job_id: str) -> dict[str, Any]:
+        job = self._one(
+            connection, "SELECT * FROM planner_jobs WHERE planner_job_id = ?", (planner_job_id,)
+        )
+        job["lease"] = _row(
+            connection.execute(
+                "SELECT * FROM planner_job_leases WHERE planner_job_id = ?", (planner_job_id,)
+            ).fetchone()
+        )
+        return job
 
     def record_tool_call(
         self,
