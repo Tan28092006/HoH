@@ -27,6 +27,15 @@ class TicketStatus(StrEnum):
     SUPERSEDED = "SUPERSEDED"
 
 
+# A retired ticket keeps its history but leaves dispatch for good. These groups are
+# the shared lifecycle contract: the wider Planner lifecycle work extends them
+# rather than restating which states may be retired or are already closed.
+RETIRABLE_TICKET_STATUSES = frozenset(
+    {TicketStatus.BACKLOG, TicketStatus.READY, TicketStatus.BLOCKED}
+)
+CLOSED_TICKET_STATUSES = frozenset({TicketStatus.CANCELLED, TicketStatus.SUPERSEDED})
+
+
 @dataclass(frozen=True, slots=True)
 class Actor:
     agent_id: str

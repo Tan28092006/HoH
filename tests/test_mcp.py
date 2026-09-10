@@ -89,6 +89,9 @@ async def test_mcp_exposes_only_role_appropriate_tools(tmp_path) -> None:
     assert "qa.submit_verdict" not in integrator_names
     assert "planner.configure_repository" in planner_names
     assert "planner.configure_test_command" in planner_names
+    assert {"planner.cancel_ticket", "planner.supersede_ticket"}.issubset(planner_names)
+    assert "planner.cancel_ticket" not in names
+    assert "planner.cancel_ticket" not in qa_names
     assert content[0].text
     assert structured["project"]["project_id"] == "project-1"
     assert identity_content[0].text
@@ -531,6 +534,51 @@ async def test_invoke_raises_after_exhausting_the_contention_retry_budget(
         await create_mcp_server(service, actors["developer"]).call_tool(
             "identity.get_capabilities", {}
         )
+
+
+@pytest.mark.anyio
+async def test_planner_mcp_retires_a_ticket_with_an_audited_reason(
+    service, actors, seeded
+) -> None:
+    ticket = seeded["ticket"]
+    server = create_mcp_server(service, actors["planner"])
+
+    _, cancelled = await server.call_tool(
+        "planner.cancel_ticket",
+        {
+            "ticket_id": ticket["ticket_id"],
+            "expected_version": ticket["version"],
+            "reason": "The retry approach was abandoned.",
+        },
+    )
+
+    assert cancelled["ticket"]["status"] == "CANCELLED"
+    assert cancelled["context_entry"]["entry_type"] == "ticket_cancelled"
+    activity = service.list_agent_activity(actors["planner"], "project-1")["calls"]
+    assert activity[-1]["tool_name"] == "planner.cancel_ticket"
+    # The audited reason belongs in durable context, never in the redacted tool log.
+    assert "reason" not in activity[-1]["input_summary"].get("target", {})
+
+
+@pytest.mark.anyio
+async def test_planner_mcp_refuses_to_supersede_with_an_unknown_replacement(
+    service, actors, seeded
+) -> None:
+    ticket = seeded["ticket"]
+    server = create_mcp_server(service, actors["planner"])
+
+    with pytest.raises(ToolError, match="not_found"):
+        await server.call_tool(
+            "planner.supersede_ticket",
+            {
+                "ticket_id": ticket["ticket_id"],
+                "expected_version": ticket["version"],
+                "replacement_ticket_id": "DEV-DOES-NOT-EXIST",
+                "reason": "Replacement was never created.",
+            },
+        )
+
+    assert service.board("project-1")["columns"]["READY"][0]["ticket_id"] == ticket["ticket_id"]
 
 
 @pytest.mark.anyio

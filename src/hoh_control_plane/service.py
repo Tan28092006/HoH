@@ -12,6 +12,8 @@ from typing import Any
 from uuid import uuid4
 
 from hoh_control_plane.domain import (
+    CLOSED_TICKET_STATUSES,
+    RETIRABLE_TICKET_STATUSES,
     Actor,
     AuthorizationError,
     ConflictError,
@@ -627,6 +629,226 @@ class ControlPlaneService:
                 ),
             }
 
+    def cancel_ticket(
+        self, actor: Actor, ticket_id: str, expected_version: int, reason: str
+    ) -> dict[str, Any]:
+        """Retire obsolete unclaimed work so dispatch stops offering it."""
+        return self._retire_ticket(
+            actor,
+            ticket_id,
+            expected_version,
+            reason,
+            next_status=TicketStatus.CANCELLED,
+            entry_type="ticket_cancelled",
+            event_type="ticket.cancelled",
+        )
+
+    def supersede_ticket(
+        self,
+        actor: Actor,
+        ticket_id: str,
+        expected_version: int,
+        replacement_ticket_id: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Retire work that a named same-project replacement ticket now carries."""
+        self._bounded_text(replacement_ticket_id, "replacement_ticket_id", 100)
+        return self._retire_ticket(
+            actor,
+            ticket_id,
+            expected_version,
+            reason,
+            next_status=TicketStatus.SUPERSEDED,
+            entry_type="ticket_superseded",
+            event_type="ticket.superseded",
+            replacement_ticket_id=replacement_ticket_id,
+        )
+
+    def _retire_ticket(
+        self,
+        actor: Actor,
+        ticket_id: str,
+        expected_version: int,
+        reason: str,
+        *,
+        next_status: TicketStatus,
+        entry_type: str,
+        event_type: str,
+        replacement_ticket_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Close one ticket's dispatch without rewriting active or evidenced work.
+
+        Nothing is deleted: the ticket, its context, candidates and audit history stay
+        readable. Only the queue rows that would keep offering it are closed, in the
+        same transaction as the status change, so no agent can be handed retired work.
+        """
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        self._bounded_text(reason, "reason", 2000)
+        with self.store.connection(immediate=True) as connection:
+            ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._expect_version(ticket, expected_version)
+            if TicketStatus(ticket["status"]) not in RETIRABLE_TICKET_STATUSES:
+                raise ConflictError(
+                    "Only backlog, ready or blocked tickets can be cancelled or superseded"
+                )
+            self._require_no_active_work(connection, ticket_id)
+            replacement = self._retirement_replacement(
+                connection, ticket_id, project_id, replacement_ticket_id
+            )
+            timestamp = _iso()
+            next_version = ticket["version"] + 1
+            closed_offers = self._close_ticket_dispatch(connection, ticket_id, timestamp)
+            connection.execute(
+                "UPDATE tickets SET status = ?, version = ?, updated_at = ? WHERE ticket_id = ?",
+                (next_status.value, next_version, timestamp, ticket_id),
+            )
+            entry_id = _id("ctx")
+            connection.execute(
+                """
+                INSERT INTO context_entries
+                    (entry_id, project_id, feature_id, ticket_id, entry_type, content,
+                     source_ref, actor_id, actor_role, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry_id,
+                    project_id,
+                    ticket["feature_id"],
+                    ticket_id,
+                    entry_type,
+                    reason,
+                    f"ticket:{replacement_ticket_id}" if replacement_ticket_id else None,
+                    actor.agent_id,
+                    actor.role.value,
+                    timestamp,
+                ),
+            )
+            # Dependents of retired work stay blocked until a Planner rewires them;
+            # naming them here keeps that consequence visible instead of silent.
+            dependents = [
+                str(row["ticket_id"])
+                for row in connection.execute(
+                    """
+                    SELECT ticket_id FROM ticket_dependencies
+                    WHERE depends_on_ticket_id = ? ORDER BY ticket_id
+                    """,
+                    (ticket_id,),
+                ).fetchall()
+            ]
+            self._event(
+                connection,
+                actor,
+                project_id,
+                event_type,
+                "ticket",
+                ticket_id,
+                next_version,
+                {
+                    "previous_status": ticket["status"],
+                    "reason": reason,
+                    "replacement_ticket_id": replacement_ticket_id,
+                    "closed_offers": closed_offers,
+                    "dependent_ticket_ids": dependents,
+                },
+            )
+            return {
+                "ticket": self._ticket(connection, ticket_id),
+                "replacement": replacement,
+                "closed_offers": closed_offers,
+                "dependent_ticket_ids": dependents,
+                "context_entry": self._one(
+                    connection, "SELECT * FROM context_entries WHERE entry_id = ?", (entry_id,)
+                ),
+            }
+
+    def _require_no_active_work(self, connection: sqlite3.Connection, ticket_id: str) -> None:
+        """Refuse retirement while any agent, worker or frozen artifact still owns this."""
+        active_lease = connection.execute(
+            "SELECT 1 FROM leases WHERE ticket_id = ? AND expires_at > ?",
+            (ticket_id, _iso()),
+        ).fetchone()
+        if active_lease is not None:
+            raise ConflictError("A ticket with an active lease cannot be cancelled or superseded")
+        for table in (
+            "worktree_provision_jobs",
+            "candidate_submission_jobs",
+            "qa_test_jobs",
+            "merge_jobs",
+        ):
+            running = connection.execute(
+                f"SELECT 1 FROM {table} WHERE ticket_id = ? AND status IN ('QUEUED', 'RUNNING')",
+                (ticket_id,),
+            ).fetchone()
+            if running is not None:
+                raise ConflictError("A ticket with a running job cannot be cancelled or superseded")
+        candidate = connection.execute(
+            "SELECT 1 FROM candidates WHERE ticket_id = ?", (ticket_id,)
+        ).fetchone()
+        if candidate is not None:
+            raise ConflictError(
+                "A ticket with a frozen candidate cannot be cancelled or superseded"
+            )
+
+    def _retirement_replacement(
+        self,
+        connection: sqlite3.Connection,
+        ticket_id: str,
+        project_id: str,
+        replacement_ticket_id: str | None,
+    ) -> dict[str, Any] | None:
+        """Resolve the replacement reference that makes a supersede auditable."""
+        if replacement_ticket_id is None:
+            return None
+        if replacement_ticket_id == ticket_id:
+            raise ValidationError("A ticket cannot supersede itself")
+        replacement = _row(
+            connection.execute(
+                "SELECT * FROM tickets WHERE ticket_id = ?", (replacement_ticket_id,)
+            ).fetchone()
+        )
+        if replacement is None:
+            raise NotFoundError("Replacement ticket not found")
+        if self._project_for_ticket(connection, replacement_ticket_id) != project_id:
+            raise ValidationError("Replacement ticket must belong to the same project")
+        return replacement
+
+    def _close_ticket_dispatch(
+        self, connection: sqlite3.Connection, ticket_id: str, timestamp: str
+    ) -> int:
+        """Close queue, offer and outbox rows together so no live hand-off survives."""
+        queue_ids = [
+            str(row["queue_id"])
+            for row in connection.execute(
+                "SELECT queue_id FROM work_queue WHERE ticket_id = ? AND status IN ('pending', 'offered')",
+                (ticket_id,),
+            ).fetchall()
+        ]
+        if not queue_ids:
+            return 0
+        placeholders = ", ".join("?" for _ in queue_ids)
+        closed_offers = connection.execute(
+            f"""
+            UPDATE work_offers SET status = 'cancelled', closed_at = ?
+            WHERE queue_id IN ({placeholders}) AND status = 'offered'
+            """,
+            (timestamp, *queue_ids),
+        ).rowcount
+        connection.execute(
+            f"""
+            UPDATE dispatch_outbox SET status = 'cancelled'
+            WHERE queue_id IN ({placeholders}) AND status = 'pending'
+            """,
+            queue_ids,
+        )
+        connection.execute(
+            f"""
+            UPDATE work_queue SET status = 'cancelled', updated_at = ?
+            WHERE queue_id IN ({placeholders})
+            """,
+            (timestamp, *queue_ids),
+        )
+        return max(closed_offers, 0)
+
     def append_planner_context(
         self,
         actor: Actor,
@@ -696,6 +918,11 @@ class ControlPlaneService:
             )
             parameters: list[Any] = [project_id]
             where = ["f.project_id = ?"]
+            # Retired work stays readable through ticket context, never through
+            # a discovery surface that exists to hand out actionable work.
+            closed = sorted(status.value for status in CLOSED_TICKET_STATUSES)
+            where.append(f"t.status NOT IN ({', '.join('?' for _ in closed)})")
+            parameters.extend(closed)
             if actor.role not in {Role.PLANNER, Role.ADMIN}:
                 where.append("t.required_role = ?")
                 parameters.append(actor.role.value)
@@ -807,6 +1034,7 @@ class ControlPlaneService:
             Role.PLANNER: [
                 "feature:write",
                 "ticket:plan",
+                "ticket:retire",
                 "repository:configure",
                 "test_command:configure",
             ],
@@ -1069,7 +1297,8 @@ class ControlPlaneService:
             "tickets": tickets,
             "verified_behaviors": verified,
             "open_ticket_count": sum(
-                ticket["status"] not in {TicketStatus.DONE.value, TicketStatus.CANCELLED.value}
+                ticket["status"] != TicketStatus.DONE.value
+                and TicketStatus(ticket["status"]) not in CLOSED_TICKET_STATUSES
                 for ticket in tickets
             ),
         }

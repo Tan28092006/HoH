@@ -179,3 +179,59 @@ def test_failed_qa_requeues_ticket_for_an_available_developer(
 
     assert inbox["offers"][0]["target_role"] == Role.DEVELOPER.value
     assert inbox["offers"][0]["ticket"]["status"] == TicketStatus.REWORK.value
+
+
+def test_cancelled_work_is_never_offered_again(
+    service: ControlPlaneService,
+    actors: dict[str, Actor],
+    seeded: dict[str, object],
+) -> None:
+    """A retired ticket must leave every dispatch surface, including a live offer."""
+    ticket = seeded["ticket"]
+    admin = Actor("scheduler", Role.ADMIN, frozenset({"*"}))
+    service.register_agent(actors["developer"], skills=["hoh-developer"], capacity=1)
+    before = service.get_agent_inbox(actors["developer"], "project-1")
+
+    service.cancel_ticket(
+        actors["planner"], ticket["ticket_id"], ticket["version"], "Approach abandoned."
+    )
+    after = service.get_agent_inbox(actors["developer"], "project-1")
+    dispatch = service.dispatch_pending_work(admin, offer_seconds=90)
+
+    assert [offer["ticket"]["ticket_id"] for offer in before["offers"]] == [ticket["ticket_id"]]
+    assert after["offers"] == []
+    assert after["offered_now"] == 0
+    assert dispatch["offered_count"] == 0
+    assert dispatch["pending_count"] == 0
+
+
+def test_superseded_work_leaves_dispatch_but_its_replacement_is_offered(
+    service: ControlPlaneService,
+    actors: dict[str, Actor],
+    seeded: dict[str, object],
+) -> None:
+    ticket = seeded["ticket"]
+    replacement = service.create_ticket(
+        actors["planner"],
+        feature_id="payment-retry",
+        ticket_id="DEV-950",
+        title="Narrower retry fix",
+        objective="Replaces the broad retry ticket",
+        required_role=Role.DEVELOPER,
+        acceptance_criteria=["The narrower behavior is demonstrable"],
+        preservation_constraints=[],
+        file_scope=["src/checkout/retry/**"],
+        ready=True,
+    )
+    service.register_agent(actors["developer"], skills=["hoh-developer"], capacity=1)
+
+    service.supersede_ticket(
+        actors["planner"],
+        ticket["ticket_id"],
+        ticket["version"],
+        replacement["ticket_id"],
+        "Replaced by a narrower ticket.",
+    )
+    inbox = service.get_agent_inbox(actors["developer"], "project-1")
+
+    assert [offer["ticket"]["ticket_id"] for offer in inbox["offers"]] == ["DEV-950"]

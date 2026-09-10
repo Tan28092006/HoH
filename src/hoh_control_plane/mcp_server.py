@@ -465,6 +465,48 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 lambda: service.update_ticket_write_scope(actor, **arguments),
             )
 
+        @server.tool(name="planner.cancel_ticket", structured_output=True)
+        def planner_cancel_ticket(
+            ticket_id: str,
+            expected_version: int,
+            reason: str,
+            idempotency_key: str | None = None,
+        ) -> dict[str, Any]:
+            """Retire an obsolete backlog, ready or blocked ticket from dispatch."""
+            arguments = {
+                "ticket_id": ticket_id,
+                "expected_version": expected_version,
+                "reason": reason,
+            }
+            return invoke(
+                "planner.cancel_ticket",
+                arguments,
+                lambda: service.cancel_ticket(actor, **arguments),
+                idempotency_key,
+            )
+
+        @server.tool(name="planner.supersede_ticket", structured_output=True)
+        def planner_supersede_ticket(
+            ticket_id: str,
+            expected_version: int,
+            replacement_ticket_id: str,
+            reason: str,
+            idempotency_key: str | None = None,
+        ) -> dict[str, Any]:
+            """Retire a ticket that an existing same-project replacement now carries."""
+            arguments = {
+                "ticket_id": ticket_id,
+                "expected_version": expected_version,
+                "replacement_ticket_id": replacement_ticket_id,
+                "reason": reason,
+            }
+            return invoke(
+                "planner.supersede_ticket",
+                arguments,
+                lambda: service.supersede_ticket(actor, **arguments),
+                idempotency_key,
+            )
+
         @server.tool(name="planner.append_context", structured_output=True)
         def planner_append_context(
             entry_type: str,
