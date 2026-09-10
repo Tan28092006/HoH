@@ -63,6 +63,7 @@ async def test_mcp_exposes_only_role_appropriate_tools(tmp_path) -> None:
         "work.claim",
         "work.heartbeat",
         "dev.prepare_worktree",
+        "dev.get_worktree_provision",
         "dev.append_progress",
         "dev.submit_candidate",
     }.issubset(names)
@@ -267,6 +268,39 @@ async def test_qa_mcp_queues_a_detached_project_test_worker(
 
     assert result["test_run"]["status"] == "QUEUED"
     assert launched == [(service.store.path, "testrun_async")]
+
+
+@pytest.mark.anyio
+async def test_developer_mcp_queues_a_detached_worktree_provision(
+    service, actors, seeded, monkeypatch
+) -> None:
+    queued = {
+        "ticket": seeded["ticket"],
+        "provision": {
+            "provision_id": "worktree_job_async",
+            "ticket_id": seeded["ticket"]["ticket_id"],
+            "status": "QUEUED",
+        },
+    }
+    launched: list[tuple[object, str]] = []
+    monkeypatch.setattr(service, "queue_worktree_provision", lambda *_args, **_kwargs: queued)
+    monkeypatch.setattr(
+        mcp_server,
+        "_start_worktree_provision_worker",
+        lambda database_path, provision_id: launched.append((database_path, provision_id)),
+    )
+
+    _, result = await create_mcp_server(service, actors["developer"]).call_tool(
+        "dev.prepare_worktree",
+        {
+            "ticket_id": seeded["ticket"]["ticket_id"],
+            "lease_id": "lease_developer",
+            "expected_version": seeded["ticket"]["version"],
+        },
+    )
+
+    assert result["provision"]["status"] == "QUEUED"
+    assert launched == [(service.store.path, "worktree_job_async")]
 
 
 @pytest.mark.anyio

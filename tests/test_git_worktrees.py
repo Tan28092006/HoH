@@ -8,6 +8,7 @@ import pytest
 
 from hoh_control_plane.domain import ConflictError, ValidationError
 from hoh_control_plane.git_worktrees import GitWorktreeManager
+from hoh_control_plane import worktree_worker
 
 
 def _git(path: Path, *arguments: str) -> str:
@@ -147,6 +148,52 @@ def test_developer_worktree_binds_a_candidate_to_its_ticket_and_branch(
     assert submitted["candidate"]["changed_paths"] == ["src/checkout/retry.txt"]
     assert context["worktree"]["branch_ref"] == prepared["worktree"]["branch_ref"]
     assert context["candidate"]["changed_paths"] == ["src/checkout/retry.txt"]
+
+
+def test_worktree_provision_is_queued_then_completed_by_a_detached_worker(
+    service, actors, seeded, tmp_path: Path, monkeypatch
+) -> None:
+    """The Developer MCP path queues Git work rather than waiting on it."""
+    repository = _repository(tmp_path)
+    service.configure_repository(actors["planner"], "project-1", str(repository))
+    ticket = seeded["ticket"]
+    claim = service.claim_ticket(
+        actors["developer"], ticket["ticket_id"], ticket["version"], 900
+    )
+
+    def fail_if_called(*_args, **_kwargs):
+        pytest.fail("worktree provisioning must not run in the queueing request")
+
+    monkeypatch.setattr(service.git_worktrees, "prepare", fail_if_called)
+    queued = service.queue_worktree_provision(
+        actors["developer"],
+        ticket["ticket_id"],
+        claim["lease"]["lease_id"],
+        claim["ticket"]["version"],
+    )
+
+    assert queued["provision"]["status"] == "QUEUED"
+    assert queued["provision"]["ticket_id"] == ticket["ticket_id"]
+
+    monkeypatch.undo()
+    worktree_worker.main(
+        [
+            "--database",
+            str(service.store.path),
+            "--provision-id",
+            queued["provision"]["provision_id"],
+        ]
+    )
+    polled = service.get_worktree_provision(
+        actors["developer"],
+        ticket["ticket_id"],
+        claim["lease"]["lease_id"],
+        queued["provision"]["provision_id"],
+    )
+
+    assert polled["provision"]["status"] == "COMPLETED"
+    assert polled["worktree"]["agent_id"] == actors["developer"].agent_id
+    assert Path(polled["worktree"]["worktree_path"]).is_dir()
 
 
 def test_rework_handoffs_to_a_new_developer_without_touching_the_prior_worktree(
