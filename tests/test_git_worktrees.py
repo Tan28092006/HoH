@@ -149,6 +149,105 @@ def test_developer_worktree_binds_a_candidate_to_its_ticket_and_branch(
     assert context["candidate"]["changed_paths"] == ["src/checkout/retry.txt"]
 
 
+def test_rework_handoffs_to_a_new_developer_without_touching_the_prior_worktree(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """A rejected candidate can be continued by a different Developer safely."""
+    repository = _repository(tmp_path)
+    service.configure_repository(actors["planner"], "project-1", str(repository))
+    ticket = seeded["ticket"]
+    first_claim = service.claim_ticket(
+        actors["developer"], ticket["ticket_id"], ticket["version"], 900
+    )
+    first_worktree = service.prepare_worktree(
+        actors["developer"],
+        ticket["ticket_id"],
+        first_claim["lease"]["lease_id"],
+        first_claim["ticket"]["version"],
+    )["worktree"]
+    old_path = Path(first_worktree["worktree_path"])
+    retry_path = old_path / "src" / "checkout" / "retry.txt"
+    retry_path.parent.mkdir(parents=True)
+    retry_path.write_text("first candidate\n", encoding="utf-8")
+    _git(old_path, "add", "src/checkout/retry.txt")
+    _git(old_path, "commit", "-m", "First candidate")
+    first_candidate = service.submit_candidate(
+        actors["developer"],
+        ticket["ticket_id"],
+        first_claim["lease"]["lease_id"],
+        first_claim["ticket"]["version"],
+        _git(old_path, "rev-parse", "HEAD"),
+        first_worktree["base_commit"],
+        first_worktree["branch_ref"],
+        ["First candidate is ready for QA."],
+    )
+    qa_claim = service.claim_qa(
+        actors["qa"], ticket["ticket_id"], first_candidate["ticket"]["version"], 900
+    )
+    rework = service.submit_qa_verdict(
+        actors["qa"],
+        ticket["ticket_id"],
+        qa_claim["lease"]["lease_id"],
+        first_candidate["candidate"]["candidate_id"],
+        qa_claim["ticket"]["version"],
+        "failed",
+        [
+            {
+                "criterion": ticket["acceptance_criteria"][0],
+                "status": "failed",
+                "severity": "high",
+                "observation": "A follow-up Developer must repair this candidate.",
+                "evidence": [
+                    {
+                        "type": "test_result",
+                        "observation": "candidate rejected",
+                        "storage_ref": "evidence://qa/rejected.json",
+                    }
+                ],
+            }
+        ],
+    )
+
+    handoff_claim = service.claim_ticket(
+        actors["developer_2"], ticket["ticket_id"], rework["ticket"]["version"], 900
+    )
+    handed_off = service.prepare_worktree(
+        actors["developer_2"],
+        ticket["ticket_id"],
+        handoff_claim["lease"]["lease_id"],
+        handoff_claim["ticket"]["version"],
+    )["worktree"]
+    handoff_path = Path(handed_off["worktree_path"])
+
+    assert handed_off["agent_id"] == "dev-02"
+    assert handoff_path != old_path
+    assert _git(handoff_path, "rev-parse", "HEAD") == first_candidate["candidate"]["commit_sha"]
+    assert handed_off["base_commit"] == first_worktree["base_commit"]
+    assert old_path.is_dir()
+    assert _git(old_path, "rev-parse", "HEAD") == first_candidate["candidate"]["commit_sha"]
+
+    follow_up = handoff_path / "src" / "checkout" / "handoff.txt"
+    follow_up.write_text("second developer\n", encoding="utf-8")
+    _git(handoff_path, "add", "src/checkout/handoff.txt")
+    _git(handoff_path, "commit", "-m", "Continue rejected candidate")
+    second_candidate = service.submit_candidate(
+        actors["developer_2"],
+        ticket["ticket_id"],
+        handoff_claim["lease"]["lease_id"],
+        handoff_claim["ticket"]["version"],
+        _git(handoff_path, "rev-parse", "HEAD"),
+        handed_off["base_commit"],
+        handed_off["branch_ref"],
+        ["The rejected candidate was continued in a separate worktree."],
+    )
+
+    assert second_candidate["candidate"]["base_commit"] == first_worktree["base_commit"]
+    assert second_candidate["candidate"]["changed_paths"] == [
+        "src/checkout/handoff.txt",
+        "src/checkout/retry.txt",
+    ]
+
+
 def test_candidate_is_rejected_when_actual_diff_exceeds_declared_write_scope(
     service, actors, seeded, tmp_path: Path
 ) -> None:
