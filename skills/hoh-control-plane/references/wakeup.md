@@ -4,9 +4,12 @@ Use a wakeup only for a dedicated execution-role worker. The scheduler creates
 durable offers; a wakeup merely makes the worker call `work.inbox` soon enough
 to see one.
 
-- Codex Desktop: use a same-task heartbeat with the matching template under
+The templates below are not installed with this skill; they live in the HoH
+repository, so fetch them from a checkout rather than expecting them alongside
+this file.
+- Codex Desktop: use a same-task heartbeat with the repository template under
   `deploy/codex/`.
-- Claude Code: put the matching template under `deploy/claude-code/` into the
+- Claude Code: copy the repository template under `deploy/claude-code/` into the
   worker's `.claude/loop.md`, run `/loop 1m`, then background that same session.
 
 On every wakeup, renew presence and check `work.inbox`. If `active_leases` is

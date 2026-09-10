@@ -126,31 +126,58 @@ def test_nothing_outside_the_skill_tree_is_installed() -> None:
     assert not any("$repoRoot" in line and "Copy-Item" in line for line in instructions)
 
 
-def test_no_repository_asset_named_by_a_skill_is_portable_enough_to_ship() -> None:
-    """Guards the gap that let an unportable file be distributed unnoticed.
+def test_an_uninstalled_repository_path_is_always_marked_as_one() -> None:
+    """An installed agent must never be sent to a path as if it were beside it.
 
-    If a future change makes the installer ship an asset a skill names, this
-    records why that is unsafe today: the named files are host-specific.
+    The installer ships skill directories only, and the assets the wakeup
+    reference names are host-specific, so they cannot be distributed. What a
+    reader needs instead is to be told plainly where those files live. Every
+    block naming such a path therefore has to say it is in the repository.
     """
-    unportable: dict[str, int] = {}
+    unmarked: list[str] = []
     for document in _skill_markdown():
-        for candidate in BACKTICKED_PATH.findall(document.read_text(encoding="utf-8")):
-            relative = candidate.rstrip("/")
-            if not relative.startswith(ASSET_PREFIXES):
-                continue
-            source = REPOSITORY_ROOT / relative
-            if not source.exists():
-                continue
-            named = [source] if source.is_file() else [
-                child for child in source.rglob("*") if child.is_file()
-            ]
-            for asset in named:
-                if FORBIDDEN_CONTENT.search(asset.read_text(encoding="utf-8", errors="ignore")):
-                    unportable[asset.relative_to(REPOSITORY_ROOT).as_posix()] = 1
+        text = document.read_text(encoding="utf-8")
+        skill_name = document.relative_to(SKILL_ROOT).parts[0]
+        installed = _installed_relative_paths(
+            skill_name if skill_name != BASE_SKILL else "hoh-developer"
+        )
+        for block in text.split("\n\n"):
+            for candidate in BACKTICKED_PATH.findall(block):
+                relative = candidate.rstrip("/")
+                if not relative.startswith(ASSET_PREFIXES):
+                    continue
+                if not (REPOSITORY_ROOT / relative).exists():
+                    continue
+                if f"{BASE_SKILL}/{relative}" in installed:
+                    continue
+                if "repositor" not in block.lower():
+                    unmarked.append(
+                        f"{document.relative_to(REPOSITORY_ROOT)} -> {candidate}"
+                    )
 
-    # These are exactly the assets a later scope extension has to make portable
-    # before the wakeup reference can point at installed copies of them.
-    assert set(unportable) == {
+    assert unmarked == []
+
+
+def test_the_assets_the_wakeup_reference_names_are_still_unportable() -> None:
+    """Records why those files are named rather than shipped.
+
+    If they ever become portable, the installer could distribute them and the
+    reference could stop sending readers to a checkout; this test failing is the
+    signal to revisit that decision rather than a defect on its own.
+    """
+    unportable = {
+        asset.relative_to(REPOSITORY_ROOT).as_posix()
+        for named in ("deploy/codex", "deploy/claude-code", "docs/ROLE_WAKEUPS.md")
+        for asset in (
+            [REPOSITORY_ROOT / named]
+            if (REPOSITORY_ROOT / named).is_file()
+            else (REPOSITORY_ROOT / named).rglob("*")
+        )
+        if asset.is_file()
+        and FORBIDDEN_CONTENT.search(asset.read_text(encoding="utf-8", errors="ignore"))
+    }
+
+    assert unportable == {
         "deploy/claude-code/hoh-developer.mcp.json",
         "deploy/claude-code/hoh-planner.mcp.json",
         "deploy/claude-code/hoh-qa.mcp.json",
