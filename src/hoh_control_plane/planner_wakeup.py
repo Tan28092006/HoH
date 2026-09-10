@@ -38,6 +38,10 @@ class EndpointNotAllowed(ValueError):
     """The configured endpoint is not a loopback address this pilot may call."""
 
 
+class SigningSecretMissing(ValueError):
+    """A registered endpoint was configured without the secret that authenticates it."""
+
+
 def validate_endpoint(endpoint: str) -> str:
     parsed = urlparse(endpoint)
     if parsed.scheme not in {"http", "https"} or parsed.hostname not in ALLOWED_HOSTS:
@@ -47,8 +51,24 @@ def validate_endpoint(endpoint: str) -> str:
     return endpoint
 
 
-def build_envelope(payload: dict[str, Any], nonce: str, secret: str | None) -> dict[str, Any]:
-    """Wrap a bounded payload so the receiver can reject replays and forgeries."""
+def build_envelope(
+    payload: dict[str, Any],
+    nonce: str,
+    secret: str | None,
+    *,
+    require_signature: bool = False,
+) -> dict[str, Any]:
+    """Wrap a bounded payload so the receiver can reject replays and forgeries.
+
+    Anything sent to a registered endpoint must be signed, so that path sets
+    require_signature and this refuses to build an unauthenticated envelope. The
+    invariant lives here rather than at the call site, so a later caller cannot
+    reintroduce an unsigned delivery by forgetting to check.
+    """
+    if require_signature and not secret:
+        raise SigningSecretMissing(
+            f"{SECRET_VARIABLE} must be set to deliver to a registered endpoint"
+        )
     envelope: dict[str, Any] = {
         "kind": "planner.intervention",
         "nonce": nonce,
@@ -85,14 +105,20 @@ def deliver_once(
 ) -> dict[str, Any]:
     """Attempt one delivery and record its outcome without touching the ticket."""
     payload = service.intervention_payload(intervention)
-    envelope = build_envelope(payload, intervention["nonce"], secret)
     if endpoint is None:
-        write_local_notification(notification_root, envelope)
+        # The fallback writes to this machine's own disk, so there is no remote
+        # party to authenticate; it is signed only when a secret happens to exist.
+        write_local_notification(
+            notification_root, build_envelope(payload, intervention["nonce"], secret)
+        )
         return service.record_intervention_delivery(
             intervention["intervention_id"], delivered=True, detail=None
         )
     try:
         validate_endpoint(endpoint)
+        envelope = build_envelope(
+            payload, intervention["nonce"], secret, require_signature=True
+        )
         request = urllib.request.Request(
             endpoint,
             data=json.dumps(envelope).encode("utf-8"),
@@ -104,7 +130,13 @@ def deliver_once(
                 raise urllib.error.HTTPError(
                     endpoint, response.status, "rejected", response.headers, None
                 )
-    except (EndpointNotAllowed, urllib.error.URLError, OSError, ValueError) as error:
+    except (
+        EndpointNotAllowed,
+        SigningSecretMissing,
+        urllib.error.URLError,
+        OSError,
+        ValueError,
+    ) as error:
         # The evidence and the Planner job survive; only delivery failed.
         return service.record_intervention_delivery(
             intervention["intervention_id"], delivered=False, detail=str(error)[:2000]

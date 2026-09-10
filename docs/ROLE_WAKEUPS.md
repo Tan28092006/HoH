@@ -97,9 +97,13 @@ Configuration:
 - `HOH_PLANNER_WAKEUP_URL` - optional loopback endpoint (`127.0.0.1`,
   `localhost` or `::1`). Any other host is refused rather than called, because
   this pilot has no authenticated multi-machine transport.
-- `HOH_PLANNER_WAKEUP_SECRET` - optional shared secret. When set, each envelope
-  carries an HMAC-SHA256 signature over its kind, nonce, issue time and payload,
-  so a receiver can reject forged or replayed envelopes.
+- `HOH_PLANNER_WAKEUP_SECRET` - **required whenever an endpoint is configured.**
+  Each envelope carries an HMAC-SHA256 signature over its kind, nonce, issue time
+  and payload, so a receiver can reject forged or replayed envelopes. Configuring
+  an endpoint without the secret fails closed: the adapter refuses to build the
+  envelope, records the attempt as failed and never calls the endpoint, so an
+  unauthenticated request cannot reach a registered receiver. The request stays
+  pending and the Planner heartbeat still finds it.
 
 Codex Desktop exposes no external wake API, so **the fallback is local**: with no
 endpoint configured, each request is written as a bounded JSON envelope under

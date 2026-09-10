@@ -10,6 +10,7 @@ from hoh_control_plane.domain import Actor, AuthorizationError, Role
 from hoh_control_plane.mcp_server import create_mcp_server
 from hoh_control_plane.planner_wakeup import (
     EndpointNotAllowed,
+    SigningSecretMissing,
     build_envelope,
     deliver_pending,
     validate_endpoint,
@@ -250,6 +251,70 @@ def test_delivery_without_an_endpoint_writes_a_bounded_local_notification(
     assert envelope["signature"]
     assert envelope["payload"]["event_class"] == "developer_blocker"
     assert "observation" not in json.dumps(envelope)
+
+
+def test_a_registered_endpoint_is_never_sent_an_unsigned_envelope(
+    service, actors, seeded, monkeypatch
+) -> None:
+    """An endpoint without its secret must fail closed, not deliver unauthenticated."""
+    _blocked(service, actors, seeded)
+    monkeypatch.setenv(planner_wakeup.ENDPOINT_VARIABLE, "http://127.0.0.1:8765/wake")
+    monkeypatch.delenv(planner_wakeup.SECRET_VARIABLE, raising=False)
+    monkeypatch.setattr(
+        planner_wakeup.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail(
+            "An unauthenticated envelope must never reach a registered endpoint"
+        ),
+    )
+
+    result = deliver_pending(service)
+    pending = _interventions(service)[0]
+
+    assert result["delivered"] == []
+    assert len(result["failed"]) == 1
+    assert pending["status"] == "PENDING"
+    assert planner_wakeup.SECRET_VARIABLE in pending["last_error"]
+    # The planning problem is untouched and still reachable by polling.
+    assert service.discover_planner_jobs(actors["planner"], "project-1")[0]["status"] == "READY"
+
+
+def test_building_an_endpoint_envelope_without_a_secret_is_refused() -> None:
+    with pytest.raises(SigningSecretMissing):
+        build_envelope({"intervention_id": "wake_1"}, "nonce-1", None, require_signature=True)
+    with pytest.raises(SigningSecretMissing):
+        build_envelope({"intervention_id": "wake_1"}, "nonce-1", "", require_signature=True)
+
+
+def test_a_registered_endpoint_receives_a_signed_envelope(
+    service, actors, seeded, monkeypatch
+) -> None:
+    _blocked(service, actors, seeded)
+    monkeypatch.setenv(planner_wakeup.ENDPOINT_VARIABLE, "http://127.0.0.1:8765/wake")
+    monkeypatch.setenv(planner_wakeup.SECRET_VARIABLE, "shared-secret")
+    sent: list[dict[str, object]] = []
+
+    class _Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def capture(request, *_args, **_kwargs):
+        sent.append(json.loads(request.data.decode("utf-8")))
+        return _Response()
+
+    monkeypatch.setattr(planner_wakeup.urllib.request, "urlopen", capture)
+
+    result = deliver_pending(service)
+
+    assert len(result["delivered"]) == 1
+    assert sent[0]["signature"]
+    assert sent[0]["nonce"]
+    assert _interventions(service)[0]["status"] == "DELIVERED"
 
 
 def test_the_envelope_is_signed_and_replay_identifiable() -> None:
