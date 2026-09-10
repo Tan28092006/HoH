@@ -1911,9 +1911,35 @@ class ControlPlaneService:
             execution = self.project_tests.execute(
                 job["test_command"], worktree_path, job["timeout_seconds"]
             )
+            if execution.artifact_mismatch:
+                return self._fail_with_artifact_mismatch(test_run_id, job, execution)
             return self._complete_queued_project_test(test_run_id, execution)
         except (DomainError, OSError) as error:
             return self.fail_queued_project_test(test_run_id, str(error))
+
+    def _fail_with_artifact_mismatch(
+        self, test_run_id: str, job: dict[str, Any], execution: TestExecution
+    ) -> dict[str, Any]:
+        """Record an infrastructure-only import mismatch without a candidate verdict.
+
+        The frozen candidate's own git identity was already verified before this ran
+        (verify_frozen_candidate); what failed is that the configured command imported
+        hoh_control_plane from somewhere other than that verified worktree. No
+        qa_test_runs row is written -- this must never read as a candidate regression --
+        but the mismatch is still durably evidenced on disk and referenced from the
+        job's error_message so QA and Planner can inspect expected-vs-observed.
+        """
+        storage_ref, _report_path = self.project_tests.write_report(
+            candidate_id=job["candidate_id"],
+            test_run_id=test_run_id,
+            execution=execution,
+            candidate_commit=job["candidate_commit"],
+        )
+        message = (
+            f"{execution.stderr} (verified candidate commit {job['candidate_commit']}; "
+            f"durable evidence={storage_ref})"
+        )
+        return self.fail_queued_project_test(test_run_id, message)
 
     def run_project_tests(
         self, actor: Actor, ticket_id: str, lease_id: str
@@ -1951,6 +1977,7 @@ class ControlPlaneService:
                     candidate_id=job["candidate_id"],
                     test_run_id=test_run_id,
                     execution=execution,
+                    candidate_commit=job["candidate_commit"],
                 )
                 timestamp = _iso()
                 connection.execute(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -10,6 +11,8 @@ import pytest
 
 from hoh_control_plane import qa_worker
 from hoh_control_plane.domain import Actor, ConflictError, Role, ValidationError
+from hoh_control_plane.qa_runner import ProjectTestRunner
+from hoh_control_plane.qa_runner import TestExecution as _TestExecution
 
 
 def _git(path: Path, *arguments: str) -> str:
@@ -302,3 +305,192 @@ def test_test_command_requires_a_verified_project_repository(service, actors, se
         service.configure_test_command(
             actors["planner"], "project-1", ["python", "-m", "pytest"], 120
         )
+
+
+def _write_fake_package(root: Path, source_label: str) -> None:
+    package = root / "hoh_control_plane"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(f"SOURCE = {source_label!r}\n", encoding="utf-8")
+
+
+def test_execute_resolves_the_candidate_source_over_an_ambient_shadow(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Reproduces the real defect: a shared venv's editable install shadows the
+    candidate's own copy of hoh_control_plane. Without the PYTHONPATH fix in
+    ProjectTestRunner, this command would print 'ambient', not 'candidate'.
+    """
+    ambient_root = tmp_path / "ambient-site-packages"
+    _write_fake_package(ambient_root, "ambient")
+    monkeypatch.setenv("PYTHONPATH", str(ambient_root))
+
+    worktree = tmp_path / "worktree"
+    _write_fake_package(worktree / "src", "candidate")
+
+    runner = ProjectTestRunner(tmp_path / "evidence")
+    command = [
+        sys.executable,
+        "-c",
+        "import hoh_control_plane, sys; sys.stdout.write(hoh_control_plane.SOURCE)",
+    ]
+
+    execution = runner.execute(command, str(worktree), 30)
+
+    assert execution.artifact_mismatch is False
+    assert execution.exit_code == 0
+    assert execution.stdout.strip() == "candidate"
+    assert execution.resolved_source is not None
+    assert Path(execution.resolved_source).resolve() == (
+        worktree / "src" / "hoh_control_plane" / "__init__.py"
+    ).resolve()
+
+
+def test_execute_leaves_an_existing_pythonpath_intact_behind_the_candidate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    other_root = tmp_path / "other-tooling"
+    other_root.mkdir()
+    monkeypatch.setenv("PYTHONPATH", str(other_root))
+
+    worktree = tmp_path / "worktree"
+    _write_fake_package(worktree / "src", "candidate")
+
+    runner = ProjectTestRunner(tmp_path / "evidence")
+    command = [
+        sys.executable,
+        "-c",
+        "import os, sys; sys.stdout.write(os.environ.get('PYTHONPATH', ''))",
+    ]
+
+    execution = runner.execute(command, str(worktree), 30)
+
+    entries = execution.stdout.strip().split(os.pathsep)
+    assert str((worktree / "src").resolve()) == str(Path(entries[0]).resolve())
+    assert str(other_root) in entries
+
+
+def test_execute_fails_closed_on_artifact_mismatch_without_running_the_configured_command(
+    tmp_path: Path, monkeypatch
+) -> None:
+    worktree = tmp_path / "worktree"
+    _write_fake_package(worktree / "src", "candidate")
+    observed = str(tmp_path / "elsewhere" / "hoh_control_plane" / "__init__.py")
+
+    runner = ProjectTestRunner(tmp_path / "evidence")
+    monkeypatch.setattr(runner, "_resolve_candidate_source", lambda *a, **k: observed)
+
+    def fail_if_run(*_args, **_kwargs):
+        pytest.fail("The configured command must not run after an artifact mismatch")
+
+    monkeypatch.setattr(subprocess, "run", fail_if_run)
+
+    execution = runner.execute(
+        [sys.executable, "-c", "print('should not run')"], str(worktree), 30
+    )
+
+    assert execution.artifact_mismatch is True
+    assert execution.exit_code is None
+    assert execution.timed_out is False
+    assert execution.resolved_source == observed
+    assert "candidate_artifact_mismatch" in execution.stderr
+    assert str(worktree.resolve()) in execution.stderr
+    assert observed in execution.stderr
+
+
+def test_execute_skips_the_identity_probe_when_the_worktree_has_no_such_package(
+    tmp_path: Path,
+) -> None:
+    """A registered command for a differently-shaped project must never be blocked
+    by a check for a package it does not ship."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    runner = ProjectTestRunner(tmp_path / "evidence")
+    execution = runner.execute([sys.executable, "-c", "print('ok')"], str(worktree), 30)
+
+    assert execution.artifact_mismatch is False
+    assert execution.resolved_source is None
+    assert execution.exit_code == 0
+
+
+def test_write_report_includes_the_verified_candidate_commit_and_resolved_source(
+    tmp_path: Path,
+) -> None:
+    runner = ProjectTestRunner(tmp_path / "evidence")
+    execution = _TestExecution(
+        command_digest="digest",
+        exit_code=0,
+        timed_out=False,
+        duration_ms=12,
+        stdout="ok",
+        stderr="",
+        resolved_source="/worktree/src/hoh_control_plane/__init__.py",
+    )
+
+    _storage_ref, report_path = runner.write_report(
+        candidate_id="cand_abc123",
+        test_run_id="testrun_xyz789",
+        execution=execution,
+        candidate_commit="deadbeef" * 5,
+    )
+
+    payload = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    assert payload["candidate_commit"] == "deadbeef" * 5
+    assert payload["resolved_source"] == "/worktree/src/hoh_control_plane/__init__.py"
+    assert payload["artifact_mismatch"] is False
+
+
+def test_artifact_mismatch_fails_the_job_without_a_candidate_verdict_and_allows_retry(
+    service, actors, seeded, tmp_path: Path, monkeypatch
+) -> None:
+    ticket, candidate, qa_claim = _candidate_waiting_for_qa(
+        service, actors, seeded, tmp_path, [sys.executable, "-c", "print('passed')"]
+    )
+    mismatch = _TestExecution(
+        command_digest="digest",
+        exit_code=None,
+        timed_out=False,
+        duration_ms=5,
+        stdout="",
+        stderr=(
+            "candidate_artifact_mismatch: expected hoh_control_plane to resolve under "
+            "the frozen worktree, observed D:\\HoH\\src\\hoh_control_plane\\__init__.py"
+        ),
+        resolved_source="D:\\HoH\\src\\hoh_control_plane\\__init__.py",
+        artifact_mismatch=True,
+    )
+    real_execute = service.project_tests.execute
+    outcomes = iter([mismatch])
+
+    def fake_execute(command, worktree_path, timeout_seconds):
+        try:
+            return next(outcomes)
+        except StopIteration:
+            return real_execute(command, worktree_path, timeout_seconds)
+
+    monkeypatch.setattr(service.project_tests, "execute", fake_execute)
+
+    queued = service.queue_project_tests(
+        actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"]
+    )
+    failed = service.execute_queued_project_test(queued["test_run"]["test_run_id"])
+
+    assert failed["status"] == "FAILED"
+    assert "candidate_artifact_mismatch" in failed["error_message"]
+    assert failed["test_run"] is None
+    context = service.get_ticket_context(actors["qa"], ticket["ticket_id"])
+    assert context["ticket"]["status"] == "QA_IN_PROGRESS"
+    assert context["test_runs"] == []
+
+    # Retry without any Developer action or a new candidate: same candidate_id, a fresh
+    # test_run_id, and this time the (patched-through) real command runs and completes.
+    retried = service.queue_project_tests(
+        actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"]
+    )
+    assert retried["test_run"]["test_run_id"] != queued["test_run"]["test_run_id"]
+    assert retried["test_run"]["candidate_id"] == candidate["candidate"]["candidate_id"]
+
+    completed = service.execute_queued_project_test(retried["test_run"]["test_run_id"])
+
+    assert completed["status"] == "COMPLETED"
+    assert completed["exit_code"] == 0
