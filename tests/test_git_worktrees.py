@@ -248,6 +248,86 @@ def test_rework_handoffs_to_a_new_developer_without_touching_the_prior_worktree(
     ]
 
 
+def test_rework_handoff_uses_current_main_when_the_rejected_candidate_has_base_drift(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """A handoff must never implicitly merge a stale rejected candidate into main."""
+    repository = _repository(tmp_path)
+    service.configure_repository(actors["planner"], "project-1", str(repository))
+    ticket = seeded["ticket"]
+    first_claim = service.claim_ticket(
+        actors["developer"], ticket["ticket_id"], ticket["version"], 900
+    )
+    first_worktree = service.prepare_worktree(
+        actors["developer"],
+        ticket["ticket_id"],
+        first_claim["lease"]["lease_id"],
+        first_claim["ticket"]["version"],
+    )["worktree"]
+    old_path = Path(first_worktree["worktree_path"])
+    retry_path = old_path / "src" / "checkout" / "retry.txt"
+    retry_path.parent.mkdir(parents=True)
+    retry_path.write_text("rejected candidate\n", encoding="utf-8")
+    _git(old_path, "add", "src/checkout/retry.txt")
+    _git(old_path, "commit", "-m", "Rejected candidate")
+    first_candidate = service.submit_candidate(
+        actors["developer"],
+        ticket["ticket_id"],
+        first_claim["lease"]["lease_id"],
+        first_claim["ticket"]["version"],
+        _git(old_path, "rev-parse", "HEAD"),
+        first_worktree["base_commit"],
+        first_worktree["branch_ref"],
+        ["The first candidate is ready for QA."],
+    )
+    (repository / "mainline.txt").write_text("mainline moved\n", encoding="utf-8")
+    _git(repository, "add", "mainline.txt")
+    _git(repository, "commit", "-m", "Advance mainline")
+    current_main = _git(repository, "rev-parse", "main")
+    qa_claim = service.claim_qa(
+        actors["qa"], ticket["ticket_id"], first_candidate["ticket"]["version"], 900
+    )
+    rework = service.submit_qa_verdict(
+        actors["qa"],
+        ticket["ticket_id"],
+        qa_claim["lease"]["lease_id"],
+        first_candidate["candidate"]["candidate_id"],
+        qa_claim["ticket"]["version"],
+        "failed",
+        [
+            {
+                "criterion": ticket["acceptance_criteria"][0],
+                "status": "failed",
+                "severity": "high",
+                "observation": "The candidate needs a rebase-aware repair.",
+                "evidence": [
+                    {
+                        "type": "test_result",
+                        "observation": "candidate rejected after mainline advanced",
+                        "storage_ref": "evidence://qa/base-drift.json",
+                    }
+                ],
+            }
+        ],
+    )
+
+    handoff_claim = service.claim_ticket(
+        actors["developer_2"], ticket["ticket_id"], rework["ticket"]["version"], 900
+    )
+    handed_off = service.prepare_worktree(
+        actors["developer_2"],
+        ticket["ticket_id"],
+        handoff_claim["lease"]["lease_id"],
+        handoff_claim["ticket"]["version"],
+    )["worktree"]
+    handoff_path = Path(handed_off["worktree_path"])
+
+    assert _git(handoff_path, "rev-parse", "HEAD") == current_main
+    assert handed_off["base_commit"] == current_main
+    assert not (handoff_path / "src" / "checkout" / "retry.txt").exists()
+    assert _git(old_path, "rev-parse", "HEAD") == first_candidate["candidate"]["commit_sha"]
+
+
 def test_candidate_is_rejected_when_actual_diff_exceeds_declared_write_scope(
     service, actors, seeded, tmp_path: Path
 ) -> None:
