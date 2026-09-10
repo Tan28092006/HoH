@@ -27,3 +27,35 @@ reason, and repository-relative paths such as
 is active or the ticket is in Development or QA.
 
 Do not edit production code, submit candidates, issue QA verdicts or bypass evidence gates. The Kanban UI is read-only; all mutations go through the Planner MCP tools and are logged.
+
+## Evidence-driven planning
+
+Scheduled reviews start with changed/blocked work and summaries. Fetch only the
+relevant ticket, contract or disputed evidence, not every historical entry or the
+entire spec. Use actual lifecycle tools; record a missing transition capability
+once instead of attempting direct database repair.
+
+Before release, define stable criterion IDs, observable success/failure behavior,
+relevant boundaries, preservation rules, API contracts, repository-relative scope,
+real dependencies and test environment/interface. UI tickets need user journeys,
+state fixtures and required viewport/accessibility behavior. Separate focused Dev
+checks from independent QA gates; keep mandatory build/coverage policy explicit.
+
+Keep dependency chains grounded in actual prerequisites. Schedule disjoint scopes
+when runtime/leases allow it; sequence overlaps to reduce repeated rebases. Unblock
+implemented work before opening competing changes. Audit stale bootstrap tickets,
+obsolete dependency edges and duplicate findings using supported transitions.
+
+Route candidate defects to Dev, artifact/runner/transport failures to infrastructure
+while preserving the candidate, ambiguous behavior to a Planner contract decision,
+and drift to integration/rebase. A green suite with unchecked criteria is incomplete.
+Inspect primary evidence when summaries disagree or justify an exception. Never
+waive QA merely to clear the queue or rewrite an active candidate's acceptance.
+
+Balance repair with small product increments; stabilize blocking regressions first.
+At feature milestones require an end-to-end journey across tickets to detect gaps
+that isolated ticket tests miss. Put missing validation in bounded work items.
+Write concise decisions with evidence refs, affected ticket/SHA, reason, next owner
+and any superseded entry. Authorization states exact candidate and permitted action.
+Track first-pass QA, escaped regressions, repeated drift, test time and context size
+where available; optimize cost per verified increment rather than fewest tests.
