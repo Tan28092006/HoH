@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 import hoh_control_plane.mcp_server as mcp_server
-from hoh_control_plane.domain import Actor, Role
+from hoh_control_plane.domain import Actor, ConflictError, Role, ValidationError
 from hoh_control_plane.mcp_server import create_mcp_server
 from hoh_control_plane.service import ControlPlaneService
 from hoh_control_plane.store import SQLiteStore
@@ -169,6 +169,92 @@ async def test_planner_mcp_creates_ready_ticket_and_records_safe_tool_activity(t
         "argument_keys": ["content", "entry_type", "ticket_id"],
         "target": {"ticket_id": "DEV-100"},
     }
+
+
+@pytest.mark.anyio
+async def test_planner_updates_blocked_ticket_write_scope_with_version_and_audit(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "mcp.db")
+    store.initialize()
+    service = ControlPlaneService(store)
+    planner = Actor("planner-01", Role.PLANNER, frozenset({"project-1"}))
+    developer = Actor("dev-01", Role.DEVELOPER, frozenset({"project-1"}))
+    service.create_project(planner, "project-1", "Project", "Description", "main")
+    service.create_feature(planner, "project-1", "feature-1", "Feature", "Objective")
+    ticket = service.create_ticket(
+        planner,
+        "feature-1",
+        "DEV-SCOPE",
+        "Repair scope metadata",
+        "Correct write scope after a validation failure",
+        Role.DEVELOPER,
+        ["The candidate validates only declared repository paths"],
+        [],
+        ["service.py"],
+        ready=True,
+    )
+    claim = service.claim_ticket(
+        developer, ticket["ticket_id"], ticket["version"], lease_seconds=900
+    )
+
+    with pytest.raises(ConflictError, match="active development"):
+        service.update_ticket_write_scope(
+            planner,
+            ticket["ticket_id"],
+            claim["ticket"]["version"],
+            ["src/hoh_control_plane/service.py"],
+            "Correct the repository-relative scope.",
+        )
+
+    blocked = service.report_blocker(
+        developer,
+        ticket["ticket_id"],
+        claim["lease"]["lease_id"],
+        claim["ticket"]["version"],
+        "Candidate validation found an incorrectly declared write scope.",
+    )
+    planner_server = create_mcp_server(service, planner)
+    developer_server = create_mcp_server(service, developer)
+
+    planner_names = {tool.name for tool in await planner_server.list_tools()}
+    developer_names = {tool.name for tool in await developer_server.list_tools()}
+    assert "planner.update_write_scope" in planner_names
+    assert "planner.update_write_scope" not in developer_names
+
+    _, updated = await planner_server.call_tool(
+        "planner.update_write_scope",
+        {
+            "ticket_id": ticket["ticket_id"],
+            "expected_version": blocked["ticket"]["version"],
+            "file_scope": ["src/hoh_control_plane/service.py"],
+            "reason": "Correct the repository-relative scope after Git validation evidence.",
+        },
+    )
+
+    assert updated["ticket"]["status"] == "BLOCKED"
+    assert updated["ticket"]["version"] == blocked["ticket"]["version"] + 1
+    assert updated["ticket"]["file_scope"] == ["src/hoh_control_plane/service.py"]
+    assert updated["previous_file_scope"] == ["service.py"]
+    assert updated["context_entry"]["entry_type"] == "write_scope_updated"
+    assert service.list_agent_activity(planner, "project-1")["calls"][-1]["tool_name"] == (
+        "planner.update_write_scope"
+    )
+
+    with pytest.raises(ConflictError, match="version"):
+        service.update_ticket_write_scope(
+            planner,
+            ticket["ticket_id"],
+            blocked["ticket"]["version"],
+            ["src/hoh_control_plane/service.py"],
+            "Stale write-scope repair.",
+        )
+    with pytest.raises(ValidationError, match="repository-relative"):
+        service.update_ticket_write_scope(
+            planner,
+            ticket["ticket_id"],
+            updated["ticket"]["version"],
+            ["../secrets/**"],
+            "Reject path traversal in write scope.",
+        )
 
 
 @pytest.mark.anyio
