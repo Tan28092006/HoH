@@ -79,6 +79,29 @@ class GitWorktreeManager:
             base_commit=base_commit,
         )
 
+    def commit_descends_from(
+        self,
+        *,
+        repository_path: str,
+        ancestor_commit: str,
+        descendant_commit: str,
+    ) -> bool:
+        """Return whether ``descendant_commit`` can safely be based on ``ancestor_commit``."""
+        repository = Path(self.validate_repository(repository_path))
+        ancestor = self._resolve_commit(repository, ancestor_commit)
+        descendant = self._resolve_commit(repository, descendant_commit)
+        result = self._git(
+            repository,
+            "merge-base",
+            "--is-ancestor",
+            ancestor,
+            descendant,
+            check=False,
+        )
+        if result.returncode not in {0, 1}:
+            raise ValidationError("Unable to determine Git commit ancestry")
+        return result.returncode == 0
+
     def verify_candidate(
         self,
         *,

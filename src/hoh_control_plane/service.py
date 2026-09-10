@@ -1000,11 +1000,16 @@ class ControlPlaneService:
                 raise ValidationError(
                     "Planner must configure a project Git repository before preparing a worktree"
                 )
+            project = self._one(
+                connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+            )
             existing = _row(
                 connection.execute(
                     "SELECT * FROM worktrees WHERE ticket_id = ?", (ticket_id,)
                 ).fetchone()
             )
+            handoff_mode: str | None = None
+            start_commit: str | None = None
             if existing is not None:
                 if existing["agent_id"] == actor.agent_id:
                     return {"ticket": ticket, "worktree": existing, "reused": True}
@@ -1012,17 +1017,23 @@ class ControlPlaneService:
                     raise ConflictError(
                         "Ticket worktree can only hand off after a frozen candidate exists"
                     )
-
-            project = self._one(
-                connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
-            )
+                candidate_is_current = self.git_worktrees.commit_descends_from(
+                    repository_path=repository["repository_path"],
+                    ancestor_commit=f"refs/heads/{project['default_branch']}",
+                    descendant_commit=ticket["candidate_commit"],
+                )
+                if candidate_is_current:
+                    start_commit = ticket["candidate_commit"]
+                    handoff_mode = "candidate_continuation"
+                else:
+                    handoff_mode = "rebase_required"
             prepared = self.git_worktrees.prepare(
                 repository_path=repository["repository_path"],
                 default_branch=project["default_branch"],
                 project_id=project_id,
                 ticket_id=ticket_id,
                 agent_id=actor.agent_id,
-                start_commit=ticket["candidate_commit"] if existing is not None else None,
+                start_commit=start_commit,
             )
             timestamp = _iso()
             if existing is None:
@@ -1071,8 +1082,34 @@ class ControlPlaneService:
                     "previous_agent_id": existing["agent_id"],
                     "previous_branch_ref": existing["branch_ref"],
                     "branch_ref": prepared.branch_ref,
-                    "seed_commit": ticket["candidate_commit"],
+                    "rejected_candidate_commit": ticket["candidate_commit"],
+                    "seed_commit": start_commit or prepared.base_commit,
+                    "handoff_mode": handoff_mode,
                 }
+                if handoff_mode == "rebase_required":
+                    connection.execute(
+                        """
+                        INSERT INTO context_entries
+                            (entry_id, project_id, feature_id, ticket_id, entry_type, content,
+                             source_ref, artifact_commit, actor_id, actor_role, created_at)
+                        VALUES (?, ?, ?, ?, 'worktree_handoff', ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            _id("ctx"),
+                            project_id,
+                            ticket["feature_id"],
+                            ticket_id,
+                            "Rejected candidate diverges from the current default branch. "
+                            "The new Developer worktree starts at current main; inspect the "
+                            "frozen candidate and explicitly rebase, cherry-pick, or reimplement "
+                            "the required changes. No automatic merge was performed.",
+                            f"candidate:{ticket['candidate_commit']}",
+                            ticket["candidate_commit"],
+                            actor.agent_id,
+                            actor.role.value,
+                            timestamp,
+                        ),
+                    )
             self._event(
                 connection,
                 actor,
