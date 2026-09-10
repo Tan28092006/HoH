@@ -411,6 +411,86 @@ class ControlPlaneService:
             self._queue_ticket(connection, actor, project_id, ready_ticket)
             return {"ticket": ready_ticket}
 
+    def update_ticket_write_scope(
+        self,
+        actor: Actor,
+        ticket_id: str,
+        expected_version: int,
+        file_scope: list[str],
+        reason: str,
+    ) -> dict[str, Any]:
+        """Update planned or blocked ticket scope with optimistic concurrency and audit evidence."""
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        self._bounded_list(file_scope, "file_scope", 100, 1000, required=True)
+        self._bounded_text(reason, "reason", 2000)
+        normalized_scope = [self._repository_relative_scope(scope) for scope in file_scope]
+        if len(set(normalized_scope)) != len(normalized_scope):
+            raise ValidationError("file_scope cannot contain duplicate paths")
+
+        with self.store.connection(immediate=True) as connection:
+            ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._expect_version(ticket, expected_version)
+            if ticket["status"] not in {TicketStatus.BACKLOG.value, TicketStatus.BLOCKED.value}:
+                raise ConflictError("Write scope cannot change during active development or QA")
+            active_lease = connection.execute(
+                "SELECT 1 FROM leases WHERE ticket_id = ?", (ticket_id,)
+            ).fetchone()
+            if active_lease is not None:
+                raise ConflictError("Write scope cannot change while a ticket has an active lease")
+
+            previous_scope = ticket["file_scope"]
+            if normalized_scope == previous_scope:
+                raise ValidationError("file_scope is unchanged")
+            timestamp = _iso()
+            next_version = ticket["version"] + 1
+            connection.execute(
+                """
+                UPDATE tickets SET file_scope = ?, version = ?, updated_at = ?
+                WHERE ticket_id = ?
+                """,
+                (json.dumps(normalized_scope), next_version, timestamp, ticket_id),
+            )
+            entry_id = _id("ctx")
+            connection.execute(
+                """
+                INSERT INTO context_entries
+                    (entry_id, project_id, feature_id, ticket_id, entry_type, content,
+                     actor_id, actor_role, created_at)
+                VALUES (?, ?, ?, ?, 'write_scope_updated', ?, ?, ?, ?)
+                """,
+                (
+                    entry_id,
+                    project_id,
+                    ticket["feature_id"],
+                    ticket_id,
+                    f"Planner updated write scope: {reason}",
+                    actor.agent_id,
+                    actor.role.value,
+                    timestamp,
+                ),
+            )
+            self._event(
+                connection,
+                actor,
+                project_id,
+                "ticket.write_scope_updated",
+                "ticket",
+                ticket_id,
+                next_version,
+                {
+                    "previous_file_scope": previous_scope,
+                    "file_scope": normalized_scope,
+                    "reason": reason,
+                },
+            )
+            return {
+                "ticket": self._ticket(connection, ticket_id),
+                "previous_file_scope": previous_scope,
+                "context_entry": self._one(
+                    connection, "SELECT * FROM context_entries WHERE entry_id = ?", (entry_id,)
+                ),
+            }
+
     def append_planner_context(
         self,
         actor: Actor,
@@ -3001,6 +3081,18 @@ class ControlPlaneService:
     @staticmethod
     def _path_is_in_any_scope(path: str, scopes: list[str]) -> bool:
         return any(ControlPlaneService._path_matches_scope(path, scope) for scope in scopes)
+
+    @staticmethod
+    def _repository_relative_scope(scope: str) -> str:
+        raw_scope = scope.replace("\\", "/").strip()
+        if not raw_scope or raw_scope.startswith("/") or re.match(r"^[A-Za-z]:", raw_scope):
+            raise ValidationError("file_scope entries must be repository-relative paths")
+        normalized = raw_scope.strip("/")
+        if any(part in {".", ".."} for part in normalized.split("/")):
+            raise ValidationError("file_scope entries must be repository-relative paths")
+        if any(character in normalized for character in ("\x00", "\r", "\n")):
+            raise ValidationError("file_scope entries contain invalid control characters")
+        return normalized
 
     @staticmethod
     def _path_matches_scope(path: str, scope: str) -> bool:

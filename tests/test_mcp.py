@@ -238,6 +238,17 @@ async def test_planner_updates_blocked_ticket_write_scope_with_version_and_audit
     assert service.list_agent_activity(planner, "project-1")["calls"][-1]["tool_name"] == (
         "planner.update_write_scope"
     )
+    audit_event = next(
+        event
+        for event in service.list_events(planner, "project-1")["events"]
+        if event["event_type"] == "ticket.write_scope_updated"
+    )
+    assert audit_event["aggregate_version"] == updated["ticket"]["version"]
+    assert audit_event["payload"] == {
+        "previous_file_scope": ["service.py"],
+        "file_scope": ["src/hoh_control_plane/service.py"],
+        "reason": "Correct the repository-relative scope after Git validation evidence.",
+    }
 
     with pytest.raises(ConflictError, match="version"):
         service.update_ticket_write_scope(

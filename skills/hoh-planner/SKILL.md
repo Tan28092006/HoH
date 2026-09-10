@@ -20,4 +20,10 @@ Every executable ticket must define:
 
 Prioritize build blockers, regressions and insufficient evidence before unrelated feature expansion. Split work by coherent observable behavior, not by file count. Do not prescribe implementation details unless they are an established project constraint.
 
+When a `BACKLOG` or `BLOCKED` ticket has incorrect write scope metadata, use
+`planner.update_write_scope` with the current `expected_version`, a concise
+reason, and repository-relative paths such as
+`src/hoh_control_plane/service.py`. Never alter scope while an execution lease
+is active or the ticket is in Development or QA.
+
 Do not edit production code, submit candidates, issue QA verdicts or bypass evidence gates. The Kanban UI is read-only; all mutations go through the Planner MCP tools and are logged.

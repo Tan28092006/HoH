@@ -333,6 +333,26 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 lambda: service.set_ticket_ready(actor, **arguments),
             )
 
+        @server.tool(name="planner.update_write_scope", structured_output=True)
+        def planner_update_write_scope(
+            ticket_id: str,
+            expected_version: int,
+            file_scope: list[str],
+            reason: str,
+        ) -> dict[str, Any]:
+            """Correct a planned or blocked ticket's repository-relative write scope."""
+            arguments = {
+                "ticket_id": ticket_id,
+                "expected_version": expected_version,
+                "file_scope": file_scope,
+                "reason": reason,
+            }
+            return invoke(
+                "planner.update_write_scope",
+                arguments,
+                lambda: service.update_ticket_write_scope(actor, **arguments),
+            )
+
         @server.tool(name="planner.append_context", structured_output=True)
         def planner_append_context(
             entry_type: str,
