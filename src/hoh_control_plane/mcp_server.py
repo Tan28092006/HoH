@@ -56,6 +56,25 @@ def _start_worktree_provision_worker(database_path: Path, provision_id: str) -> 
     )
 
 
+def _start_candidate_submission_worker(database_path: Path, submission_id: str) -> None:
+    """Validate candidate Git identity away from the MCP request."""
+    subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "hoh_control_plane.candidate_submission_worker",
+            "--database",
+            str(database_path),
+            "--submission-id",
+            submission_id,
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+
+
 def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
     """Create the smallest MCP tool surface permitted for one authenticated role."""
     server = FastMCP(
@@ -475,7 +494,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
             branch_ref: str,
             developer_claims: list[str],
         ) -> dict[str, Any]:
-            """Freeze an immutable Git candidate and move the ticket to the QA queue."""
+            """Queue immutable candidate validation and return immediately for polling."""
             arguments = {
                 "ticket_id": ticket_id,
                 "lease_id": lease_id,
@@ -485,9 +504,35 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 "branch_ref": branch_ref,
                 "developer_claims": developer_claims,
             }
-            return invoke(
+            if not service.candidate_submission_requires_worker(actor, ticket_id):
+                return invoke(
+                    "dev.submit_candidate", arguments,
+                    lambda: service.submit_candidate(actor, **arguments),
+                )
+            queued = invoke(
                 "dev.submit_candidate", arguments,
-                lambda: service.submit_candidate(actor, **arguments),
+                lambda: service.queue_candidate_submission(actor, **arguments),
+            )
+            _start_candidate_submission_worker(service.store.path, queued["submission"]["submission_id"])
+            return queued
+
+        @server.tool(name="dev.get_candidate_submission", structured_output=True)
+        def dev_get_candidate_submission(
+            ticket_id: str,
+            lease_id: str,
+            submission_id: str,
+            lease_seconds: int = 900,
+        ) -> dict[str, Any]:
+            """Poll a queued candidate submission and renew its lease while active."""
+            arguments = {
+                "ticket_id": ticket_id,
+                "lease_id": lease_id,
+                "submission_id": submission_id,
+                "lease_seconds": lease_seconds,
+            }
+            return invoke(
+                "dev.get_candidate_submission", arguments,
+                lambda: service.get_candidate_submission(actor, **arguments),
             )
 
     if actor.role in {Role.DEVELOPER, Role.QA, Role.INTEGRATOR, Role.ADMIN}:
