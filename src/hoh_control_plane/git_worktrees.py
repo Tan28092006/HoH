@@ -41,10 +41,24 @@ class GitWorktreeManager:
         project_id: str,
         ticket_id: str,
         agent_id: str,
+        start_commit: str | None = None,
     ) -> PreparedWorktree:
         repository = Path(self.validate_repository(repository_path))
         branch_ref = self._branch_ref(project_id, ticket_id, agent_id)
         base_commit = self._resolve_commit(repository, f"refs/heads/{default_branch}")
+        initial_commit = (
+            self._resolve_commit(repository, start_commit) if start_commit else base_commit
+        )
+        ancestry = self._git(
+            repository,
+            "merge-base",
+            "--is-ancestor",
+            base_commit,
+            initial_commit,
+            check=False,
+        )
+        if ancestry.returncode != 0:
+            raise ValidationError("Worktree start commit does not descend from the default branch")
         worktree_path = self._worktree_path(project_id, ticket_id, agent_id)
         if worktree_path.exists():
             raise ValidationError("Assigned worktree path already exists")
@@ -57,7 +71,7 @@ class GitWorktreeManager:
             raise ValidationError("Unable to inspect the assigned worktree branch")
 
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
-        self._git(repository, "worktree", "add", "-b", branch_ref, str(worktree_path), base_commit)
+        self._git(repository, "worktree", "add", "-b", branch_ref, str(worktree_path), initial_commit)
         return PreparedWorktree(
             repository_path=str(repository),
             worktree_path=str(worktree_path),

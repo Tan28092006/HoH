@@ -1006,9 +1006,12 @@ class ControlPlaneService:
                 ).fetchone()
             )
             if existing is not None:
-                if existing["agent_id"] != actor.agent_id:
-                    raise ConflictError("Ticket already has a worktree assigned to another Developer")
-                return {"ticket": ticket, "worktree": existing, "reused": True}
+                if existing["agent_id"] == actor.agent_id:
+                    return {"ticket": ticket, "worktree": existing, "reused": True}
+                if ticket["candidate_commit"] is None:
+                    raise ConflictError(
+                        "Ticket worktree can only hand off after a frozen candidate exists"
+                    )
 
             project = self._one(
                 connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
@@ -1019,36 +1022,66 @@ class ControlPlaneService:
                 project_id=project_id,
                 ticket_id=ticket_id,
                 agent_id=actor.agent_id,
+                start_commit=ticket["candidate_commit"] if existing is not None else None,
             )
             timestamp = _iso()
-            connection.execute(
-                """
-                INSERT INTO worktrees
-                    (ticket_id, project_id, agent_id, repository_path, worktree_path,
-                     branch_ref, base_commit, created_at, last_verified_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    ticket_id,
-                    project_id,
-                    actor.agent_id,
-                    prepared.repository_path,
-                    prepared.worktree_path,
-                    prepared.branch_ref,
-                    prepared.base_commit,
-                    timestamp,
-                    timestamp,
-                ),
-            )
+            if existing is None:
+                connection.execute(
+                    """
+                    INSERT INTO worktrees
+                        (ticket_id, project_id, agent_id, repository_path, worktree_path,
+                         branch_ref, base_commit, created_at, last_verified_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        ticket_id,
+                        project_id,
+                        actor.agent_id,
+                        prepared.repository_path,
+                        prepared.worktree_path,
+                        prepared.branch_ref,
+                        prepared.base_commit,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                event_type = "worktree.prepared"
+                event_payload = {"branch_ref": prepared.branch_ref}
+            else:
+                connection.execute(
+                    """
+                    UPDATE worktrees
+                    SET agent_id = ?, repository_path = ?, worktree_path = ?, branch_ref = ?,
+                        base_commit = ?, created_at = ?, last_verified_at = ?
+                    WHERE ticket_id = ?
+                    """,
+                    (
+                        actor.agent_id,
+                        prepared.repository_path,
+                        prepared.worktree_path,
+                        prepared.branch_ref,
+                        prepared.base_commit,
+                        timestamp,
+                        timestamp,
+                        ticket_id,
+                    ),
+                )
+                event_type = "worktree.handed_off"
+                event_payload = {
+                    "previous_agent_id": existing["agent_id"],
+                    "previous_branch_ref": existing["branch_ref"],
+                    "branch_ref": prepared.branch_ref,
+                    "seed_commit": ticket["candidate_commit"],
+                }
             self._event(
                 connection,
                 actor,
                 project_id,
-                "worktree.prepared",
+                event_type,
                 "ticket",
                 ticket_id,
                 ticket["version"],
-                {"branch_ref": prepared.branch_ref},
+                event_payload,
             )
             worktree = self._one(
                 connection, "SELECT * FROM worktrees WHERE ticket_id = ?", (ticket_id,)
