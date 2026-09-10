@@ -346,3 +346,30 @@ def test_heartbeat_feature_context_and_event_cursor(
     assert feature_context["open_ticket_count"] == 1
     assert events["next_cursor"] > 0
     assert no_new_events["events"] == []
+
+
+def test_board_routes_a_blocked_ticket_back_to_planner_without_an_owner(
+    service: ControlPlaneService,
+    actors: dict[str, object],
+    seeded: dict[str, object],
+) -> None:
+    claim = service.claim_ticket(
+        actors["developer"], "DEV-142", seeded["ticket"]["version"], 900
+    )
+    service.report_blocker(
+        actors["developer"],
+        "DEV-142",
+        claim["lease"]["lease_id"],
+        claim["ticket"]["version"],
+        "The upstream API contract needs a Planner decision.",
+    )
+
+    ticket = service.board("project-1")["columns"][TicketStatus.BLOCKED.value][0]
+
+    assert ticket["owner"] == {
+        "state": "blocked",
+        "agent_id": None,
+        "role": None,
+        "lease_expires_at": None,
+        "awaiting_role": Role.PLANNER.value,
+    }
