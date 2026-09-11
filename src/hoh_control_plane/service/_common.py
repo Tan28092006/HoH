@@ -77,8 +77,54 @@ IDEMPOTENCY_RETENTION_SECONDS = 86_400
 _MAX_IDEMPOTENCY_KEY_CHARS = 200
 
 # Narration accumulates without bound; every other entry type is a durable
-# decision that compaction may shorten but must never drop.
-_VERBOSE_ENTRY_TYPES = frozenset({"progress_update", "qa_test_run"})
+# decision that compaction may shorten but must never drop. A machine-written
+# command status belongs here too: it restates what qa_test_runs already holds,
+# so carrying it at full length in place of a decision is pure loss.
+_VERBOSE_ENTRY_TYPES = frozenset(
+    {"progress_update", "qa_test_run", "qa_automated_test_run"}
+)
+
+# The vocabulary a role can actually reason from. Without one, every situation
+# grows its own label — the live control plane reached 41 types for 206 entries,
+# most used exactly once — and a type that appears once can be neither filtered
+# nor compacted, which is the whole point of typing an entry.
+CONTEXT_ENTRY_TYPES = frozenset(
+    {
+        # Written by the control plane itself.
+        "progress_update",
+        "developer_blocker",
+        "known_failure",
+        "qa_test_run",
+        "qa_automated_test_run",
+        "write_scope_updated",
+        "ticket_fields_updated",
+        "worktree_handoff",
+        "integration_base_drift",
+        "integration_authorization",
+        "bootstrap_integration",
+        # Written by a Planner.
+        "planner_decision",
+        "design_decision",
+        "risk",
+        "note",
+    }
+)
+
+# Labels that mean exactly what a vocabulary type means. Mapping these is a
+# rename and loses nothing, which is why they are not qualified onto the content
+# the way a genuinely unknown label is.
+CONTEXT_ENTRY_ALIASES = {
+    "planning_decision": "planner_decision",
+    "planner_decisions": "planner_decision",
+    "decision": "planner_decision",
+    "progress": "progress_update",
+    "blocker": "developer_blocker",
+}
+
+# Where a label outside the vocabulary lands. Deliberately not a narration type,
+# so an unrecognised entry is protected from compaction rather than discarded:
+# an unknown label is a reason to keep something, not to throw it away.
+GENERAL_CONTEXT_ENTRY_TYPE = "note"
 
 # Artifact identity and open findings stay in every packet, so these sections
 # are compacted to essentials rather than omitted.
