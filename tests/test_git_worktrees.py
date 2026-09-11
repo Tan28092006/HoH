@@ -441,7 +441,9 @@ def test_integrator_fast_forwards_a_verified_candidate_to_main(
     )
 
     assert merged["ticket"]["status"] == "DONE"
-    assert _git(repository, "rev-parse", "main") == candidate["candidate"]["commit_sha"]
+    # The candidate is main's parent: the merge lands the code, then the record of
+    # what it was for, so both arrive or neither does.
+    assert _git(repository, "rev-parse", "main~1") == candidate["candidate"]["commit_sha"]
 
 
 def test_integrator_returns_candidate_to_rework_when_main_has_drifted(

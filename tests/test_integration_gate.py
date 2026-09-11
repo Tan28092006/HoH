@@ -123,7 +123,9 @@ def test_passing_regression_gate_still_fast_forwards_main(
 
     assert merged["merge_status"] == "merged"
     assert merged["ticket"]["status"] == "DONE"
-    assert _git(repository, "rev-parse", "main") == candidate["candidate"]["commit_sha"]
+    # main advances by two: the fast-forwarded candidate, then the record of what
+    # it was for. The candidate is main's parent, not main itself.
+    assert _git(repository, "rev-parse", "main~1") == candidate["candidate"]["commit_sha"]
     assert merged["test_run"]["exit_code"] == 0
     assert merged["test_run"]["candidate_id"] == candidate["candidate"]["candidate_id"]
 
@@ -284,7 +286,7 @@ def test_gate_reruns_cleanly_after_an_earlier_integration_attempt(
     )
 
     assert merged["merge_status"] == "merged"
-    assert _git(repository, "rev-parse", "main") == repaired["candidate"]["commit_sha"]
+    assert _git(repository, "rev-parse", "main~1") == repaired["candidate"]["commit_sha"]
 
 
 def test_a_candidate_with_no_configured_test_command_still_merges(
@@ -360,7 +362,9 @@ def test_a_candidate_with_no_configured_test_command_still_merges(
 
     assert merged["merge_status"] == "merged"
     assert merged["test_run"] is None
-    assert _git(repository, "rev-parse", "main") == candidate["candidate"]["commit_sha"]
+    # main advances by two: the fast-forwarded candidate, then the record of what
+    # it was for. The candidate is main's parent, not main itself.
+    assert _git(repository, "rev-parse", "main~1") == candidate["candidate"]["commit_sha"]
 
 
 @pytest.mark.parametrize("role", ["developer", "qa"])

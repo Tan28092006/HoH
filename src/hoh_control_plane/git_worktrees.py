@@ -440,6 +440,40 @@ class GitWorktreeManager:
             raise ValidationError("Candidate cannot fast-forward the default branch")
         return True, candidate
 
+    def commit_semantic_record(
+        self,
+        *,
+        repository_path: str,
+        default_branch: str,
+        relative_path: str,
+        body: str,
+        message: str,
+    ) -> str:
+        """Commit one settled record onto the default branch, and return its commit.
+
+        Runs immediately after the fast-forward so code and meaning land in the
+        same operation. A fast-forward creates no commit of its own, so this is
+        necessarily a second one; what matters is that the merge is not reported
+        successful until this has landed too.
+        """
+        repository = Path(self.validate_repository(repository_path))
+        active_branch = self._git(repository, "branch", "--show-current").stdout.strip()
+        if active_branch != default_branch:
+            raise ValidationError("Repository default branch is not checked out for integration")
+        target = (repository / relative_path).resolve()
+        if not target.is_relative_to(repository):
+            raise ValidationError("Semantic record path escapes the repository")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+        self._git(repository, "add", "--", relative_path)
+        staged = self._git(repository, "diff", "--cached", "--quiet", check=False)
+        if staged.returncode == 0:
+            # Nothing changed, so there is nothing to record and no empty commit
+            # to leave behind.
+            return self._resolve_commit(repository, f"refs/heads/{default_branch}")
+        self._git(repository, "commit", "-m", message)
+        return self._resolve_commit(repository, f"refs/heads/{default_branch}")
+
     def _worktree_path(self, project_id: str, ticket_id: str, agent_id: str) -> Path:
         segments = [self._safe_segment(value, field) for value, field in (
             (project_id, "project_id"),

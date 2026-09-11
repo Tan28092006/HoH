@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hoh_control_plane import semantic_record
 from hoh_control_plane.service._common import (
     Actor,
     Any,
@@ -310,11 +311,126 @@ class IntegrationMixin:
                 next_version,
                 {"candidate_id": candidate_id, "commit_sha": mainline_commit},
             )
-            return {
-                "ticket": self._ticket(connection, ticket_id),
-                "merge_status": "merged",
-                "test_run": gate_test_run,
-            }
+            merged_ticket = self._ticket(connection, ticket_id)
+            record = self._settled_record_inputs(connection, ticket_id, candidate_id)
+
+        # Outside the write transaction: this runs Git, and a long external
+        # command must never hold the database write lock.
+        record_commit = self._write_semantic_record(
+            repository_path=repository_path,
+            default_branch=default_branch,
+            ticket=merged_ticket,
+            candidate=record["candidate"],
+            findings=record["findings"],
+            decisions=record["decisions"],
+            mainline_commit=mainline_commit,
+            supersedes=record["supersedes"],
+        )
+        return {
+            "ticket": merged_ticket,
+            "merge_status": "merged",
+            "test_run": gate_test_run,
+            "semantic_record_commit": record_commit,
+        }
+
+    def _settled_record_inputs(
+        self, connection: Any, ticket_id: str, candidate_id: str
+    ) -> dict[str, Any]:
+        """Read the settled facts a record is made of, inside the transaction."""
+        candidate = _row(
+            connection.execute(
+                "SELECT * FROM candidates WHERE candidate_id = ?", (candidate_id,)
+            ).fetchone()
+        )
+        findings = [
+            _row(row)
+            for row in connection.execute(
+                """
+                SELECT criterion, status, observation, evidence_refs FROM qa_findings
+                WHERE candidate_id = ? ORDER BY created_at ASC
+                """,
+                (candidate_id,),
+            ).fetchall()
+        ]
+        decisions = [
+            _row(row)
+            for row in connection.execute(
+                """
+                SELECT content FROM context_entries
+                WHERE ticket_id = ? AND superseded_by IS NULL
+                  AND entry_type IN ('planner_decision', 'design_decision')
+                ORDER BY created_at ASC
+                """,
+                (ticket_id,),
+            ).fetchall()
+        ]
+        prior = _row(
+            connection.execute(
+                """
+                SELECT commit_sha FROM candidates
+                WHERE ticket_id = ? AND candidate_id != ?
+                ORDER BY frozen_at DESC LIMIT 1
+                """,
+                (ticket_id, candidate_id),
+            ).fetchone()
+        )
+        return {
+            "candidate": candidate,
+            "findings": findings,
+            "decisions": decisions,
+            "supersedes": prior["commit_sha"] if prior else None,
+        }
+
+    def _write_semantic_record(
+        self,
+        *,
+        repository_path: str,
+        default_branch: str,
+        ticket: dict[str, Any],
+        candidate: dict[str, Any],
+        findings: list[dict[str, Any]],
+        decisions: list[dict[str, Any]],
+        mainline_commit: str,
+        supersedes: str | None,
+    ) -> str:
+        """Land the record, or fail the merge rather than report a clean success.
+
+        A reader must never be told a record exists when it does not, so a write
+        that cannot complete surfaces as the merge outcome rather than being
+        swallowed as a cosmetic afterthought.
+        """
+        body = semantic_record.render(
+            ticket=ticket,
+            candidate=candidate,
+            findings=findings,
+            decisions=decisions,
+            mainline_commit=mainline_commit,
+            supersedes=supersedes,
+        )
+        semantic_record.assert_carries_nothing_local(
+            body,
+            [
+                str(candidate.get("branch_ref") or ""),
+                str(candidate.get("submitted_by") or ""),
+                repository_path,
+            ],
+        )
+        try:
+            return self.git_worktrees.commit_semantic_record(
+                repository_path=repository_path,
+                default_branch=default_branch,
+                relative_path=semantic_record.record_path(ticket["ticket_id"]),
+                body=body,
+                message=(
+                    f"docs({ticket['ticket_id']}): record what this change was for"
+                ),
+            )
+        except (DomainError, OSError, ValueError) as error:
+            raise ValidationError(
+                "The candidate merged, but its semantic record could not be written: "
+                f"{error}. The default branch has moved; record the outcome before "
+                "reporting this merge as complete."
+            ) from error
 
     def _record_integration_gate(
         self,
