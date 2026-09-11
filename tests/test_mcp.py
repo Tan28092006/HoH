@@ -95,7 +95,6 @@ async def test_mcp_exposes_only_role_appropriate_tools(tmp_path) -> None:
         "planner.cancel_ticket",
         "planner.supersede_ticket",
         "planner.requeue_candidate",
-        "planner.requeue_stale_candidate",
     }.issubset(planner_names)
     assert "planner.cancel_ticket" not in names
     assert "planner.cancel_ticket" not in qa_names

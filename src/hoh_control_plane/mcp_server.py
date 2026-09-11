@@ -615,26 +615,6 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 idempotency_key,
             )
 
-        @server.tool(name="planner.requeue_stale_candidate", structured_output=True)
-        def planner_requeue_stale_candidate(
-            ticket_id: str,
-            expected_version: int,
-            reason: str = "base_drift",
-            idempotency_key: str | None = None,
-        ) -> dict[str, Any]:
-            """Alias for planner.requeue_candidate."""
-            arguments = {
-                "ticket_id": ticket_id,
-                "expected_version": expected_version,
-                "reason": reason,
-            }
-            return invoke(
-                "planner.requeue_stale_candidate",
-                arguments,
-                lambda: service.requeue_candidate(actor, **arguments),
-                idempotency_key,
-            )
-
     if actor.role in {Role.DEVELOPER, Role.ADMIN}:
 
         @server.tool(name="work.claim", structured_output=True)
