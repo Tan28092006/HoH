@@ -766,6 +766,191 @@ class ControlPlaneService:
                 ),
             }
 
+    def requeue_candidate(
+        self,
+        actor: Actor,
+        ticket_id: str,
+        expected_version: int,
+        reason: str = "base_drift",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Requeue a stale QA-ready candidate whose base commit has drifted from main."""
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        self._bounded_text(ticket_id, "ticket_id", 100)
+        self._bounded_text(reason, "reason", 2000)
+
+        if idempotency_key:
+            payload = {
+                "ticket_id": ticket_id,
+                "expected_version": expected_version,
+                "reason": reason,
+            }
+            return self.run_idempotent(
+                actor,
+                operation="candidate:requeue",
+                idempotency_key=idempotency_key,
+                payload=payload,
+                run=lambda: self._requeue_candidate(actor, ticket_id, expected_version, reason),
+            )
+        return self._requeue_candidate(actor, ticket_id, expected_version, reason)
+
+    def _requeue_candidate(
+        self,
+        actor: Actor,
+        ticket_id: str,
+        expected_version: int,
+        reason: str,
+    ) -> dict[str, Any]:
+        with self.store.connection() as connection:
+            ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._expect_version(ticket, expected_version)
+            if ticket["status"] != TicketStatus.QA_READY.value:
+                raise ConflictError(
+                    f"Only QA_READY tickets can have their candidate requeued (ticket is {ticket['status']})"
+                )
+            repository = _row(
+                connection.execute(
+                    "SELECT * FROM project_repositories WHERE project_id = ?", (project_id,)
+                ).fetchone()
+            )
+            if repository is None:
+                raise ValidationError("Project repository is required before requeuing a candidate")
+            project = self._one(
+                connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+            )
+            candidate = _row(
+                connection.execute(
+                    "SELECT * FROM candidates WHERE ticket_id = ? ORDER BY submitted_at DESC LIMIT 1",
+                    (ticket_id,),
+                ).fetchone()
+            )
+            if candidate is None:
+                raise ConflictError("Ticket has no frozen candidate to requeue")
+
+        repository_path = repository["repository_path"]
+        default_branch = project["default_branch"]
+        mainline = f"refs/heads/{default_branch}"
+        base = candidate["base_commit"]
+        base_is_current_main = self.git_worktrees.commit_descends_from(
+            repository_path=repository_path,
+            ancestor_commit=mainline,
+            descendant_commit=base,
+        ) and self.git_worktrees.commit_descends_from(
+            repository_path=repository_path,
+            ancestor_commit=base,
+            descendant_commit=mainline,
+        )
+        if base_is_current_main:
+            raise ConflictError(
+                "Candidate base commit has not drifted from current main; candidate is not stale"
+            )
+
+        with self.store.connection(immediate=True) as connection:
+            ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._expect_version(ticket, expected_version)
+            if ticket["status"] != TicketStatus.QA_READY.value:
+                raise ConflictError(
+                    f"Only QA_READY tickets can have their candidate requeued (ticket is {ticket['status']})"
+                )
+
+            active_lease = connection.execute(
+                "SELECT 1 FROM leases WHERE ticket_id = ? AND expires_at > ?",
+                (ticket_id, _iso()),
+            ).fetchone()
+            if active_lease is not None:
+                raise ConflictError(
+                    "A ticket with an active lease cannot have its candidate requeued"
+                )
+            connection.execute("DELETE FROM leases WHERE ticket_id = ?", (ticket_id,))
+
+            for table in (
+                "worktree_provision_jobs",
+                "candidate_submission_jobs",
+                "qa_test_jobs",
+                "merge_jobs",
+            ):
+                running = connection.execute(
+                    f"SELECT 1 FROM {table} WHERE ticket_id = ? AND status IN ('QUEUED', 'RUNNING')",
+                    (ticket_id,),
+                ).fetchone()
+                if running is not None:
+                    raise ConflictError(
+                        f"A ticket with a running job ({table}) cannot have its candidate requeued"
+                    )
+
+            latest_candidate = _row(
+                connection.execute(
+                    "SELECT * FROM candidates WHERE ticket_id = ? ORDER BY submitted_at DESC LIMIT 1",
+                    (ticket_id,),
+                ).fetchone()
+            )
+            if latest_candidate is None or latest_candidate["candidate_id"] != candidate["candidate_id"]:
+                raise ConflictError("Candidate changed during requeue")
+
+            timestamp = _iso()
+            next_version = ticket["version"] + 1
+
+            closed_offers = self._close_ticket_dispatch(connection, ticket_id, timestamp)
+            connection.execute(
+                """
+                UPDATE tickets
+                SET status = ?, blocked_reason = ?, version = ?, updated_at = ?
+                WHERE ticket_id = ?
+                """,
+                (TicketStatus.REWORK.value, reason, next_version, timestamp, ticket_id),
+            )
+
+            entry_id = _id("ctx")
+            connection.execute(
+                """
+                INSERT INTO context_entries
+                    (entry_id, project_id, feature_id, ticket_id, entry_type, content,
+                     source_ref, actor_id, actor_role, created_at)
+                VALUES (?, ?, ?, ?, 'candidate_requeued', ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry_id,
+                    project_id,
+                    ticket["feature_id"],
+                    ticket_id,
+                    reason,
+                    f"candidate:{candidate['candidate_id']}",
+                    actor.agent_id,
+                    actor.role.value,
+                    timestamp,
+                ),
+            )
+
+            self._event(
+                connection,
+                actor,
+                project_id,
+                "candidate.requeued",
+                "ticket",
+                ticket_id,
+                next_version,
+                {
+                    "previous_status": ticket["status"],
+                    "reason": reason,
+                    "candidate_id": candidate["candidate_id"],
+                    "candidate_commit": candidate["commit_sha"],
+                    "base_commit": candidate["base_commit"],
+                    "closed_offers": closed_offers,
+                },
+            )
+
+            rework_ticket = self._ticket(connection, ticket_id)
+            self._queue_ticket(connection, actor, project_id, rework_ticket)
+
+            return {
+                "ticket": rework_ticket,
+                "candidate": candidate,
+                "closed_offers": closed_offers,
+                "context_entry": self._one(
+                    connection, "SELECT * FROM context_entries WHERE entry_id = ?", (entry_id,)
+                ),
+            }
+
     def _require_no_active_work(self, connection: sqlite3.Connection, ticket_id: str) -> None:
         """Refuse retirement while any agent, worker or frozen artifact still owns this."""
         active_lease = connection.execute(
@@ -1045,6 +1230,7 @@ class ControlPlaneService:
                 "feature:write",
                 "ticket:plan",
                 "ticket:retire",
+                "candidate:requeue",
                 "repository:configure",
                 "test_command:configure",
             ],

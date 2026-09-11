@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 import sqlite3
 
 import pytest
@@ -90,9 +91,16 @@ async def test_mcp_exposes_only_role_appropriate_tools(tmp_path) -> None:
     assert "qa.submit_verdict" not in integrator_names
     assert "planner.configure_repository" in planner_names
     assert "planner.configure_test_command" in planner_names
-    assert {"planner.cancel_ticket", "planner.supersede_ticket"}.issubset(planner_names)
+    assert {
+        "planner.cancel_ticket",
+        "planner.supersede_ticket",
+        "planner.requeue_candidate",
+        "planner.requeue_stale_candidate",
+    }.issubset(planner_names)
     assert "planner.cancel_ticket" not in names
     assert "planner.cancel_ticket" not in qa_names
+    assert "planner.requeue_candidate" not in names
+    assert "planner.requeue_candidate" not in qa_names
     assert content[0].text
     assert structured["project"]["project_id"] == "project-1"
     assert identity_content[0].text
@@ -735,3 +743,67 @@ async def test_a_qa_failure_on_an_upgraded_database_is_not_reported_as_a_state_c
     assert result["ticket"]["status"] == "REWORK"
     assert result["planner_job"]["job_type"] == "qa_failure"
     assert service.list_planner_interventions(actors["planner"], "project-1")
+
+
+@pytest.mark.anyio
+async def test_planner_mcp_requeues_stale_candidate_with_audit_redaction(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    from test_integration_async import _git, _repository
+
+    repository = _repository(tmp_path)
+    service.configure_repository(actors["planner"], "project-1", str(repository))
+    ticket = seeded["ticket"]
+    claim = service.claim_ticket(actors["developer"], ticket["ticket_id"], ticket["version"], 900)
+    prepared = service.prepare_worktree(
+        actors["developer"],
+        ticket["ticket_id"],
+        claim["lease"]["lease_id"],
+        claim["ticket"]["version"],
+    )["worktree"]
+    worktree = Path(prepared["worktree_path"])
+    change = worktree / "src" / "checkout" / "retry.txt"
+    change.parent.mkdir(parents=True, exist_ok=True)
+    change.write_text("retry implementation\n", encoding="utf-8")
+    _git(worktree, "add", "src/checkout/retry.txt")
+    _git(worktree, "commit", "-m", "Implement retry")
+
+    commit_sha = _git(worktree, "rev-parse", "HEAD")
+    submitted = service.submit_candidate(
+        actors["developer"],
+        ticket["ticket_id"],
+        claim["lease"]["lease_id"],
+        claim["ticket"]["version"],
+        commit_sha,
+        prepared["base_commit"],
+        prepared["branch_ref"],
+        ["Feature is ready for QA."],
+    )
+    candidate = submitted["candidate"]
+
+    # Mainline drifts
+    (repository / "drift.txt").write_text("mainline moved\n", encoding="utf-8")
+    _git(repository, "add", "drift.txt")
+    _git(repository, "commit", "-m", "Advance mainline")
+
+    server = create_mcp_server(service, actors["planner"])
+
+    # Test planner.requeue_candidate tool
+    _content, requeued = await server.call_tool(
+        "planner.requeue_candidate",
+        {
+            "ticket_id": ticket["ticket_id"],
+            "expected_version": submitted["ticket"]["version"],
+            "reason": "Mainline drifted before QA began",
+        },
+    )
+
+    assert requeued["ticket"]["status"] == "REWORK"
+    assert requeued["candidate"]["candidate_id"] == candidate["candidate_id"]
+
+    # Verify audit activity and redaction
+    activity = service.list_agent_activity(actors["planner"], "project-1")["calls"]
+    assert activity[-1]["tool_name"] == "planner.requeue_candidate"
+    assert activity[-1]["outcome"] == "succeeded"
+    # The reason is redacted from the target summary
+    assert "reason" not in activity[-1]["input_summary"].get("target", {})
