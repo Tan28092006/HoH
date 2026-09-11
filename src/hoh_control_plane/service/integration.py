@@ -420,6 +420,7 @@ class IntegrationMixin:
                     return {
                         "ticket": ticket,
                         "merge_job": self._merge_job(connection, active["merge_job_id"]),
+                        "reused": True,
                     }
                 raise ConflictError("Ticket already has an active merge job")
             merge_job_id = _id("merge_job")
@@ -441,6 +442,7 @@ class IntegrationMixin:
             return {
                 "ticket": self._ticket(connection, ticket_id),
                 "merge_job": self._merge_job(connection, merge_job_id),
+                "reused": False,
             }
 
     def get_merge_candidate(

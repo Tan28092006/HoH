@@ -909,6 +909,11 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
 
             def queue_and_start() -> dict[str, Any]:
                 queued = service.queue_merge_candidate(actor, **arguments)
+                if queued["reused"]:
+                    # An identical retry (no idempotency_key, or a replay after the
+                    # caller could not tell whether the first request landed) must
+                    # not spawn a second OS process for the same durable job.
+                    return queued
                 try:
                     _start_merge_worker(service.store.path, queued["merge_job"]["merge_job_id"])
                 except OSError as error:

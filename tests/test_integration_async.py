@@ -311,3 +311,136 @@ async def test_integrator_mcp_acknowledges_merge_before_worker_runs(
 
     assert result["merge_job"]["status"] == "QUEUED"
     assert launched == [(service.store.path, result["merge_job"]["merge_job_id"])]
+
+
+def test_queue_merge_candidate_reports_whether_the_job_is_new(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """The caller must be able to tell a fresh job from an idempotent replay."""
+    _repository, ticket, _candidate, verified = _candidate_ready_for_integration(
+        service, actors, seeded, tmp_path
+    )
+    integration = _claimed_for_integration(service, actors, ticket, verified)
+    arguments = (
+        actors["integrator"], ticket["ticket_id"],
+        integration["lease"]["lease_id"], integration["ticket"]["version"],
+    )
+
+    first = service.queue_merge_candidate(*arguments)
+    retry = service.queue_merge_candidate(*arguments)
+
+    assert first["reused"] is False
+    assert retry["reused"] is True
+    assert retry["merge_job"]["merge_job_id"] == first["merge_job"]["merge_job_id"]
+
+
+@pytest.mark.anyio
+async def test_retried_mcp_merge_request_spawns_at_most_one_worker(
+    service, actors, seeded, tmp_path: Path, monkeypatch
+) -> None:
+    """A client retry with no idempotency_key must not double-spawn the worker.
+
+    This is the real shape of 'retry under contention': the caller does not know
+    whether its first request was durably queued, so it calls again with the same
+    ticket/lease/version. queue_merge_candidate already dedupes the job row; the
+    MCP tool must not launch a second OS process for that same job.
+    """
+    _repository, ticket, _candidate, verified = _candidate_ready_for_integration(
+        service, actors, seeded, tmp_path
+    )
+    integration = _claimed_for_integration(service, actors, ticket, verified)
+    launched: list[tuple[Path, str]] = []
+    monkeypatch.setattr(
+        mcp_server,
+        "_start_merge_worker",
+        lambda database_path, merge_job_id: launched.append((database_path, merge_job_id)),
+    )
+    server = create_mcp_server(service, actors["integrator"])
+    arguments = {
+        "ticket_id": ticket["ticket_id"],
+        "lease_id": integration["lease"]["lease_id"],
+        "expected_version": integration["ticket"]["version"],
+    }
+
+    _, first_result = await server.call_tool("integrator.merge_candidate", arguments)
+    _, retry_result = await server.call_tool("integrator.merge_candidate", arguments)
+
+    assert first_result["merge_job"]["merge_job_id"] == retry_result["merge_job"]["merge_job_id"]
+    assert launched == [(service.store.path, first_result["merge_job"]["merge_job_id"])]
+    with service.store.connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM merge_jobs WHERE ticket_id = ?", (ticket["ticket_id"],)
+        ).fetchone()[0] == 1
+
+
+@pytest.mark.anyio
+async def test_a_refused_merge_request_never_spawns_a_worker(
+    service, actors, seeded, tmp_path: Path, monkeypatch
+) -> None:
+    """A rolled-back or refused enqueue must leave no orphan worker behind."""
+    _repository, ticket, _candidate, verified = _candidate_ready_for_integration(
+        service, actors, seeded, tmp_path
+    )
+    integration = _claimed_for_integration(service, actors, ticket, verified)
+    launched: list[tuple[Path, str]] = []
+    monkeypatch.setattr(
+        mcp_server,
+        "_start_merge_worker",
+        lambda database_path, merge_job_id: launched.append((database_path, merge_job_id)),
+    )
+
+    with pytest.raises(mcp_server.ToolError):
+        await create_mcp_server(service, actors["integrator"]).call_tool(
+            "integrator.merge_candidate",
+            {
+                "ticket_id": ticket["ticket_id"],
+                "lease_id": integration["lease"]["lease_id"],
+                "expected_version": integration["ticket"]["version"] + 1,
+            },
+        )
+
+    assert launched == []
+    with service.store.connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM merge_jobs WHERE ticket_id = ?", (ticket["ticket_id"],)
+        ).fetchone()[0] == 0
+
+
+def test_a_second_worker_racing_the_same_job_never_runs_git_twice(
+    service, actors, seeded, tmp_path: Path, monkeypatch
+) -> None:
+    """Two OS processes claiming the same merge_job_id must still fast-forward once.
+
+    This is the atomic-claim guarantee (AC4) exercised without real threads: from
+    inside the Git call of the first execution, a second worker for the very same
+    job id is invoked reentrantly. Since the first execution's QUEUED->RUNNING
+    transition already committed by the time Git runs, the second call must see
+    a non-QUEUED job and return immediately without invoking Git again.
+    """
+    repository, ticket, candidate, verified = _candidate_ready_for_integration(
+        service, actors, seeded, tmp_path
+    )
+    integration = _claimed_for_integration(service, actors, ticket, verified)
+    queued = service.queue_merge_candidate(
+        actors["integrator"], ticket["ticket_id"],
+        integration["lease"]["lease_id"], integration["ticket"]["version"],
+    )
+    merge_job_id = queued["merge_job"]["merge_job_id"]
+    git_calls: list[None] = []
+    real_fast_forward = service.git_worktrees.fast_forward_default_branch
+
+    def racing_fast_forward(**kwargs):
+        git_calls.append(None)
+        second = service.execute_queued_merge(merge_job_id)
+        assert second["status"] == "RUNNING"
+        return real_fast_forward(**kwargs)
+
+    monkeypatch.setattr(
+        service.git_worktrees, "fast_forward_default_branch", racing_fast_forward
+    )
+
+    completed = service.execute_queued_merge(merge_job_id)
+
+    assert len(git_calls) == 1
+    assert completed["status"] == "COMPLETED"
+    assert _git(repository, "rev-parse", "main") == candidate["candidate"]["commit_sha"]
