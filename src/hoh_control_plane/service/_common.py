@@ -1,0 +1,207 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import sqlite3
+from collections import defaultdict
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+from hoh_control_plane.domain import (
+    CLOSED_TICKET_STATUSES,
+    RETIRABLE_TICKET_STATUSES,
+    Actor,
+    AuthorizationError,
+    ConflictError,
+    DomainError,
+    IdempotencyConflictError,
+    InterventionSeverity,
+    InterventionStatus,
+    NotFoundError,
+    PlannerJobStatus,
+    PlannerJobType,
+    ReleasePolicyError,
+    Role,
+    SkillCompatibilityError,
+    TicketStatus,
+    ValidationError,
+    require_project,
+    require_role,
+)
+from hoh_control_plane.git_worktrees import CLEAN_CHECKPOINT, DIRTY, GitWorktreeManager
+from hoh_control_plane.qa_runner import ProjectTestRunner, TestExecution
+from hoh_control_plane.store import SQLiteStore
+
+
+_SAFE_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+
+JSON_FIELDS = {
+    "acceptance_criteria",
+    "preservation_constraints",
+    "file_scope",
+    "developer_claims",
+    "evidence_refs",
+    "test_command",
+    "payload",
+    "input_summary",
+    "project_ids",
+    "skills",
+    "skill_manifest",
+    "skill_compatibility",
+    "accepted_protocol_versions",
+    "accepted_skill_versions",
+}
+COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
+
+MIN_TOKEN_BUDGET = 200
+MAX_TOKEN_BUDGET = 200_000
+DEFAULT_TOKEN_BUDGET = 8_000
+_CHECKPOINT_CHARS = 200
+
+# Retention policy for idempotency records: a replay is honored for this long,
+# after which purge_expired_idempotency_records may delete the row and the same
+# key behaves like a fresh request. Long enough to outlive any worker restart
+# or operator retry, short enough that keys are not kept indefinitely.
+IDEMPOTENCY_RETENTION_SECONDS = 86_400
+_MAX_IDEMPOTENCY_KEY_CHARS = 200
+
+# Narration accumulates without bound; every other entry type is a durable
+# decision that compaction may shorten but must never drop.
+_VERBOSE_ENTRY_TYPES = frozenset({"progress_update", "qa_test_run"})
+
+# Artifact identity and open findings stay in every packet, so these sections
+# are compacted to essentials rather than omitted.
+_PROTECTED_SECTIONS = frozenset({"ticket", "candidate", "known_failures"})
+
+# What each role cannot act safely without: a Developer that lost its branch and
+# base commit, or QA that lost the worktree it must execute in, would do damage
+# a smaller packet never justifies.
+_ROLE_REQUIRED_SECTIONS: dict[Role, frozenset[str]] = {
+    Role.DEVELOPER: frozenset({"worktree"}),
+    Role.QA: frozenset({"worktree", "test_runs"}),
+    Role.PLANNER: frozenset({"feature", "dependencies"}),
+    Role.INTEGRATOR: frozenset({"test_runs"}),
+}
+
+# Least important last: compaction walks each list in reverse.
+_TICKET_SECTION_PRIORITY: dict[Role, tuple[str, ...]] = {
+    Role.DEVELOPER: (
+        "worktree",
+        "known_failures",
+        "context_entries",
+        "candidate",
+        "dependencies",
+        "feature",
+        "test_runs",
+    ),
+    Role.QA: (
+        "candidate",
+        "test_runs",
+        "known_failures",
+        "worktree",
+        "context_entries",
+        "dependencies",
+        "feature",
+    ),
+    Role.PLANNER: (
+        "feature",
+        "dependencies",
+        "known_failures",
+        "context_entries",
+        "candidate",
+        "test_runs",
+        "worktree",
+    ),
+    Role.INTEGRATOR: (
+        "candidate",
+        "known_failures",
+        "test_runs",
+        "feature",
+        "dependencies",
+        "worktree",
+        "context_entries",
+    ),
+}
+_FALLBACK_SECTION_PRIORITY = (
+    "candidate",
+    "known_failures",
+    "context_entries",
+    "worktree",
+    "dependencies",
+    "feature",
+    "test_runs",
+)
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _iso(value: datetime | None = None) -> str:
+    return (value or _now()).isoformat().replace("+00:00", "Z")
+
+
+def _id(prefix: str) -> str:
+    return f"{prefix}_{uuid4().hex}"
+
+
+def _serialize(payload: Any) -> str:
+    return json.dumps(payload, sort_keys=True, default=str)
+
+
+def _estimate_tokens(payload: Any) -> int:
+    """Deterministic size proxy; exact tokenizer parity is not what the budget guards."""
+    return len(_serialize(payload)) // 4
+
+
+def _snapshot_id(payload: dict[str, Any]) -> str:
+    """Identify a compiled packet by its content so equal state compiles equal."""
+    material = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"context_snapshot_id", "generated_at"}
+    }
+    digest = hashlib.sha256(_serialize(material).encode("utf-8")).hexdigest()
+    return f"ctxsnap_{digest[:32]}"
+
+
+def _checkpoint(text: str) -> str:
+    if len(text) <= _CHECKPOINT_CHARS:
+        return text
+    return text[:_CHECKPOINT_CHARS] + "..."
+
+
+def _validated_budget(token_budget: int | None) -> int:
+    if token_budget is None:
+        return DEFAULT_TOKEN_BUDGET
+    if not MIN_TOKEN_BUDGET <= token_budget <= MAX_TOKEN_BUDGET:
+        raise ValidationError(
+            f"Context token budget must be between {MIN_TOKEN_BUDGET} and {MAX_TOKEN_BUDGET}"
+        )
+    return token_budget
+
+
+def _safe_path_segment(value: str, field: str) -> str:
+    if not _SAFE_PATH_SEGMENT_RE.fullmatch(value):
+        raise ValidationError(f"{field} cannot be used in a recovery artifact path")
+    return value
+
+
+def _bounded_join(values: tuple[str, ...] | list[str], limit: int = 20) -> str:
+    joined = ", ".join(values[:limit])
+    if len(values) > limit:
+        joined += f", and {len(values) - limit} more"
+    return joined
+
+
+def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    result = dict(row)
+    for field in JSON_FIELDS & result.keys():
+        result[field] = json.loads(result[field])
+    return result
