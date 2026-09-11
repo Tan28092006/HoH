@@ -440,6 +440,21 @@ class GitWorktreeManager:
             raise ValidationError("Candidate cannot fast-forward the default branch")
         return True, candidate
 
+    def commit_is_on_branch(
+        self, *, repository_path: str, default_branch: str, commit: str
+    ) -> bool:
+        """Whether a commit is genuinely reachable from the default branch.
+
+        Asked of Git rather than of the caller: a claim that something landed is
+        exactly the kind of assertion that must be checked, not believed.
+        """
+        repository = Path(self.validate_repository(repository_path))
+        try:
+            resolved = self._resolve_commit(repository, commit)
+        except ValidationError:
+            return False
+        return self._is_ancestor(repository, resolved, f"refs/heads/{default_branch}")
+
     def commit_semantic_record(
         self,
         *,

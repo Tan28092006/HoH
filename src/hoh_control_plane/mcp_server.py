@@ -998,6 +998,35 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 idempotency_key,
             )
 
+        @server.tool(name="integrator.record_external_landing", structured_output=True)
+        def integrator_record_external_landing(
+            ticket_id: str,
+            expected_version: int,
+            landed_commit: str,
+            reason: str,
+            idempotency_key: str | None = None,
+        ) -> dict[str, Any]:
+            """Record that a ticket's work is already on the default branch.
+
+            For work that landed outside the gate: a hotfix, an emergency merge, a
+            revert applied by hand. It records history and certifies nothing. No
+            candidate becomes verified and no acceptance criterion becomes
+            satisfied; the service checks for itself that the commit is really on
+            the branch before recording anything.
+            """
+            arguments = {
+                "ticket_id": ticket_id,
+                "expected_version": expected_version,
+                "landed_commit": landed_commit,
+                "reason": reason,
+            }
+            return invoke(
+                "integrator.record_external_landing",
+                arguments,
+                lambda: service.record_external_landing(actor, **arguments),
+                idempotency_key,
+            )
+
         @server.tool(name="integrator.get_merge_candidate", structured_output=True)
         def integrator_get_merge_candidate(
             ticket_id: str,

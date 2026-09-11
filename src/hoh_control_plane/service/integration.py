@@ -5,6 +5,7 @@ from hoh_control_plane.service._common import (
     Actor,
     Any,
     AuthorizationError,
+    CLOSED_TICKET_STATUSES,
     ConflictError,
     DomainError,
     PlannerJobType,
@@ -431,6 +432,126 @@ class IntegrationMixin:
                 f"{error}. The default branch has moved; record the outcome before "
                 "reporting this merge as complete."
             ) from error
+
+    def record_external_landing(
+        self,
+        actor: Actor,
+        ticket_id: str,
+        expected_version: int,
+        landed_commit: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Record that a ticket's work is already on the default branch.
+
+        This exists because work does land outside the gate — a hotfix, an
+        emergency merge, a revert applied by hand — and a board that cannot say so
+        reports finished work as outstanding forever. It records history and
+        certifies nothing: no candidate becomes verified, no criterion becomes
+        satisfied, and every surface it touches says the work did not pass the
+        integration gate.
+        """
+        require_role(actor, Role.INTEGRATOR, Role.ADMIN)
+        self._valid_commit(landed_commit, "landed_commit")
+        self._bounded_text(reason, "reason", 2000)
+        with self.store.connection() as connection:
+            ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._expect_version(ticket, expected_version)
+            if TicketStatus(ticket["status"]) in CLOSED_TICKET_STATUSES or (
+                ticket["status"] == TicketStatus.DONE.value
+            ):
+                raise ConflictError("Ticket has already reached a terminal state")
+            if connection.execute(
+                "SELECT 1 FROM leases WHERE ticket_id = ? AND expires_at > ?",
+                (ticket_id, _iso()),
+            ).fetchone():
+                raise ConflictError(
+                    "Work in flight must finish or be released before its outcome is recorded",
+                    {"reason": "landing_lease_active"},
+                )
+            for table in ("merge_jobs", "qa_test_jobs", "candidate_submission_jobs"):
+                if connection.execute(
+                    f"SELECT 1 FROM {table} WHERE ticket_id = ? AND status IN ('QUEUED', 'RUNNING')",
+                    (ticket_id,),
+                ).fetchone():
+                    raise ConflictError(
+                        "A job is still running for this ticket",
+                        {"reason": "landing_job_active"},
+                    )
+            project = self._one(
+                connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+            )
+            repository = _row(
+                connection.execute(
+                    "SELECT * FROM project_repositories WHERE project_id = ?", (project_id,)
+                ).fetchone()
+            )
+            if repository is None:
+                raise ValidationError(
+                    "Project repository is required before recording an external landing"
+                )
+            repository_path = repository["repository_path"]
+            default_branch = project["default_branch"]
+
+        # Outside the transaction: this asks Git, and Git does not belong inside
+        # the write lock.
+        if not self.git_worktrees.commit_is_on_branch(
+            repository_path=repository_path,
+            default_branch=default_branch,
+            commit=landed_commit,
+        ):
+            raise ValidationError(
+                "That commit is not reachable from the default branch, so this work "
+                "has not landed. Nothing was recorded.",
+                {"reason": "landing_commit_not_on_branch"},
+            )
+
+        with self.store.connection(immediate=True) as connection:
+            ticket, current_project_id = self._authorized_ticket(connection, actor, ticket_id)
+            if current_project_id != project_id:
+                raise ConflictError("Ticket changed while its landing was being verified")
+            self._expect_version(ticket, expected_version)
+            timestamp = _iso()
+            next_version = ticket["version"] + 1
+            # Said in full, on the ticket, where anyone reading its history will
+            # see it beside the state change rather than having to infer it.
+            note = (
+                "Recorded as landed outside the integration gate. This work is on "
+                f"the default branch at {landed_commit}, but it did not pass the "
+                "gate and carries no QA verdict: nothing here verifies a candidate "
+                f"or satisfies an acceptance criterion. Reason given: {reason}"
+            )
+            connection.execute(
+                """
+                INSERT INTO context_entries
+                    (entry_id, project_id, feature_id, ticket_id, entry_type, content,
+                     artifact_commit, actor_id, actor_role, created_at)
+                VALUES (?, ?, ?, ?, 'integration_landed_ungated', ?, ?, ?, ?, ?)
+                """,
+                (
+                    _id("ctx"), project_id, ticket["feature_id"], ticket_id, note,
+                    landed_commit, actor.agent_id, actor.role.value, timestamp,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE tickets SET status = ?, blocked_reason = NULL, version = ?, updated_at = ?
+                WHERE ticket_id = ?
+                """,
+                (TicketStatus.DONE.value, next_version, timestamp, ticket_id),
+            )
+            self._event(
+                connection, actor, project_id,
+                # A distinct event type, so no consumer can count this as a gated
+                # merge by reading integration.merged.
+                "integration.landed_ungated", "ticket", ticket_id, next_version,
+                {"landed_commit": landed_commit, "gated": False, "qa_verified": False},
+            )
+            self._close_ticket_dispatch(connection, ticket_id, timestamp)
+            return {
+                "ticket": self._ticket(connection, ticket_id),
+                "merge_status": "landed_ungated",
+                "gated": False,
+            }
 
     def _record_integration_gate(
         self,
