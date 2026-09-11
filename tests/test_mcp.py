@@ -98,6 +98,10 @@ async def test_mcp_exposes_only_role_appropriate_tools(tmp_path) -> None:
     assert "planner.configure_skill_policy" in planner_names
     assert "planner.configure_skill_policy" not in names
     assert "planner.configure_skill_policy" not in qa_names
+    assert "planner.recover_candidate_for_qa" in planner_names
+    assert "planner.recover_candidate_for_qa" not in names
+    assert "planner.recover_candidate_for_qa" not in qa_names
+    assert "planner.recover_candidate_for_qa" not in integrator_names
     assert {
         "planner.cancel_ticket",
         "planner.supersede_ticket",
@@ -894,3 +898,107 @@ async def test_planner_mcp_splits_a_ticket(service, actors, seeded) -> None:
         part_a["ticket_id"],
         part_b["ticket_id"],
     }
+
+
+@pytest.mark.anyio
+async def test_planner_mcp_recovers_a_blocked_candidate_for_a_fresh_qa_claim(
+    service, actors, seeded
+) -> None:
+    """End-to-end through the MCP tool surface: a candidate whose only QA rejection
+    was an infrastructure evidence gap, escalated to BLOCKED, then recovered by a
+    Planner so an independent QA agent can claim the same immutable candidate again.
+    """
+    ticket = seeded["ticket"]
+    developer_server = create_mcp_server(service, actors["developer"])
+    qa_server = create_mcp_server(service, actors["qa"])
+    planner_server = create_mcp_server(service, actors["planner"])
+
+    _, claim = await developer_server.call_tool(
+        "work.claim", {"ticket_id": ticket["ticket_id"], "expected_version": ticket["version"]}
+    )
+    _, candidate = await developer_server.call_tool(
+        "dev.submit_candidate",
+        {
+            "ticket_id": ticket["ticket_id"],
+            "lease_id": claim["lease"]["lease_id"],
+            "expected_version": claim["ticket"]["version"],
+            "commit_sha": "a" * 40,
+            "base_commit": "b" * 40,
+            "branch_ref": f"agent/{actors['developer'].agent_id}/{ticket['ticket_id']}",
+            "developer_claims": ["Ready for independent QA."],
+        },
+    )
+    candidate_id = candidate["candidate"]["candidate_id"]
+    _, qa_claim = await qa_server.call_tool(
+        "qa.claim_candidate",
+        {"ticket_id": ticket["ticket_id"], "expected_version": candidate["ticket"]["version"]},
+    )
+    _, rejected = await qa_server.call_tool(
+        "qa.submit_verdict",
+        {
+            "ticket_id": ticket["ticket_id"],
+            "lease_id": qa_claim["lease"]["lease_id"],
+            "candidate_id": candidate_id,
+            "expected_version": qa_claim["ticket"]["version"],
+            "verdict": "failed",
+            "findings": [
+                {
+                    "criterion": criterion,
+                    "status": "insufficient_evidence",
+                    "severity": "high",
+                    "observation": "The configured command imported an ambient install.",
+                    "evidence": [
+                        {
+                            "type": "project_test_run",
+                            "observation": "Ambient import shadowed the candidate.",
+                            "storage_ref": "evidence://x",
+                        }
+                    ],
+                }
+                for criterion in ticket["acceptance_criteria"]
+            ],
+        },
+    )
+    _, re_claim = await developer_server.call_tool(
+        "work.claim",
+        {"ticket_id": ticket["ticket_id"], "expected_version": rejected["ticket"]["version"]},
+    )
+    _, blocked = await developer_server.call_tool(
+        "dev.report_blocker",
+        {
+            "ticket_id": ticket["ticket_id"],
+            "lease_id": re_claim["lease"]["lease_id"],
+            "expected_version": re_claim["ticket"]["version"],
+            "reason": "Infrastructure-only rejection per standing Planner policy.",
+        },
+    )
+    with service.store.connection() as connection:
+        finding_id = connection.execute(
+            "SELECT finding_id FROM qa_findings WHERE candidate_id = ? LIMIT 1",
+            (candidate_id,),
+        ).fetchone()["finding_id"]
+
+    planner_names = {tool.name for tool in await planner_server.list_tools()}
+    developer_names = {tool.name for tool in await developer_server.list_tools()}
+    assert "planner.recover_candidate_for_qa" in planner_names
+    assert "planner.recover_candidate_for_qa" not in developer_names
+
+    _, recovered = await planner_server.call_tool(
+        "planner.recover_candidate_for_qa",
+        {
+            "ticket_id": ticket["ticket_id"],
+            "expected_version": blocked["ticket"]["version"],
+            "evidence_reference": finding_id,
+        },
+    )
+
+    assert recovered["ticket"]["status"] == "QA_READY"
+    assert recovered["candidate"]["candidate_id"] == candidate_id
+
+    _, fresh_qa_claim = await qa_server.call_tool(
+        "qa.claim_candidate",
+        {"ticket_id": ticket["ticket_id"], "expected_version": recovered["ticket"]["version"]},
+    )
+
+    assert fresh_qa_claim["ticket"]["status"] == "QA_IN_PROGRESS"
+    assert fresh_qa_claim["ticket"]["candidate_commit"] == candidate["candidate"]["commit_sha"]

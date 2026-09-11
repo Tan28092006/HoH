@@ -667,6 +667,24 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 idempotency_key,
             )
 
+        @server.tool(name="planner.recover_candidate_for_qa", structured_output=True)
+        def planner_recover_candidate_for_qa(
+            ticket_id: str,
+            expected_version: int,
+            evidence_reference: str,
+        ) -> dict[str, Any]:
+            """Requeue a frozen candidate for QA after an infrastructure-only rejection."""
+            arguments = {
+                "ticket_id": ticket_id,
+                "expected_version": expected_version,
+                "evidence_reference": evidence_reference,
+            }
+            return invoke(
+                "planner.recover_candidate_for_qa",
+                arguments,
+                lambda: service.recover_candidate_for_qa(actor, **arguments),
+            )
+
         @server.tool(name="planner.append_context", structured_output=True)
         def planner_append_context(
             entry_type: str,
