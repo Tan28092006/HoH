@@ -352,10 +352,24 @@ CREATE TABLE IF NOT EXISTS agent_presence (
     last_seen_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    skill_manifest TEXT NOT NULL DEFAULT '[]',
+    protocol_version TEXT,
+    skill_compatibility TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS agent_presence_role_expiry
     ON agent_presence(role, expires_at);
+
+-- A project's accepted skill/protocol versions. Absence of a row means no
+-- enforcement is configured yet: every agent stays compatible by default, so
+-- introducing this table never locks out an already-registered fleet.
+CREATE TABLE IF NOT EXISTS project_skill_policies (
+    project_id TEXT PRIMARY KEY REFERENCES projects(project_id),
+    accepted_protocol_versions TEXT NOT NULL,
+    accepted_skill_versions TEXT NOT NULL,
+    configured_by TEXT NOT NULL,
+    configured_at TEXT NOT NULL
+);
 
 -- A queue item is created atomically with every hand-off.  It persists when
 -- no appropriate agent is online, so it never depends on a chat being open.
@@ -589,8 +603,32 @@ class SQLiteStore:
             self._begin_immediate(connection)
             self._migrate_qa_test_job_lease_foreign_key(connection)
             self._migrate_planner_job_types(connection)
+            self._migrate_agent_presence_skill_columns(connection)
             repaired = self._migrate_stale_migration_table_references(connection)
             self._require_clean_foreign_keys(connection, repaired)
+
+    @staticmethod
+    def _migrate_agent_presence_skill_columns(connection: sqlite3.Connection) -> None:
+        """Add skill/protocol compatibility columns to a database created before them.
+
+        Plain additive columns with defaults: no CHECK or foreign key changes, so
+        this needs none of the rename-create-copy-drop machinery the other
+        migrations require, just ALTER TABLE ADD COLUMN guarded by presence.
+        """
+        existing_columns = {
+            row["name"]
+            for row in connection.execute('PRAGMA table_info("agent_presence")').fetchall()
+        }
+        if "skill_manifest" not in existing_columns:
+            connection.execute(
+                "ALTER TABLE agent_presence ADD COLUMN skill_manifest TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "protocol_version" not in existing_columns:
+            connection.execute("ALTER TABLE agent_presence ADD COLUMN protocol_version TEXT")
+        if "skill_compatibility" not in existing_columns:
+            connection.execute(
+                "ALTER TABLE agent_presence ADD COLUMN skill_compatibility TEXT NOT NULL DEFAULT '{}'"
+            )
 
     @classmethod
     def _migrate_stale_migration_table_references(

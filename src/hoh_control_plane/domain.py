@@ -115,6 +115,17 @@ class IdempotencyConflictError(ConflictError):
     code = "idempotency_conflict"
 
 
+class SkillCompatibilityError(ConflictError):
+    """The registered agent's declared skill or protocol version fails project policy.
+
+    Distinct from a plain state conflict so a client can tell "your identity is
+    fine but your tooling is stale" from an ordinary version race; the details
+    carry which skill or protocol failed and why.
+    """
+
+    code = "skill_incompatible"
+
+
 class NotFoundError(DomainError):
     code = "not_found"
     status_code = 404

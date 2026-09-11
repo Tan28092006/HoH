@@ -219,18 +219,39 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
         capacity: int = 1,
         machine_id: str | None = None,
         presence_seconds: int = 120,
+        skill_manifest: list[dict[str, Any]] | None = None,
+        protocol_version: str | None = None,
     ) -> dict[str, Any]:
-        """Register this authenticated agent as available for durable work dispatch."""
+        """Register this authenticated agent as available for durable work dispatch.
+
+        skill_manifest is an optional list of {name, version, checksum, loaded_at}
+        entries recording which skill files this agent actually loaded; combined
+        with protocol_version, it lets a project's skill policy flag this agent
+        as incompatible before it can claim work, without ever granting it any
+        role permission it does not already hold.
+        """
         arguments = {
             "skills": skills,
             "capacity": capacity,
             "machine_id": machine_id,
             "presence_seconds": presence_seconds,
+            "skill_manifest": skill_manifest,
+            "protocol_version": protocol_version,
         }
         return invoke(
             "agent.register",
             arguments,
             lambda: service.register_agent(actor, **arguments),
+        )
+
+    @server.tool(name="skill.get_compatibility", structured_output=True)
+    def skill_get_compatibility(project_id: str) -> dict[str, Any]:
+        """Read a project's accepted skill/protocol versions and each known agent's status."""
+        arguments = {"project_id": project_id}
+        return invoke(
+            "skill.get_compatibility",
+            arguments,
+            lambda: service.get_skill_compatibility(actor, **arguments),
         )
 
     @server.tool(name="agent.heartbeat", structured_output=True)
@@ -333,6 +354,24 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 "planner.configure_test_command",
                 arguments,
                 lambda: service.configure_test_command(actor, **arguments),
+            )
+
+        @server.tool(name="planner.configure_skill_policy", structured_output=True)
+        def planner_configure_skill_policy(
+            project_id: str,
+            accepted_protocol_versions: list[str],
+            accepted_skill_versions: dict[str, list[str]],
+        ) -> dict[str, Any]:
+            """Declare which agent protocol and skill versions this project currently accepts."""
+            arguments = {
+                "project_id": project_id,
+                "accepted_protocol_versions": accepted_protocol_versions,
+                "accepted_skill_versions": accepted_skill_versions,
+            }
+            return invoke(
+                "planner.configure_skill_policy",
+                arguments,
+                lambda: service.configure_skill_policy(actor, **arguments),
             )
 
         @server.tool(name="planner.create_project", structured_output=True)

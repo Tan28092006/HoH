@@ -72,7 +72,11 @@ async def test_mcp_exposes_only_role_appropriate_tools(tmp_path) -> None:
         "dev.get_worktree_provision",
         "dev.append_progress",
         "dev.submit_candidate",
+        "skill.get_compatibility",
     }.issubset(names)
+    assert "skill.get_compatibility" in qa_names
+    assert "skill.get_compatibility" in integrator_names
+    assert "skill.get_compatibility" in planner_names
     assert "planner.create_ticket" not in names
     assert "qa.submit_verdict" not in names
     assert {"qa.claim_candidate", "qa.record_test_run", "qa.submit_verdict"}.issubset(
@@ -91,6 +95,9 @@ async def test_mcp_exposes_only_role_appropriate_tools(tmp_path) -> None:
     assert "qa.submit_verdict" not in integrator_names
     assert "planner.configure_repository" in planner_names
     assert "planner.configure_test_command" in planner_names
+    assert "planner.configure_skill_policy" in planner_names
+    assert "planner.configure_skill_policy" not in names
+    assert "planner.configure_skill_policy" not in qa_names
     assert {
         "planner.cancel_ticket",
         "planner.supersede_ticket",

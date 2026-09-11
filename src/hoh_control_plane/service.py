@@ -26,6 +26,7 @@ from hoh_control_plane.domain import (
     PlannerJobType,
     ReleasePolicyError,
     Role,
+    SkillCompatibilityError,
     TicketStatus,
     ValidationError,
     require_project,
@@ -49,6 +50,10 @@ JSON_FIELDS = {
     "input_summary",
     "project_ids",
     "skills",
+    "skill_manifest",
+    "skill_compatibility",
+    "accepted_protocol_versions",
+    "accepted_skill_versions",
 }
 COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
 
@@ -374,6 +379,122 @@ class ControlPlaneService:
                 (project_id,),
             )
         return profile
+
+    def configure_skill_policy(
+        self,
+        actor: Actor,
+        project_id: str,
+        accepted_protocol_versions: list[str],
+        accepted_skill_versions: dict[str, list[str]],
+    ) -> dict[str, Any]:
+        """Declare which agent protocol and skill versions a project currently accepts.
+
+        This is mutable policy data, kept in the project's own record rather
+        than in any local skill file, so it can be changed without touching or
+        redistributing skill assets.
+        """
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        require_project(actor, project_id)
+        self._bounded_list(accepted_protocol_versions, "accepted_protocol_versions", 20, 50)
+        if not isinstance(accepted_skill_versions, dict):
+            raise ValidationError("accepted_skill_versions must be an object")
+        if len(accepted_skill_versions) > 50:
+            raise ValidationError("accepted_skill_versions supports at most 50 skills")
+        normalized_skill_versions: dict[str, list[str]] = {}
+        for skill_name, versions in accepted_skill_versions.items():
+            self._bounded_text(skill_name, "accepted_skill_versions key", 100)
+            self._bounded_list(
+                versions, f"accepted_skill_versions[{skill_name}]", 20, 50, required=True
+            )
+            normalized_skill_versions[skill_name] = versions
+        timestamp = _iso()
+        with self.store.connection(immediate=True) as connection:
+            project = self._one(
+                connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+            )
+            next_version = project["version"] + 1
+            connection.execute(
+                """
+                INSERT INTO project_skill_policies
+                    (project_id, accepted_protocol_versions, accepted_skill_versions,
+                     configured_by, configured_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(project_id) DO UPDATE SET
+                    accepted_protocol_versions = excluded.accepted_protocol_versions,
+                    accepted_skill_versions = excluded.accepted_skill_versions,
+                    configured_by = excluded.configured_by,
+                    configured_at = excluded.configured_at
+                """,
+                (
+                    project_id,
+                    json.dumps(accepted_protocol_versions),
+                    json.dumps(normalized_skill_versions),
+                    actor.agent_id,
+                    timestamp,
+                ),
+            )
+            connection.execute(
+                "UPDATE projects SET version = ?, updated_at = ? WHERE project_id = ?",
+                (next_version, timestamp, project_id),
+            )
+            self._event(
+                connection,
+                actor,
+                project_id,
+                "project.skill_policy_configured",
+                "project",
+                project_id,
+                next_version,
+                {
+                    "accepted_protocol_versions": accepted_protocol_versions,
+                    "accepted_skill_versions": normalized_skill_versions,
+                },
+            )
+            policy = self._one(
+                connection,
+                "SELECT * FROM project_skill_policies WHERE project_id = ?",
+                (project_id,),
+            )
+            configured_project = self._one(
+                connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+            )
+        return {"project": configured_project, "policy": policy}
+
+    def get_skill_compatibility(self, actor: Actor, project_id: str) -> dict[str, Any]:
+        """Read a project's accepted versions plus each known agent's compatibility.
+
+        Open to every authenticated role with project access: this exposes only
+        already-non-secret registration data, not a Planner-only mutation.
+        """
+        require_project(actor, project_id)
+        with self.store.connection() as connection:
+            policy = _row(
+                connection.execute(
+                    "SELECT * FROM project_skill_policies WHERE project_id = ?", (project_id,)
+                ).fetchone()
+            )
+            rows = connection.execute(
+                "SELECT * FROM agent_presence WHERE expires_at > ? ORDER BY agent_id",
+                (_iso(),),
+            ).fetchall()
+            agents = []
+            for row in rows:
+                presence = _row(row)
+                if (
+                    project_id not in presence["project_ids"]
+                    and "*" not in presence["project_ids"]
+                ):
+                    continue
+                agents.append(
+                    {
+                        "agent_id": presence["agent_id"],
+                        "role": presence["role"],
+                        "protocol_version": presence["protocol_version"],
+                        "skill_manifest": presence["skill_manifest"],
+                        "compatibility": presence["skill_compatibility"].get(project_id),
+                    }
+                )
+        return {"project_id": project_id, "policy": policy, "agents": agents}
 
     def create_feature(
         self,
@@ -1484,6 +1605,7 @@ class ControlPlaneService:
             "context:resolve",
             "agent:presence",
             "work:inbox",
+            "skill_compatibility:read",
         ]
         role_capabilities = {
             Role.PLANNER: [
@@ -1495,6 +1617,7 @@ class ControlPlaneService:
                 "candidate:requeue",
                 "repository:configure",
                 "test_command:configure",
+                "skill_policy:configure",
             ],
             Role.DEVELOPER: [
                 "ticket:claim:developer",
@@ -1516,13 +1639,23 @@ class ControlPlaneService:
         capacity: int = 1,
         machine_id: str | None = None,
         presence_seconds: int = 120,
+        skill_manifest: list[dict[str, Any]] | None = None,
+        protocol_version: str | None = None,
     ) -> dict[str, Any]:
-        """Publish a short-lived, authenticated availability record for dispatch."""
+        """Publish a short-lived, authenticated availability record for dispatch.
+
+        skill_manifest/protocol_version are recorded for project skill-policy
+        compatibility only; they never grant or widen role permission, which
+        always comes from the authenticated actor's own role.
+        """
         self._bounded_list(skills, "skills", 30, 100)
         self._capacity(capacity)
         self._presence_seconds(presence_seconds)
         if machine_id is not None:
             self._bounded_text(machine_id, "machine_id", 120)
+        if protocol_version is not None:
+            self._bounded_text(protocol_version, "protocol_version", 50)
+        normalized_manifest = self._validate_skill_manifest(skill_manifest or [])
         timestamp = _now()
         with self.store.connection(immediate=True) as connection:
             existing = _row(
@@ -1532,12 +1665,28 @@ class ControlPlaneService:
             )
             if existing is not None and existing["role"] != actor.role.value:
                 raise AuthorizationError("Agent identity cannot change roles")
+
+            compatibility: dict[str, Any] = {}
+            for project_id in sorted(actor.project_ids):
+                if project_id == "*":
+                    continue
+                policy = _row(
+                    connection.execute(
+                        "SELECT * FROM project_skill_policies WHERE project_id = ?",
+                        (project_id,),
+                    ).fetchone()
+                )
+                compatibility[project_id] = self._evaluate_skill_compatibility(
+                    project_id, policy, protocol_version, normalized_manifest
+                )
+
             connection.execute(
                 """
                 INSERT INTO agent_presence
                     (agent_id, role, project_ids, skills, capacity, machine_id,
-                     last_seen_at, expires_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     last_seen_at, expires_at, created_at, updated_at,
+                     skill_manifest, protocol_version, skill_compatibility)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_id) DO UPDATE SET
                     project_ids = excluded.project_ids,
                     skills = excluded.skills,
@@ -1545,7 +1694,10 @@ class ControlPlaneService:
                     machine_id = excluded.machine_id,
                     last_seen_at = excluded.last_seen_at,
                     expires_at = excluded.expires_at,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    skill_manifest = excluded.skill_manifest,
+                    protocol_version = excluded.protocol_version,
+                    skill_compatibility = excluded.skill_compatibility
                 """,
                 (
                     actor.agent_id,
@@ -1558,9 +1710,79 @@ class ControlPlaneService:
                     _iso(timestamp + timedelta(seconds=presence_seconds)),
                     _iso(timestamp),
                     _iso(timestamp),
+                    json.dumps(normalized_manifest),
+                    protocol_version,
+                    json.dumps(compatibility),
                 ),
             )
             return self._presence(connection, actor.agent_id)
+
+    @classmethod
+    def _validate_skill_manifest(cls, skill_manifest: list[Any]) -> list[dict[str, str]]:
+        """Bound and normalize a declared skill manifest before it is trusted as data.
+
+        Every field here is informational provenance, never an authorization
+        input: role and project scope come only from the authenticated Actor.
+        """
+        if not isinstance(skill_manifest, list):
+            raise ValidationError("skill_manifest must be a list")
+        if len(skill_manifest) > 30:
+            raise ValidationError("skill_manifest supports at most 30 entries")
+        normalized: list[dict[str, str]] = []
+        for index, entry in enumerate(skill_manifest):
+            if not isinstance(entry, dict):
+                raise ValidationError(f"skill_manifest[{index}] must be an object")
+            name = entry.get("name")
+            version = entry.get("version")
+            checksum = entry.get("checksum")
+            loaded_at = entry.get("loaded_at")
+            cls._bounded_text(name, f"skill_manifest[{index}].name", 100)
+            cls._bounded_text(version, f"skill_manifest[{index}].version", 50)
+            cls._bounded_text(checksum, f"skill_manifest[{index}].checksum", 128)
+            cls._bounded_text(loaded_at, f"skill_manifest[{index}].loaded_at", 40)
+            try:
+                datetime.fromisoformat(loaded_at.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValidationError(
+                    f"skill_manifest[{index}].loaded_at must be an ISO-8601 timestamp"
+                ) from exc
+            normalized.append(
+                {"name": name, "version": version, "checksum": checksum, "loaded_at": loaded_at}
+            )
+        names = [entry["name"] for entry in normalized]
+        if len(set(names)) != len(names):
+            raise ValidationError("skill_manifest cannot declare the same skill name twice")
+        return normalized
+
+    @staticmethod
+    def _evaluate_skill_compatibility(
+        project_id: str,
+        policy: dict[str, Any] | None,
+        protocol_version: str | None,
+        skill_manifest: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        """Score one registration against one project's policy, if any is configured.
+
+        A project with no configured policy accepts everything: enforcement is
+        opt-in per project, so introducing this table cannot retroactively lock
+        out an agent that has never declared a manifest at all.
+        """
+        if policy is None:
+            return {"compatible": True, "reasons": []}
+        reasons: list[str] = []
+        accepted_protocol_versions = policy["accepted_protocol_versions"]
+        if accepted_protocol_versions and protocol_version not in accepted_protocol_versions:
+            reasons.append(
+                f"protocol_version {protocol_version!r} is not accepted by {project_id}"
+            )
+        declared_versions = {entry["name"]: entry["version"] for entry in skill_manifest}
+        for skill_name, accepted_versions in policy["accepted_skill_versions"].items():
+            declared = declared_versions.get(skill_name)
+            if declared is None or declared not in accepted_versions:
+                reasons.append(
+                    f"skill {skill_name!r} version {declared!r} is not accepted by {project_id}"
+                )
+        return {"compatible": not reasons, "reasons": reasons}
 
     def heartbeat_agent(
         self, actor: Actor, *, presence_seconds: int = 120
@@ -5166,6 +5388,32 @@ class ControlPlaneService:
                 ),
             )
 
+    @staticmethod
+    def _require_skill_compatible(
+        connection: sqlite3.Connection, actor: Actor, project_id: str
+    ) -> None:
+        """Refuse a claim from an agent whose declared skills fail this project's policy.
+
+        Silent by default: an agent that never registered a manifest, or one
+        whose project has no configured policy, is treated as compatible, so
+        introducing policy enforcement never retroactively locks out an agent
+        that predates it.
+        """
+        presence = _row(
+            connection.execute(
+                "SELECT skill_compatibility FROM agent_presence WHERE agent_id = ?",
+                (actor.agent_id,),
+            ).fetchone()
+        )
+        if presence is None:
+            return
+        verdict = presence["skill_compatibility"].get(project_id)
+        if verdict is not None and not verdict["compatible"]:
+            raise SkillCompatibilityError(
+                "Agent skill/protocol version does not satisfy project policy",
+                {"project_id": project_id, "reasons": verdict["reasons"]},
+            )
+
     def _claim(
         self,
         actor: Actor,
@@ -5182,6 +5430,7 @@ class ControlPlaneService:
             self._expire_lease(connection, ticket_id)
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             self._expect_version(ticket, expected_version)
+            self._require_skill_compatible(connection, actor, project_id)
             existing = connection.execute(
                 "SELECT * FROM leases WHERE ticket_id = ?", (ticket_id,)
             ).fetchone()
