@@ -95,7 +95,9 @@ def _blocked_candidate_with_insufficient_evidence(service, actors, seeded, tmp_p
                     {
                         "type": "project_test_run",
                         "observation": "Ambient import shadowed the candidate.",
-                        "storage_ref": "evidence://local/testrun-shadowed.json",
+                        "storage_ref": (
+                            f"evidence://local/{candidate_id}/testrun-shadowed.json"
+                        ),
                     }
                 ],
             }

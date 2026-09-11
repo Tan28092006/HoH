@@ -304,6 +304,9 @@ def test_rest_api_runs_developer_to_qa_rework_flow(tmp_path: Path) -> None:
         context = client.get(
             f"/api/v1/tickets/{ticket['ticket_id']}/context", headers=dev_headers
         )
+        # Discovery hands out identity and references; the acceptance criteria a
+        # verdict is filed against come from resolving the ticket's own context.
+        criteria = context.json()["data"]["ticket"]["acceptance_criteria"]
         feature_context = client.get(
             "/api/v1/features/demo-checkout/context", headers=dev_headers
         )
@@ -350,7 +353,7 @@ def test_rest_api_runs_developer_to_qa_rework_flow(tmp_path: Path) -> None:
                 "verdict": "failed",
                 "findings": [
                     {
-                        "criterion": ticket["acceptance_criteria"][0],
+                        "criterion": criteria[0],
                         "status": "failed",
                         "severity": "high",
                         "observation": "Retry control remained disabled",
