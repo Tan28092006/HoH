@@ -439,81 +439,85 @@ Lưu evidence lớn như log, screenshot, video, trace và report. Database ch�
 
 Danh sách lớn dùng cursor pagination để ổn định khi ticket mới liên tục được tạo.
 
-## 6. MCP tool contract đề xuất
+## 6. MCP tool contract
 
-Tên dưới đây là logical contract. Khi hiện thực có thể gom chúng vào namespace phù hợp với SDK được chọn.
+Tên dưới đây là tên server thực sự đăng ký, không phải tên dự kiến. Nơi bản
+thiết kế ban đầu và bản hiện thực khác nhau, phần chênh được nêu rõ ngay tại
+chỗ, kèm lý do gộp hoặc trạng thái chưa hiện thực. Một công cụ ghi "chưa hiện
+thực" vẫn là yêu cầu còn nợ, không phải yêu cầu đã bị bỏ.
 
 ### 6.1. Công cụ chung
 
-#### `identity.get_capabilities`
+Tên dưới đây là tên server thực sự đăng ký. Bảy công cụ này có mặt cho mọi role:
 
-Trả identity, role, project scope, permissions và skill version bắt buộc.
+- `identity.get_capabilities` — trả identity, role, project scope, capabilities và protocol version.
+- `agent.register` và `agent.heartbeat` — đăng ký/gia hạn presence ngắn hạn. Chỉ role và project scope lấy từ identity đã xác thực được lưu; `skills`, `capacity`, `machine_id` chỉ là metadata dispatch, không cấp quyền.
+- `work.discover` — liệt kê feature/ticket theo role dưới dạng metadata và typed reference (xem §5.2, §5.3).
+- `feature.get_context` — feature rollup, ticket, blockers, verified behaviors, preservation constraints.
+- `ticket.get_context` — context packet của một ticket (xem §7).
+- `skill.get_compatibility` — trạng thái tương thích skill/protocol của project.
 
-#### `agent.register` và `agent.heartbeat`
+`work.inbox` chỉ có cho execution role (Developer, QA, Integrator); Planner không nhận offer từ hàng đợi thực thi mà dùng `planner.claim_job`.
 
-Đăng ký hoặc gia hạn presence ngắn hạn cho authenticated agent. Chỉ role/project
-scope lấy từ identity đã xác thực được lưu; `skills`, `capacity` và `machine_id`
-chỉ là metadata dispatch, không cấp quyền.
+Chưa hiện thực:
 
-#### `work.inbox`
-
-Trả các offer bền vững phù hợp role/project. Khi không có offer, agent mới dùng
-`work.discover` để xem metadata rộng hơn. Agent phải đọc ticket context và vẫn
-phải `claim` với `expected_version`; inbox offer không phải lease.
-
-#### `workspace.list_projects`
-
-Liệt kê các project agent được đọc.
-
-#### `work.discover`
-
-Liệt kê feature và ticket có thể hành động theo role.
-
-#### `feature.get_context`
-
-Trả feature rollup, subfeature tree, open tickets, blockers, verified behaviors và preservation constraints.
-
-#### `ticket.get_context`
-
-Trả context packet đầy đủ của ticket.
-
-#### `context.resolve`
-
-Resolve một hoặc nhiều typed `context_ref`. Tool phải từ chối reference ngoài tenant/project scope.
-
-#### `events.list`
-
-Đọc event mới sau một cursor để agent hoặc UI đồng bộ trạng thái.
+- `workspace.list_projects` — chưa có. Project scope hiện lấy từ `identity.get_capabilities`.
+- `events.list` — chưa có dưới dạng MCP tool; event đọc được qua REST/UI API. Phase 4.
+- `context.resolve` — chưa có dưới dạng MCP tool, dù `context:resolve` vẫn là capability string; hiện typed reference được resolve qua `feature.get_context` và `ticket.get_context`. Giữ lại như yêu cầu cho tới khi có nhiều loại reference hơn hai loại đó.
 
 ### 6.2. Planner tools
 
-- `planning.create_feature`
-- `planning.update_feature`
-- `planning.create_ticket`
-- `planning.split_ticket`
-- `planning.set_dependency`
-- `planning.set_priority`
-- `planning.define_acceptance_gate`
-- `planning.define_preservation_constraints`
-- `planning.mark_ready`
+Namespace là `planner.*` (không phải `planning.*`). Các setter rời trong bản thiết kế ban đầu (`set_dependency`, `set_priority`, `define_acceptance_gate`, `define_preservation_constraints`) được gộp vào một `planner.update_ticket` có `expected_version`, để một thay đổi kế hoạch là một transition có kiểm tra phiên bản thay vì bốn.
+
+Cấu trúc công việc:
+
+- `planner.create_project`
+- `planner.create_feature`
+- `planner.create_ticket`
+- `planner.update_ticket` — title, objective, priority, acceptance criteria, preservation constraints, dependencies
+- `planner.update_write_scope`
+- `planner.split_ticket`
+- `planner.set_ticket_ready`
+
+Vòng đời và phục hồi:
+
+- `planner.cancel_ticket`
+- `planner.supersede_ticket`
+- `planner.requeue_candidate` — QA_READY bị base drift trả về Developer
+- `planner.recover_candidate_for_qa` — candidate bị từ chối vì lệch artifact hạ tầng quay lại QA, giữ nguyên candidate
+
+Cấu hình project:
+
+- `planner.configure_repository` — kèm `workspace_model` (xem `docs/DEPLOYMENT.md`)
+- `planner.configure_test_command`
+- `planner.configure_skill_policy`
+
+Hàng đợi planning job và intervention (§4 Dispatch, HOH-202/HOH-234):
+
+- `planner.claim_job`
+- `planner.resolve_job`
+- `planner.list_interventions`
+- `planner.acknowledge_intervention`
+- `planner.append_context`
+
+`planning.update_feature` chưa hiện thực.
 
 Planner không được:
 
 - Sửa production code.
 - Submit candidate thay Developer.
-- Tạo QA verdict.
+- Tạo QA verdict hoặc đánh dấu candidate verified.
 - Bỏ qua evidence gate để đóng ticket.
 
 ### 6.3. Developer tools
 
-- `work.claim`
-- `work.heartbeat`
-- `work.release`
-- `dev.append_progress`
-- `dev.record_baseline`
-- `dev.report_local_test`
-- `dev.mark_blocked`
-- `dev.submit_candidate`
+- `work.inbox`, `work.claim`, `work.heartbeat`
+- `dev.prepare_worktree` và `dev.get_worktree_provision` — provisioning worktree chạy ngoài request MCP, trả `provision_id` để poll
+- `dev.append_progress` — thay cho `dev.record_baseline` và `dev.report_local_test` trong bản thiết kế ban đầu: một checkpoint có cấu trúc thay vì ba loại entry
+- `dev.report_blocker` — thay cho `dev.mark_blocked`
+- `dev.submit_candidate` và `dev.get_candidate_submission` — submit là job bất đồng bộ, poll tới trạng thái terminal
+
+`work.release` chưa hiện thực: lease được trả bằng `dev.report_blocker`, bằng hết hạn, hoặc bằng scheduler thu hồi.
 
 Developer không được:
 
@@ -525,14 +529,12 @@ Developer không được:
 
 ### 6.4. QA tools
 
-- `qa.discover_candidates`
-- `qa.claim_candidate`
-- `qa.append_observation`
-- `qa.attach_evidence`
-- `qa.record_finding`
-- `qa.submit_verdict`
-- `qa.reopen_verified_behavior`
-- `qa.release_candidate`
+- `work.inbox`, `work.heartbeat`, `qa.claim_candidate`
+- `qa.run_project_tests` và `qa.get_project_test_run` — chạy lệnh test đã đăng ký trên worktree của candidate đông lạnh, ngoài request MCP
+- `qa.record_test_run` — ghi nhận một lần chạy kèm provenance (§3.6, HOH-217)
+- `qa.submit_verdict` — nhận finding theo criterion kèm evidence trong cùng một lời gọi, thay cho `qa.append_observation`, `qa.attach_evidence` và `qa.record_finding` rời nhau: verdict và bằng chứng của nó phải cùng vào hoặc cùng không vào.
+
+`qa.discover_candidates` gộp vào `work.discover` (QA chỉ thấy `QA_READY`). `qa.reopen_verified_behavior` và `qa.release_candidate` chưa hiện thực.
 
 QA không được:
 
@@ -543,12 +545,14 @@ QA không được:
 
 ### 6.5. Integrator tools
 
-- `integration.discover_ready_candidates`
-- `integration.check_mergeability`
-- `integration.run_mainline_regression`
-- `integration.merge_candidate`
-- `integration.record_conflict`
-- `integration.requeue`
+Namespace là `integrator.*` (không phải `integration.*`).
+
+- `work.inbox`, `work.heartbeat`
+- `integrator.claim_candidate`
+- `integrator.merge_candidate` — queue một merge job bền vững; regression gate cô lập, kiểm tra release policy, base-drift và fast-forward đều nằm trong job này (HOH-201, HOH-233, HOH-232)
+- `integrator.get_merge_candidate` — poll tới trạng thái terminal
+
+`integration.discover_ready_candidates` gộp vào `work.discover`. `integration.check_mergeability` và `integration.run_mainline_regression` không còn là lời gọi riêng: chúng là các bước bắt buộc bên trong merge job, nên không thể bỏ qua bằng cách không gọi. `integration.record_conflict` và `integration.requeue` chưa hiện thực dưới dạng tool; base drift tự động trả ticket về `REWORK` kèm context bền vững.
 
 Integrator chỉ merge candidate đã đạt QA gate và policy gate.
 
@@ -1242,7 +1246,11 @@ hoh-control-plane/
 
 ## 20. Lộ trình hiện thực
 
-### Phase 0 - Domain prototype
+Trạng thái ghi kèm mỗi phase là so với công việc đã merge vào mainline, không
+phải so với công việc đã lên kế hoạch. Điều kiện hoàn thành của từng phase giữ
+nguyên như đặc tả ban đầu và không được nới ra cho khớp hành vi hiện tại.
+
+### Phase 0 - Domain prototype (hoàn thành)
 
 Xây:
 
@@ -1259,7 +1267,7 @@ Xây:
 - QA không thể sửa artifact hoặc submit candidate.
 - Developer không thể submit QA verdict.
 
-### Phase 1 - Metadata và context MCP
+### Phase 1 - Metadata và context MCP (hoàn thành)
 
 Xây:
 
@@ -1275,7 +1283,7 @@ Xây:
 - Mọi context packet có version, source ref và token budget.
 - Typed reference ngoài project bị từ chối.
 
-### Phase 2 - Developer workflow
+### Phase 2 - Developer workflow (hoàn thành)
 
 Xây:
 
@@ -1290,7 +1298,7 @@ Xây:
 - Candidate luôn có SHA bất biến.
 - Lease hết hạn có thể recover.
 
-### Phase 3 - QA và evidence
+### Phase 3 - QA và evidence (hoàn thành)
 
 Xây:
 
@@ -1305,7 +1313,7 @@ Xây:
 - Evidence không thể gắn nhầm candidate.
 - Failed verdict tạo rework context cho Dev tiếp theo.
 
-### Phase 4 - Web UI
+### Phase 4 - Web UI (một phần: board, filter và ticket detail đã có; event gần thời gian thực còn nợ, HOH-221)
 
 Xây:
 
@@ -1323,7 +1331,7 @@ Xây:
 - UI thể hiện stale/blocked/lease-expiring rõ ràng.
 - Không có thao tác UI nào bypass policy engine.
 
-### Phase 5 - Local skills
+### Phase 5 - Local skills (hoàn thành)
 
 Xây base skill và bốn role skill cùng contract tests.
 
@@ -1333,7 +1341,7 @@ Xây base skill và bốn role skill cùng contract tests.
 - Skill version không tương thích bị phát hiện.
 - Dev và QA tạo handoff đúng schema.
 
-### Phase 6 - Integrations
+### Phase 6 - Integrations (chưa bắt đầu; §24 nói rõ MVP không cần)
 
 Thêm GitHub trước, Jira sau:
 
