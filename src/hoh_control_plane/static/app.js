@@ -395,4 +395,44 @@ document.querySelectorAll(".nav-item").forEach(button => button.addEventListener
 }));
 
 loadDashboard().catch(error => { document.querySelector("#connection-label").textContent = "Offline"; showError(error.message); });
+
+// The stream only says that something moved. What it now says is read back from
+// the authenticated REST snapshots, so a dropped stream costs freshness and
+// never correctness: the slow poll below stays as the floor.
+let eventStream = null;
+let pendingReload = null;
+
+function scheduleReload() {
+  // Coalesce a burst of signals into one snapshot read rather than one per event.
+  if (pendingReload !== null) return;
+  pendingReload = window.setTimeout(() => {
+    pendingReload = null;
+    loadDashboard().catch(() => {});
+  }, 250);
+}
+
+function connectEventStream() {
+  if (typeof window.EventSource !== "function") return;
+  if (eventStream !== null) { eventStream.close(); eventStream = null; }
+  const url = `/api/v1/projects/${encodeURIComponent(state.projectId)}/events/stream`;
+  const stream = new EventSource(url);
+  eventStream = stream;
+  stream.addEventListener("change", () => scheduleReload());
+  stream.addEventListener("reset", () => {
+    // The cursor cannot belong to this history. Reload the authoritative
+    // snapshot instead of waiting for events that will never arrive; the
+    // browser resumes from the last id it saw, so nothing is replayed twice.
+    scheduleReload();
+  });
+  stream.addEventListener("open", () => {
+    document.querySelector("#connection-label").textContent = "Live";
+  });
+  stream.addEventListener("error", () => {
+    // EventSource reconnects on its own with Last-Event-ID; the poll covers the gap.
+    document.querySelector("#connection-label").textContent = "Reconnecting";
+  });
+}
+
+connectEventStream();
+projectPicker.addEventListener("change", () => connectEventStream());
 window.setInterval(() => loadDashboard().catch(() => {}), 10000);

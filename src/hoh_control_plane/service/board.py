@@ -4,6 +4,7 @@ from hoh_control_plane.service._common import (
     Actor,
     Any,
     Role,
+    ValidationError,
     TicketStatus,
     _now,
     _row,
@@ -130,6 +131,58 @@ class BoardMixin:
         return {
             "events": events,
             "next_cursor": events[-1]["sequence"] if events else after,
+        }
+
+    # A change signal, not the change itself. payload is free-form text written
+    # by whichever call emitted the event, so it is the one field that could
+    # carry a reason string, a scope listing or a blocked explanation into a
+    # channel nobody audits. The stream says what moved; the REST snapshot
+    # remains the only source for what it now says.
+    _EVENT_SIGNAL_FIELDS = (
+        "sequence",
+        "event_id",
+        "event_type",
+        "aggregate_type",
+        "aggregate_id",
+        "aggregate_version",
+        "actor_role",
+        "occurred_at",
+    )
+
+    def list_event_signals(
+        self, actor: Actor, project_id: str, after: int = 0, limit: int = 100
+    ) -> dict[str, Any]:
+        """Bounded change signals after a cursor, for a live view to react to.
+
+        Reports `reset` when the cursor cannot belong to this project's history —
+        a client holding a cursor from a different or rebuilt database would
+        otherwise wait forever for events that will never arrive.
+        """
+        require_project(actor, project_id)
+        limit = min(max(limit, 1), 100)
+        if after < 0:
+            raise ValidationError("Event cursor cannot be negative")
+        with self.store.connection() as connection:
+            highest = connection.execute(
+                "SELECT MAX(sequence) AS top FROM audit_events WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()["top"]
+            rows = connection.execute(
+                """
+                SELECT * FROM audit_events
+                WHERE project_id = ? AND sequence > ?
+                ORDER BY sequence ASC LIMIT ?
+                """,
+                (project_id, after, limit),
+            ).fetchall()
+        reset = highest is not None and after > highest
+        signals = [
+            {field: _row(row)[field] for field in self._EVENT_SIGNAL_FIELDS} for row in rows
+        ]
+        return {
+            "events": signals,
+            "next_cursor": signals[-1]["sequence"] if signals else (0 if reset else after),
+            "reset": reset,
         }
 
     def list_agent_activity(

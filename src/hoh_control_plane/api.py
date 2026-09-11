@@ -4,12 +4,13 @@ import hmac
 import json
 import os
 import sqlite3
+import time
 from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -104,12 +105,23 @@ class VerdictRequest(StrictModel):
     findings: list[FindingInput] = Field(min_length=1, max_length=50)
 
 
+# An idle board does not need a tighter loop than a person can perceive, and a
+# heartbeat only has to beat faster than the shortest proxy idle timeout.
+_EVENT_STREAM_POLL_SECONDS = 1.0
+_EVENT_STREAM_HEARTBEAT_SECONDS = 15.0
+_EVENT_STREAM_RETRY_SECONDS = 3.0
+
+
 def create_app(
     database_path: str | Path | None = None,
     *,
     local_mode: bool | None = None,
     seed_demo: bool = False,
     token_identities: dict[str, Actor] | None = None,
+    event_stream_poll_seconds: float = _EVENT_STREAM_POLL_SECONDS,
+    event_stream_heartbeat_seconds: float = _EVENT_STREAM_HEARTBEAT_SECONDS,
+    event_stream_retry_seconds: float = _EVENT_STREAM_RETRY_SECONDS,
+    event_stream_max_idle_polls: int | None = None,
 ) -> FastAPI:
     db_path = Path(database_path or os.getenv("HOH_DATABASE_PATH", "data/control-plane.db"))
     is_local = (
@@ -124,6 +136,26 @@ def create_app(
     service = ControlPlaneService(store)
     if seed_demo:
         seed_demo_data(service)
+
+    polls_remaining = {"count": event_stream_max_idle_polls}
+
+    def sleep_between_polls(seconds: float) -> bool:
+        """Wait for the next poll; False ends the stream.
+
+        A bounded poll count exists so a test can drain a stream deterministically
+        instead of racing a timer. Unbounded is the production default.
+        """
+        if polls_remaining["count"] is not None:
+            if polls_remaining["count"] <= 0:
+                return False
+            polls_remaining["count"] -= 1
+            return True
+        time.sleep(seconds)
+        return True
+
+    def request_is_gone(request: Request) -> bool:
+        """Stop producing for a client that has disconnected."""
+        return bool(getattr(request, "_hoh_disconnected", False))
 
     app = FastAPI(title="Harness Control Plane", version="0.3.0")
     app.state.service = service
@@ -410,6 +442,67 @@ def create_app(
         actor: Actor = Depends(actor_dependency),
     ) -> dict[str, Any]:
         return {"data": service.list_events(actor, project_id, after)}
+
+    @app.get("/api/v1/projects/{project_id}/events/stream")
+    def events_stream(
+        request: Request,
+        project_id: str,
+        after: int = Query(default=0, ge=0),
+        last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
+        actor: Actor = Depends(actor_dependency),
+    ) -> StreamingResponse:
+        """Stream bounded change signals so a board can react without polling.
+
+        One-way by construction: this is Server-Sent Events, so a client cannot
+        write through it, and every signal still has to be read back through the
+        authenticated REST snapshots to learn what actually changed.
+        """
+        # A reconnecting EventSource resends the last id it saw, which is more
+        # trustworthy than a query string the page rebuilt from memory.
+        cursor = after
+        if last_event_id is not None and last_event_id.isdigit():
+            cursor = int(last_event_id)
+        # Authorize once, here, so a refused project fails as a normal error
+        # response rather than inside an already-open stream.
+        service.list_event_signals(actor, project_id, cursor, limit=1)
+
+        def emit() -> Any:
+            position = cursor
+            yield f"retry: {int(event_stream_retry_seconds * 1000)}\n\n".encode()
+            idle = 0.0
+            while True:
+                if request_is_gone(request):
+                    return
+                batch = service.list_event_signals(actor, project_id, position)
+                if batch["reset"]:
+                    # The cursor cannot belong to this history, so nothing will
+                    # ever arrive after it. Say so instead of hanging.
+                    yield b"event: reset\ndata: {}\n\n"
+                    position = 0
+                    continue
+                for signal in batch["events"]:
+                    body = json.dumps(signal, sort_keys=True)
+                    yield (
+                        f"id: {signal['sequence']}\nevent: change\ndata: {body}\n\n"
+                    ).encode()
+                position = batch["next_cursor"]
+                if batch["events"]:
+                    idle = 0.0
+                    continue
+                idle += event_stream_poll_seconds
+                if idle >= event_stream_heartbeat_seconds:
+                    # Comment frame: keeps an idle connection and any proxy in
+                    # front of it from timing the stream out.
+                    yield b": heartbeat\n\n"
+                    idle = 0.0
+                if not sleep_between_polls(event_stream_poll_seconds):
+                    return
+
+        return StreamingResponse(
+            emit(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.get("/api/v1/projects/{project_id}/agent-activity")
     def agent_activity(
