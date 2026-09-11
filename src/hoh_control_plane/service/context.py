@@ -4,6 +4,7 @@ from hoh_control_plane.service._common import (
     Actor,
     Any,
     CLOSED_TICKET_STATUSES,
+    Role,
     TicketStatus,
     _CHECKPOINT_CHARS,
     _FALLBACK_SECTION_PRIORITY,
@@ -18,6 +19,40 @@ from hoh_control_plane.service._common import (
     _snapshot_id,
     _validated_budget,
     require_project,
+)
+
+
+# A ticket packet already names its own ticket, project and candidate, so every
+# nested row that repeats them spends budget to say what the envelope already
+# said. superseded_by is always NULL because the query selects only live entries.
+# report_path is the one exception that is not merely redundant: it is an
+# absolute path on whichever machine ran the tests, so it is unusable to any
+# other agent, while storage_ref is the portable reference to the same report.
+_REDUNDANT_SECTION_FIELDS: dict[str, tuple[str, ...]] = {
+    "ticket": ("created_at", "updated_at"),
+    "context_entries": ("project_id", "feature_id", "ticket_id", "superseded_by"),
+    "candidate": ("ticket_id",),
+    "worktree": ("ticket_id", "project_id"),
+    "test_runs": ("ticket_id", "candidate_id", "report_path"),
+    "known_failures": ("candidate_id",),
+    "evidence": ("candidate_id",),
+}
+
+# An execution role does not plan the feature, it implements or verifies one
+# ticket inside it, so the feature is kept as intent rather than as planning
+# bookkeeping. A Planner keeps the whole row because the feature is its subject.
+_EXECUTION_FEATURE_FIELDS = ("feature_id", "title", "objective", "status", "version")
+
+# Section 7.2 gives a Developer known failures and their reproduction evidence,
+# not QA's provenance machinery. The outcome plus a resolvable reference is what
+# a Developer acts on; command digests and checksums are how QA proves identity.
+_DEVELOPER_TEST_RUN_FIELDS = (
+    "test_run_id",
+    "exit_code",
+    "timed_out",
+    "duration_ms",
+    "storage_ref",
+    "created_at",
 )
 
 
@@ -174,6 +209,7 @@ class ContextMixin:
             "test_runs": test_runs,
             "known_failures": failures,
         }
+        self._project_role_sections(payload, actor)
         return self._compile_context(
             payload,
             token_budget=budget,
@@ -183,6 +219,54 @@ class ContextMixin:
             protected=_PROTECTED_SECTIONS
             | _ROLE_REQUIRED_SECTIONS.get(actor.role, frozenset()),
         )
+
+    @staticmethod
+    def _project_role_sections(payload: dict[str, Any], actor: Actor) -> None:
+        """Drop what the envelope already says, and what this role never acts on.
+
+        This runs before budget fitting so compaction spends the budget on
+        material a role reasons with, rather than on bookkeeping it cannot use.
+        It removes fields, never sections: dropping a whole section is the
+        budget-driven decision recorded in omitted_sections, and every field
+        section 7.2 and 7.3 make a role's own is kept regardless of budget.
+        """
+
+        def strip(row: Any, fields: tuple[str, ...]) -> Any:
+            if not isinstance(row, dict):
+                return row
+            return {key: value for key, value in row.items() if key not in fields}
+
+        for section, fields in _REDUNDANT_SECTION_FIELDS.items():
+            value = payload.get(section)
+            if isinstance(value, list):
+                payload[section] = [strip(item, fields) for item in value]
+            elif value is not None:
+                payload[section] = strip(value, fields)
+
+        for finding in payload.get("known_failures") or []:
+            if isinstance(finding, dict) and isinstance(finding.get("evidence"), list):
+                finding["evidence"] = [
+                    strip(item, _REDUNDANT_SECTION_FIELDS["evidence"])
+                    for item in finding["evidence"]
+                ]
+
+        if actor.role is not Role.PLANNER and isinstance(payload.get("feature"), dict):
+            payload["feature"] = {
+                key: value
+                for key, value in payload["feature"].items()
+                if key in _EXECUTION_FEATURE_FIELDS
+            }
+
+        if actor.role is Role.DEVELOPER:
+            payload["test_runs"] = [
+                {
+                    key: value
+                    for key, value in run.items()
+                    if key in _DEVELOPER_TEST_RUN_FIELDS
+                }
+                for run in payload.get("test_runs") or []
+                if isinstance(run, dict)
+            ]
 
     def _compile_context(
         self,

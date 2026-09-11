@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -359,3 +360,163 @@ def test_feature_context_exposes_the_same_bounded_envelope(
     assert context["token_budget"] == TIGHT_BUDGET
     assert isinstance(context["omitted_sections"], list)
     assert context["estimated_tokens"] <= TIGHT_BUDGET
+
+
+# A budget large enough that nothing is dropped for size: these tests pin what
+# each role's packet contains by contract, not what survives compaction.
+WHOLE_PACKET = 60_000
+
+
+def test_developer_packet_keeps_everything_section_7_2_makes_its_own(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """Trimming the packet must never cost a Developer something it acts on."""
+    ticket, _candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
+
+    packet = service.get_ticket_context(
+        actors["developer"], ticket["ticket_id"], WHOLE_PACKET
+    )
+
+    # 1. Objective and acceptance criteria. 4. Preservation constraints.
+    # 6/8. Related files and the scope limit.
+    assert packet["ticket"]["objective"]
+    assert packet["ticket"]["acceptance_criteria"]
+    assert packet["ticket"]["preservation_constraints"]
+    assert packet["ticket"]["file_scope"]
+    # 2. Base commit and workspace identity.
+    assert packet["worktree"]["worktree_path"]
+    assert packet["worktree"]["branch_ref"]
+    assert packet["worktree"]["base_commit"]
+    # 3. Known failure with its reproduction evidence.
+    failure = packet["known_failures"][0]
+    assert failure["criterion"] and failure["observation"]
+    assert failure["evidence"][0]["storage_ref"]
+    # 5. Dependencies. 7. A decision that still stands.
+    assert isinstance(packet["dependencies"], list)
+    assert any(
+        entry["entry_type"] == "design_decision" for entry in packet["context_entries"]
+    )
+    # Artifact identity is never traded away for size.
+    assert packet["candidate"]["commit_sha"]
+    assert packet["candidate"]["base_commit"]
+
+
+def test_qa_packet_keeps_everything_section_7_3_makes_its_own(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    ticket, candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
+
+    packet = service.get_ticket_context(actors["qa"], ticket["ticket_id"], WHOLE_PACKET)
+
+    # 1. Immutable candidate identity.
+    assert packet["candidate"]["candidate_id"] == candidate["candidate"]["candidate_id"]
+    assert packet["candidate"]["commit_sha"]
+    assert packet["candidate"]["base_commit"]
+    assert packet["candidate"]["branch_ref"]
+    # 2. Requirement and acceptance criteria. 3. Preservation constraints.
+    assert packet["ticket"]["objective"]
+    assert packet["ticket"]["acceptance_criteria"]
+    assert packet["ticket"]["preservation_constraints"]
+    # 4. Test environment and the interface QA executes against.
+    assert packet["worktree"]["worktree_path"]
+    assert packet["worktree"]["base_commit"]
+    # 5. Known risks carried forward, with the provenance QA judges them by.
+    evidence = packet["known_failures"][0]["evidence"][0]
+    assert evidence["storage_ref"]
+    assert "environment_digest" in evidence and "storage_checksum" in evidence
+    # 6. Developer evidence, kept for reference rather than trusted.
+    assert packet["candidate"]["developer_claims"]
+
+
+def test_packets_drop_repeated_identity_and_machine_local_paths(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """What the envelope already says, or what no other machine can resolve."""
+    ticket, _candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
+
+    for actor in _all_roles(actors).values():
+        packet = service.get_ticket_context(actor, ticket["ticket_id"], WHOLE_PACKET)
+
+        for entry in packet["context_entries"]:
+            assert "ticket_id" not in entry
+            assert "project_id" not in entry
+            assert "superseded_by" not in entry
+        if packet.get("candidate"):
+            assert "ticket_id" not in packet["candidate"]
+        if packet.get("worktree"):
+            assert "ticket_id" not in packet["worktree"]
+        for run in packet.get("test_runs") or []:
+            # An absolute path on the runner's machine is unusable to a reader;
+            # storage_ref is the portable reference to the same report.
+            assert "report_path" not in run
+            assert run["storage_ref"]
+        # Identity the envelope carries is not repeated per row.
+        assert packet["ticket"]["ticket_id"] == ticket["ticket_id"]
+
+
+def test_an_execution_role_gets_feature_intent_and_a_planner_gets_the_whole_feature(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    ticket, _candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
+
+    developer = service.get_ticket_context(
+        actors["developer"], ticket["ticket_id"], WHOLE_PACKET
+    )
+    planner = service.get_ticket_context(
+        actors["planner"], ticket["ticket_id"], WHOLE_PACKET
+    )
+
+    assert developer["feature"]["objective"], "intent is why the ticket exists"
+    assert developer["feature"]["title"]
+    assert "created_at" not in developer["feature"]
+    assert "priority" not in developer["feature"]
+    # The Planner plans the feature, so it keeps the planning fields.
+    assert "priority" in planner["feature"]
+    assert "created_at" in planner["feature"]
+
+
+def test_a_developer_gets_test_outcomes_without_qa_provenance_machinery(
+    service, actors
+) -> None:
+    """Asserted on the projection itself so an empty run list cannot pass it vacuously."""
+    run = {
+        "test_run_id": "testrun_1", "candidate_id": "cand_1", "ticket_id": "DEV-142",
+        "command_digest": "digest", "exit_code": 1, "timed_out": 0, "duration_ms": 90,
+        "storage_ref": "evidence://local/report.json",
+        "report_path": "D:\\HoH\\data\\evidence\\report.json",
+        "environment_digest": "env", "storage_checksum": "sum",
+        "executed_by": "qa-01", "created_at": "2026-09-11T00:00:00Z",
+    }
+
+    packets = {}
+    for name in ("developer", "qa"):
+        payload = {"feature": {}, "test_runs": [dict(run)], "context_entries": []}
+        service._project_role_sections(payload, actors[name])
+        packets[name] = payload["test_runs"][0]
+
+    assert packets["developer"]["exit_code"] == 1, "a Developer still sees the outcome"
+    assert packets["developer"]["storage_ref"], "and can still resolve the full report"
+    assert "command_digest" not in packets["developer"]
+    assert "storage_checksum" not in packets["developer"]
+    assert packets["qa"]["command_digest"], "QA proves which command produced a run"
+    assert packets["qa"]["environment_digest"] and packets["qa"]["storage_checksum"]
+    # The machine-local path is unusable to any reader, so no role receives it.
+    assert "report_path" not in packets["developer"]
+    assert "report_path" not in packets["qa"]
+
+
+def test_trimming_leaves_the_packet_smaller_than_before(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """The point of the projection: budget is spent on material, not bookkeeping."""
+    ticket, _candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
+
+    packet = service.get_ticket_context(
+        actors["developer"], ticket["ticket_id"], WHOLE_PACKET
+    )
+
+    rendered = json.dumps(packet)
+    assert '"superseded_by"' not in rendered
+    assert '"report_path"' not in rendered
+    # Every context entry used to repeat these three; none should now.
+    assert rendered.count('"project_id"') <= 1
