@@ -19,7 +19,7 @@ from hoh_control_plane.service._common import (
     json,
     require_project,
     require_role,
-    sqlite3,
+    Connection,
     timedelta,
     uuid4,
 )
@@ -30,7 +30,7 @@ class PlannerJobMixin:
 
     def _open_planner_job(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         actor: Actor,
         project_id: str,
         ticket: dict[str, Any],
@@ -128,7 +128,7 @@ class PlannerJobMixin:
 
     def _record_planner_intervention(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         actor: Actor,
         planner_job: dict[str, Any],
         *,
@@ -226,7 +226,7 @@ class PlannerJobMixin:
         return self._planner_intervention(connection, intervention_id)
 
     def _planner_intervention(
-        self, connection: sqlite3.Connection, intervention_id: str
+        self, connection: Connection, intervention_id: str
     ) -> dict[str, Any]:
         return self._one(
             connection,
@@ -460,7 +460,7 @@ class PlannerJobMixin:
             )
             return {"planner_job": self._planner_job(connection, planner_job_id)}
 
-    def _expire_planner_job_leases(self, connection: sqlite3.Connection) -> None:
+    def _expire_planner_job_leases(self, connection: Connection) -> None:
         """Return abandoned planning decisions to the ready queue."""
         expired = connection.execute(
             "SELECT planner_job_id FROM planner_job_leases WHERE expires_at <= ?", (_iso(),)
@@ -477,7 +477,7 @@ class PlannerJobMixin:
                 (_iso(), row["planner_job_id"]),
             )
 
-    def _planner_job(self, connection: sqlite3.Connection, planner_job_id: str) -> dict[str, Any]:
+    def _planner_job(self, connection: Connection, planner_job_id: str) -> dict[str, Any]:
         job = self._one(
             connection, "SELECT * FROM planner_jobs WHERE planner_job_id = ?", (planner_job_id,)
         )

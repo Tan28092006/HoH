@@ -37,7 +37,11 @@ from hoh_control_plane.domain import (
 )
 from hoh_control_plane.git_worktrees import CLEAN_CHECKPOINT, DIRTY, GitWorktreeManager
 from hoh_control_plane.qa_runner import ProjectTestRunner, TestExecution
-from hoh_control_plane.store import SQLiteStore
+from hoh_control_plane.store import (
+    SQLiteStore,
+    StoreConnection as Connection,
+    StoreIntegrityError,
+)
 
 
 _SAFE_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
@@ -209,7 +213,7 @@ def _bounded_join(values: tuple[str, ...] | list[str], limit: int = 20) -> str:
     return joined
 
 
-def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+def _row(row: Any | None) -> dict[str, Any] | None:
     if row is None:
         return None
     result = dict(row)

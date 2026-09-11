@@ -16,7 +16,8 @@ from hoh_control_plane.service._common import (
     json,
     require_project,
     require_role,
-    sqlite3,
+    Connection,
+    StoreIntegrityError,
 )
 
 
@@ -61,7 +62,7 @@ class PlanningMixin:
                 project = self._one(
                     connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
                 )
-        except sqlite3.IntegrityError as exc:
+        except StoreIntegrityError as exc:
             raise ConflictError("Project already exists") from exc
         return project
 
@@ -407,7 +408,7 @@ class PlanningMixin:
                 feature = self._one(
                     connection, "SELECT * FROM features WHERE feature_id = ?", (feature_id,)
                 )
-        except sqlite3.IntegrityError as exc:
+        except StoreIntegrityError as exc:
             raise ConflictError("Feature already exists or project is missing") from exc
         return feature
 
@@ -495,7 +496,7 @@ class PlanningMixin:
                 ticket = self._ticket(connection, ticket_id)
                 if ready:
                     self._queue_ticket(connection, actor, project_id, ticket)
-        except sqlite3.IntegrityError as exc:
+        except StoreIntegrityError as exc:
             raise ConflictError("Ticket already exists or dependency is invalid") from exc
         return ticket
 
@@ -1291,7 +1292,7 @@ class PlanningMixin:
 
     def _verify_infrastructure_mismatch_provenance(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         candidate_id: str,
         evidence_reference: str,
     ) -> str:
@@ -1345,7 +1346,7 @@ class PlanningMixin:
             "evidence_reference must be a qa_test_jobs test_run_id or a qa_findings finding_id"
         )
 
-    def _require_no_active_work(self, connection: sqlite3.Connection, ticket_id: str) -> None:
+    def _require_no_active_work(self, connection: Connection, ticket_id: str) -> None:
         """Refuse retirement while any agent, worker or frozen artifact still owns this."""
         active_lease = connection.execute(
             "SELECT 1 FROM leases WHERE ticket_id = ? AND expires_at > ?",
@@ -1375,7 +1376,7 @@ class PlanningMixin:
 
     def _retirement_replacement(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         ticket_id: str,
         project_id: str,
         replacement_ticket_id: str | None,
@@ -1397,7 +1398,7 @@ class PlanningMixin:
         return replacement
 
     def _close_ticket_dispatch(
-        self, connection: sqlite3.Connection, ticket_id: str, timestamp: str
+        self, connection: Connection, ticket_id: str, timestamp: str
     ) -> int:
         """Close queue, offer and outbox rows together so no live hand-off survives."""
         queue_ids = [

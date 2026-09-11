@@ -18,7 +18,7 @@ from hoh_control_plane.service._common import (
     _iso,
     _row,
     _snapshot_id,
-    sqlite3,
+    Connection,
     json,
     _serialize,
     _validated_budget,
@@ -281,7 +281,7 @@ class ContextMixin:
 
     def require_fresh_context(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         ticket_id: str,
         snapshot_id: str | None,
     ) -> None:

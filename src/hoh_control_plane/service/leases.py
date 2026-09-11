@@ -18,7 +18,7 @@ from hoh_control_plane.service._common import (
     re,
     require_project,
     require_role,
-    sqlite3,
+    Connection,
     timedelta,
 )
 
@@ -128,7 +128,7 @@ class LeaseMixin:
 
     @staticmethod
     def _require_skill_compatible(
-        connection: sqlite3.Connection, actor: Actor, project_id: str
+        connection: Connection, actor: Actor, project_id: str
     ) -> None:
         """Refuse a claim from an agent whose declared skills fail this project's policy.
 
@@ -240,13 +240,13 @@ class LeaseMixin:
             }
 
     def _authorized_ticket(
-        self, connection: sqlite3.Connection, actor: Actor, ticket_id: str
+        self, connection: Connection, actor: Actor, ticket_id: str
     ) -> tuple[dict[str, Any], str]:
         project_id = self._project_for_ticket(connection, ticket_id)
         require_project(actor, project_id)
         return self._ticket(connection, ticket_id), project_id
 
-    def _expire_lease(self, connection: sqlite3.Connection, ticket_id: str) -> None:
+    def _expire_lease(self, connection: Connection, ticket_id: str) -> None:
         lease = connection.execute(
             "SELECT * FROM leases WHERE ticket_id = ?", (ticket_id,)
         ).fetchone()
@@ -273,7 +273,7 @@ class LeaseMixin:
             )
 
     def _require_active_lease(
-        self, connection: sqlite3.Connection, actor: Actor, ticket_id: str, lease_id: str
+        self, connection: Connection, actor: Actor, ticket_id: str, lease_id: str
     ) -> dict[str, Any]:
         lease = self._lease(connection, lease_id)
         if lease["ticket_id"] != ticket_id:
@@ -285,12 +285,12 @@ class LeaseMixin:
             raise ConflictError("Lease has expired")
         return lease
 
-    def _lease(self, connection: sqlite3.Connection, lease_id: str) -> dict[str, Any]:
+    def _lease(self, connection: Connection, lease_id: str) -> dict[str, Any]:
         return self._one(
             connection, "SELECT * FROM leases WHERE lease_id = ?", (lease_id,)
         )
 
-    def _ticket(self, connection: sqlite3.Connection, ticket_id: str) -> dict[str, Any]:
+    def _ticket(self, connection: Connection, ticket_id: str) -> dict[str, Any]:
         ticket = self._one(
             connection, "SELECT * FROM tickets WHERE ticket_id = ?", (ticket_id,)
         )
@@ -304,7 +304,7 @@ class LeaseMixin:
         return ticket
 
     def _candidate_with_changed_paths(
-        self, connection: sqlite3.Connection, candidate: dict[str, Any]
+        self, connection: Connection, candidate: dict[str, Any]
     ) -> dict[str, Any]:
         candidate["changed_paths"] = [
             row["path"]
@@ -317,7 +317,7 @@ class LeaseMixin:
 
     @staticmethod
     def _dependency_would_cycle(
-        connection: sqlite3.Connection, ticket_id: str, candidate_dependency_id: str
+        connection: Connection, ticket_id: str, candidate_dependency_id: str
     ) -> bool:
         """True if candidate_dependency_id already transitively depends on ticket_id.
 
@@ -341,7 +341,7 @@ class LeaseMixin:
         return False
 
     @staticmethod
-    def _unfinished_dependency_ids(connection: sqlite3.Connection, ticket_id: str) -> list[str]:
+    def _unfinished_dependency_ids(connection: Connection, ticket_id: str) -> list[str]:
         return [
             row["ticket_id"]
             for row in connection.execute(
@@ -358,7 +358,7 @@ class LeaseMixin:
 
     def _active_write_scope_conflict(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         project_id: str,
         ticket: dict[str, Any],
         now: datetime,

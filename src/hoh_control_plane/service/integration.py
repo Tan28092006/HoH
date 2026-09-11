@@ -18,7 +18,7 @@ from hoh_control_plane.service._common import (
     hashlib,
     re,
     require_role,
-    sqlite3,
+    Connection,
     timedelta,
 )
 
@@ -318,7 +318,7 @@ class IntegrationMixin:
 
     def _record_integration_gate(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         actor: Actor,
         *,
         project_id: str,
@@ -870,7 +870,7 @@ class IntegrationMixin:
             )
             return self._merge_job(connection, merge_job_id)
 
-    def _merge_job(self, connection: sqlite3.Connection, merge_job_id: str) -> dict[str, Any]:
+    def _merge_job(self, connection: Connection, merge_job_id: str) -> dict[str, Any]:
         return self._one(
             connection, "SELECT * FROM merge_jobs WHERE merge_job_id = ?", (merge_job_id,)
         )

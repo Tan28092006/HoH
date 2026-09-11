@@ -60,7 +60,6 @@ from hoh_control_plane.service._common import (
     re,
     require_project,
     require_role,
-    sqlite3,
     timedelta,
     uuid4,
 )

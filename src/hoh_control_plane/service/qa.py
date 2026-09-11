@@ -20,7 +20,7 @@ from hoh_control_plane.service._common import (
     json,
     re,
     require_role,
-    sqlite3,
+    Connection,
     timedelta,
 )
 
@@ -65,7 +65,7 @@ class QaMixin:
         return f"criterion:{criterion}"
 
     def _recorded_environment_digest(
-        self, connection: sqlite3.Connection, supplied: object, candidate_id: str
+        self, connection: Connection, supplied: object, candidate_id: str
     ) -> str:
         """Record the environment behind an observation, preferring the real run.
 
@@ -510,7 +510,7 @@ class QaMixin:
             )
             return self._qa_test_job(connection, test_run_id)
 
-    def _qa_test_job(self, connection: sqlite3.Connection, test_run_id: str) -> dict[str, Any]:
+    def _qa_test_job(self, connection: Connection, test_run_id: str) -> dict[str, Any]:
         job = self._one(
             connection, "SELECT * FROM qa_test_jobs WHERE test_run_id = ?", (test_run_id,)
         )

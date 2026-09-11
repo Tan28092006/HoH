@@ -15,7 +15,7 @@ from hoh_control_plane.service._common import (
     _row,
     json,
     require_role,
-    sqlite3,
+    Connection,
     timedelta,
 )
 
@@ -226,7 +226,7 @@ class CandidateMixin:
                         {"submission_id": submission_id})
             return self._candidate_submission_job(connection, submission_id)
 
-    def _candidate_submission_job(self, connection: sqlite3.Connection, submission_id: str) -> dict[str, Any]:
+    def _candidate_submission_job(self, connection: Connection, submission_id: str) -> dict[str, Any]:
         job = self._one(connection, "SELECT * FROM candidate_submission_jobs WHERE submission_id = ?", (submission_id,))
         if isinstance(job["developer_claims"], str):
             job["developer_claims"] = json.loads(job["developer_claims"])

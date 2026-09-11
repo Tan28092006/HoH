@@ -20,7 +20,7 @@ from hoh_control_plane.service._common import (
     _row,
     _safe_path_segment,
     require_role,
-    sqlite3,
+    Connection,
     timedelta,
 )
 
@@ -334,7 +334,7 @@ class WorktreeMixin:
 
     def _record_handoff_context(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         actor: Actor,
         project_id: str,
         ticket: dict[str, Any],
@@ -640,7 +640,7 @@ class WorktreeMixin:
             return self._worktree_provision_job(connection, provision_id)
 
     def _worktree_provision_job(
-        self, connection: sqlite3.Connection, provision_id: str
+        self, connection: Connection, provision_id: str
     ) -> dict[str, Any]:
         return self._one(
             connection,

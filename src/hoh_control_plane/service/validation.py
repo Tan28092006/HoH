@@ -12,14 +12,14 @@ from hoh_control_plane.service._common import (
     _iso,
     _row,
     json,
-    sqlite3,
+    Connection,
 )
 
 
 class ValidationMixin:
     """Shared row access, bounded input validation and audit events."""
 
-    def _project_for_feature(self, connection: sqlite3.Connection, feature_id: str) -> str:
+    def _project_for_feature(self, connection: Connection, feature_id: str) -> str:
         row = connection.execute(
             "SELECT project_id FROM features WHERE feature_id = ?", (feature_id,)
         ).fetchone()
@@ -27,7 +27,7 @@ class ValidationMixin:
             raise NotFoundError("Feature not found")
         return str(row["project_id"])
 
-    def _project_for_ticket(self, connection: sqlite3.Connection, ticket_id: str) -> str:
+    def _project_for_ticket(self, connection: Connection, ticket_id: str) -> str:
         row = connection.execute(
             """
             SELECT f.project_id FROM tickets t
@@ -42,7 +42,7 @@ class ValidationMixin:
 
     @staticmethod
     def _one(
-        connection: sqlite3.Connection, query: str, parameters: tuple[Any, ...]
+        connection: Connection, query: str, parameters: tuple[Any, ...]
     ) -> dict[str, Any]:
         result = _row(connection.execute(query, parameters).fetchone())
         if result is None:
@@ -138,7 +138,7 @@ class ValidationMixin:
 
     @staticmethod
     def _event(
-        connection: sqlite3.Connection,
+        connection: Connection,
         actor: Actor,
         project_id: str,
         event_type: str,

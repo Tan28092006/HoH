@@ -3,7 +3,8 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from dataclasses import dataclass
+from typing import Any, Iterator
 
 from hoh_control_plane.domain import DomainError
 
@@ -41,6 +42,133 @@ class SchemaMigrationError(DomainError):
 
     code = "schema_migration_failed"
     status_code = 500
+
+
+class StoreIntegrityError(DomainError):
+    """A write violated a durable constraint the schema declares.
+
+    Named here rather than caught as a driver exception so a service module can
+    recognise a foreign key or uniqueness violation without knowing which driver
+    raised it, and so no raw storage-engine text reaches a caller.
+    """
+
+    code = "state_conflict"
+    status_code = 409
+
+
+@dataclass(frozen=True)
+class Dialect:
+    """What a backend must supply that SQLite currently provides implicitly.
+
+    Written down so a second backend is a list of decisions rather than a hunt
+    through the schema for everything that silently depended on SQLite.
+    """
+
+    name: str
+    # The parameter marker the driver expects. Statements are written in qmark
+    # style everywhere and translated on the way out.
+    placeholder: str
+    # How a monotonic sequence column is declared.
+    identity_column: str
+    # Run once per connection to enforce foreign keys, if the backend does not
+    # enforce them by default.
+    foreign_keys_statement: str | None
+    # Run once per connection to bound how long a statement waits for a lock.
+    lock_timeout_statement: str | None
+    # Whether the backend can alter a constraint in place. SQLite cannot, which
+    # is the entire reason for the rename-create-copy-drop machinery below.
+    alters_constraints_in_place: bool
+
+
+SQLITE_DIALECT = Dialect(
+    name="sqlite",
+    placeholder="?",
+    identity_column="INTEGER PRIMARY KEY AUTOINCREMENT",
+    foreign_keys_statement="PRAGMA foreign_keys = ON",
+    lock_timeout_statement=None,  # set through connect(timeout=...) instead
+    alters_constraints_in_place=False,
+)
+
+
+def translate_placeholders(statement: str, placeholder: str) -> str:
+    """Rewrite qmark parameter markers for a backend that expects another style.
+
+    Only markers outside string literals are rewritten: a question mark inside
+    quoted SQL text is data, not a parameter, and rewriting it would silently
+    corrupt the statement.
+    """
+    if placeholder == "?":
+        return statement
+    out: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(statement):
+        character = statement[index]
+        if quote is not None:
+            out.append(character)
+            if character == quote:
+                # A doubled quote is an escaped quote, not the end of the literal.
+                if index + 1 < len(statement) and statement[index + 1] == quote:
+                    out.append(statement[index + 1])
+                    index += 2
+                    continue
+                quote = None
+            index += 1
+            continue
+        if character in ("'", '"'):
+            quote = character
+            out.append(character)
+        elif character == "?":
+            out.append(placeholder)
+        else:
+            out.append(character)
+        index += 1
+    return "".join(out)
+
+
+class StoreConnection:
+    """A connection the service layer can use without naming a driver.
+
+    Wraps the driver's own connection so statements stay written in one
+    placeholder style and so every failure a caller can reasonably act on
+    arrives as a control-plane error rather than as driver text.
+    """
+
+    def __init__(self, raw: Any, dialect: Dialect) -> None:
+        self._raw = raw
+        self.dialect = dialect
+
+    def execute(self, statement: str, parameters: Any = ()) -> Any:
+        try:
+            return self._raw.execute(
+                translate_placeholders(statement, self.dialect.placeholder), parameters
+            )
+        except sqlite3.IntegrityError as error:
+            raise StoreIntegrityError(
+                "This change conflicts with a constraint the schema enforces."
+            ) from error
+
+    def executescript(self, script: str) -> Any:
+        return self._raw.executescript(script)
+
+    def commit(self) -> None:
+        self._raw.commit()
+
+    def rollback(self) -> None:
+        self._raw.rollback()
+
+    def close(self) -> None:
+        self._raw.close()
+
+    @property
+    def raw(self) -> Any:
+        """The driver connection, for migration code that is backend-specific."""
+        return self._raw
+
+    def __getattr__(self, name: str) -> Any:
+        # Anything the seam does not need to shape is the driver's own; falling
+        # through keeps this a seam rather than a reimplementation of DB-API.
+        return getattr(self._raw, name)
 
 
 def _is_lock_contention(error: sqlite3.OperationalError) -> bool:
@@ -602,6 +730,7 @@ class SQLiteStore:
         # Overridable so tests can exercise real lock-wait-then-fail behavior in
         # well under a second instead of waiting out the production default.
         self.busy_timeout_seconds = busy_timeout_seconds
+        self.dialect = SQLITE_DIALECT
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -962,13 +1091,13 @@ class SQLiteStore:
         )
 
     @contextmanager
-    def connection(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path, timeout=self.busy_timeout_seconds)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute(
-            f"PRAGMA busy_timeout = {int(self.busy_timeout_seconds * 1000)}"
-        )
+    def connection(self, *, immediate: bool = False) -> Iterator[StoreConnection]:
+        raw = sqlite3.connect(self.path, timeout=self.busy_timeout_seconds)
+        raw.row_factory = sqlite3.Row
+        if self.dialect.foreign_keys_statement:
+            raw.execute(self.dialect.foreign_keys_statement)
+        raw.execute(f"PRAGMA busy_timeout = {int(self.busy_timeout_seconds * 1000)}")
+        connection = StoreConnection(raw, self.dialect)
         try:
             if immediate:
                 self._begin_immediate(connection)

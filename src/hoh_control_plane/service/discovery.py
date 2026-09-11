@@ -18,7 +18,7 @@ from hoh_control_plane.service._common import (
     json,
     require_project,
     require_role,
-    sqlite3,
+    Connection,
     timedelta,
 )
 
@@ -636,7 +636,7 @@ class DiscoveryMixin:
 
     def _queue_ticket(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         actor: Actor,
         project_id: str,
         ticket: dict[str, Any],
@@ -709,7 +709,7 @@ class DiscoveryMixin:
         )
         return self._one(connection, "SELECT * FROM work_queue WHERE queue_id = ?", (queue_id,))
 
-    def _reconcile_work_queue(self, connection: sqlite3.Connection, actor: Actor) -> None:
+    def _reconcile_work_queue(self, connection: Connection, actor: Actor) -> None:
         """Backfill durable queues for existing tickets created before the dispatcher."""
         rows = connection.execute(
             """
@@ -741,7 +741,7 @@ class DiscoveryMixin:
 
     def _offer_queue(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         queue: dict[str, Any] | None,
         now: datetime,
         offer_seconds: int,
@@ -819,7 +819,7 @@ class DiscoveryMixin:
             )
         return offers
 
-    def _expire_offers(self, connection: sqlite3.Connection, now: datetime) -> None:
+    def _expire_offers(self, connection: Connection, now: datetime) -> None:
         timestamp = _iso(now)
         connection.execute(
             """
@@ -841,7 +841,7 @@ class DiscoveryMixin:
         )
 
     def _mark_queue_claimed(
-        self, connection: sqlite3.Connection, ticket_id: str, agent_id: str, now: datetime
+        self, connection: Connection, ticket_id: str, agent_id: str, now: datetime
     ) -> None:
         queue_rows = connection.execute(
             """
@@ -875,7 +875,7 @@ class DiscoveryMixin:
 
     def _refresh_presence(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         actor: Actor,
         presence_seconds: int,
         *,
@@ -907,13 +907,13 @@ class DiscoveryMixin:
         )
         return self._presence(connection, actor.agent_id)
 
-    def _presence(self, connection: sqlite3.Connection, agent_id: str) -> dict[str, Any]:
+    def _presence(self, connection: Connection, agent_id: str) -> dict[str, Any]:
         return self._one(
             connection, "SELECT * FROM agent_presence WHERE agent_id = ?", (agent_id,)
         )
 
     def _inbox_offer(
-        self, connection: sqlite3.Connection, offer: dict[str, Any] | None
+        self, connection: Connection, offer: dict[str, Any] | None
     ) -> dict[str, Any]:
         assert offer is not None
         ticket = self._ticket(connection, offer["ticket_id"])
