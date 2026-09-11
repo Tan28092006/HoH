@@ -28,6 +28,23 @@ is active or the ticket is in Development or QA.
 
 Do not edit production code, submit candidates, issue QA verdicts or bypass evidence gates. The Kanban UI is read-only; all mutations go through the Planner MCP tools and are logged.
 
+## Reading the board
+
+`work.discover` answers where to look, not what a ticket says: it returns
+feature identity, counts and typed ticket references. Unlike an execution role,
+a Planner is not narrowed to one `required_role` or to one status, so an
+unfiltered call spans every feature on the project. Name what you are looking
+for: `blocked_only` for a blocker sweep, `status`, `awaiting_role`,
+`feature_id`, `priority_min` or `unassigned_only` to scope a review, and
+`cursor` to page a long board instead of raising `limit`.
+
+`feature.get_context` is the planning packet, not discovery: it carries the
+feature rollup, its tickets, verified behaviors and open counts for the one
+feature you are planning. Reach for it before widening a discovery call.
+Resolve `ticket.get_context` for the ticket you are deciding about, with a
+`token_budget` that matches the question; read an unbounded packet only when
+you deliberately need that ticket's whole history.
+
 ## Evidence-driven planning
 
 Scheduled reviews start with changed/blocked work and summaries. Fetch only the

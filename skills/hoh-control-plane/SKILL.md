@@ -20,7 +20,7 @@ loop.
 
 Then:
 
-1. Discover only when the inbox/current assignment does not answer the work question. An empty scheduled inbox ends that wakeup.
+1. Discover only when the inbox/current assignment does not answer the work question. An empty scheduled inbox ends that wakeup. Discovery returns identity, counts and typed references, never ticket bodies: filter it to the work you are looking for and page with its cursor rather than raising the limit.
 2. Resolve the selected ticket; fetch feature context only for a missing requirement, contract or dependency decision.
 3. Check context version, dependency state, acceptance criteria, preservation constraints and artifact identity.
 4. Claim executable work before any role-authorized mutation.
@@ -38,7 +38,10 @@ Do not include credentials, access tokens or secrets in progress messages, evide
 
 Start with current ticket/version, objective/criteria, preservation constraints,
 active decision, candidate/base SHA and open findings. Request a modest token_budget
-only if the loaded schema supports it. Inspect omitted sections and fetch missing
+sized to the question you are answering; read an unbounded packet only when you
+deliberately need one ticket's whole history. A packet is already projected to
+what your role acts on, so a field you do not see is one your role does not need
+rather than one to go hunting for. Inspect omitted sections and fetch missing
 required fields; never guess them. Use details by typed reference to answer a
 specific question, and deltas/cursors only when exposed. Do not reload the full
 specification, all tickets, old successful runs or other agents' chats each loop.
