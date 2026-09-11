@@ -294,6 +294,42 @@ class GitWorktreeManager:
             raise ValidationError("Candidate commit does not descend from the assigned base commit")
         return canonical_candidate, canonical_base
 
+    def verify_pushed_candidate(
+        self,
+        *,
+        repository_path: str,
+        candidate_commit: str,
+        submitted_base_commit: str,
+    ) -> tuple[str, str]:
+        """Verify a candidate the service never had a worktree for.
+
+        Under the agent-workspace model the Developer holds its own checkout, so
+        there is no service-side tree to inspect. Every fact is therefore derived
+        from the repository the service itself can read: if the agent has not made
+        the commit reachable there, the claim cannot be checked and is refused
+        rather than taken on the agent's word.
+        """
+        repository = Path(self.validate_repository(repository_path))
+        try:
+            canonical_candidate = self._resolve_commit(repository, candidate_commit)
+            canonical_base = self._resolve_commit(repository, submitted_base_commit)
+        except ValidationError as error:
+            raise ValidationError(
+                "The service cannot resolve this candidate in the project repository. "
+                "Push the branch so the commit is reachable before submitting."
+            ) from error
+        ancestry = self._git(
+            repository,
+            "merge-base",
+            "--is-ancestor",
+            canonical_base,
+            canonical_candidate,
+            check=False,
+        )
+        if ancestry.returncode != 0:
+            raise ValidationError("Candidate commit does not descend from the submitted base commit")
+        return canonical_candidate, canonical_base
+
     def verify_frozen_candidate(self, worktree_path: str, candidate_commit: str) -> str:
         """Ensure QA executes against a clean worktree still at the frozen candidate SHA."""
         worktree = self._existing_directory(worktree_path, "worktree")

@@ -29,12 +29,12 @@ provisions nothing, and `dev.prepare_worktree` and `dev.queue_worktree_provision
 refuse with `workspace_model_not_colocated` rather than returning a path the
 caller could not reach.
 
-This model is **not yet able to accept candidates**. Candidate identity is
-derived by running Git against the tree that produced the commit, and the
-service does not hold that tree. Making it work needs a repository the service
-can read for itself — the commit a remote Developer claims must be verified
-against bytes the service fetched, never against the Developer's word. That is
-HOH-245.
+The Developer pushes its branch to the repository registered for the project,
+and the service derives every identity fact from what it can read there:
+candidate commit, base commit, descent, and the changed paths write scope is
+enforced against. A commit the service cannot resolve is refused rather than
+taken on the agent's word, and a frozen candidate keeps its identity even if the
+agent later rewrites or force-pushes that branch.
 
 The model cannot be changed while the project has worktrees or active Developer
 leases created under the current one, so a switch cannot strand work in flight.
@@ -44,7 +44,7 @@ leases created under the current one, so a switch cannot strand work in flight.
 | Role | Needs a working tree? | Can run remotely today |
 |---|---|---|
 | Planner | No | Yes |
-| Developer | Yes | Only co-located with the service |
+| Developer | Yes | Yes, holding its own checkout and pushing the branch |
 | QA | Yes — it executes the frozen candidate | Only co-located with the service |
 | Integrator | No — it makes its own integration checkout | Yes, if it can reach the repository |
 
@@ -127,10 +127,11 @@ current schema depends on a SQLite-only feature.
 ```
 HOH-244  workspace model, decided and enforced        (done)
 HOH-243  authenticated network transport for MCP      (done)
-HOH-245  candidates from an agent-held workspace      → unlocks remote Developers
+HOH-245  candidates from an agent-held workspace      (done)
 HOH-204  PostgreSQL store contract                    → unlocks multiple hosts
 ```
 
 A single VPS running the service, its workers and co-located agents, reached
-over an authenticated transport, is deployable today. Remote Developers wait on
-HOH-245; more than one host waits on HOH-204.
+over an authenticated transport, is deployable today. A Developer can now work from its own
+machine under the agent-workspace model; more than one host still waits on
+HOH-204, because that is a shared-store problem rather than a workspace one.

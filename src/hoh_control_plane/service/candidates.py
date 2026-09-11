@@ -9,6 +9,7 @@ from hoh_control_plane.service._common import (
     Role,
     TicketStatus,
     ValidationError,
+    WorkspaceModel,
     _id,
     _iso,
     _now,
@@ -51,7 +52,7 @@ class CandidateMixin:
             repository = _row(connection.execute(
                 "SELECT * FROM project_repositories WHERE project_id = ?", (project_id,)
             ).fetchone())
-            if repository is not None:
+            if repository is not None and self._service_owns_the_workspace(repository):
                 worktree = _row(connection.execute(
                     "SELECT * FROM worktrees WHERE ticket_id = ?", (ticket_id,)
                 ).fetchone())
@@ -150,12 +151,21 @@ class CandidateMixin:
             repository, worktree = self._candidate_submission_git_inputs(submission_id)
             commit_sha, base_commit, changed_paths = job["commit_sha"], job["base_commit"], []
             if repository is not None:
-                assert worktree is not None
-                commit_sha, base_commit = self.git_worktrees.verify_candidate(
-                    repository_path=repository["repository_path"], worktree_path=worktree["worktree_path"],
-                    expected_branch=worktree["branch_ref"], expected_base_commit=worktree["base_commit"],
-                    candidate_commit=job["commit_sha"], submitted_base_commit=job["base_commit"],
-                )
+                if self._service_owns_the_workspace(repository):
+                    assert worktree is not None
+                    commit_sha, base_commit = self.git_worktrees.verify_candidate(
+                        repository_path=repository["repository_path"], worktree_path=worktree["worktree_path"],
+                        expected_branch=worktree["branch_ref"], expected_base_commit=worktree["base_commit"],
+                        candidate_commit=job["commit_sha"], submitted_base_commit=job["base_commit"],
+                    )
+                else:
+                    # No service-side tree exists to inspect, so every fact comes
+                    # from the repository the service itself can read.
+                    commit_sha, base_commit = self.git_worktrees.verify_pushed_candidate(
+                        repository_path=repository["repository_path"],
+                        candidate_commit=job["commit_sha"],
+                        submitted_base_commit=job["base_commit"],
+                    )
                 changed_paths = self.git_worktrees.changed_paths(
                     repository_path=repository["repository_path"], base_commit=base_commit, candidate_commit=commit_sha
                 )
@@ -167,6 +177,13 @@ class CandidateMixin:
             return self._complete_queued_candidate_submission(submission_id, commit_sha, base_commit, changed_paths)
         except DomainError as error:
             return self.fail_queued_candidate_submission(submission_id, str(error))
+
+    @staticmethod
+    def _service_owns_the_workspace(repository: dict[str, Any]) -> bool:
+        """Whether the tree that produced a candidate is one the service holds."""
+        return repository.get(
+            "workspace_model", WorkspaceModel.COLOCATED.value
+        ) == WorkspaceModel.COLOCATED.value
 
     def _candidate_submission_git_inputs(self, submission_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         with self.store.connection() as connection:
@@ -267,7 +284,30 @@ class CandidateMixin:
                 ).fetchone()
             )
             changed_paths: list[str] = []
-            if repository is not None:
+            if repository is not None and not self._service_owns_the_workspace(repository):
+                # The Developer holds its own checkout, so there is no service-side
+                # tree to inspect and every fact comes from what the service fetched.
+                commit_sha, base_commit = self.git_worktrees.verify_pushed_candidate(
+                    repository_path=repository["repository_path"],
+                    candidate_commit=commit_sha,
+                    submitted_base_commit=base_commit,
+                )
+                changed_paths = self.git_worktrees.changed_paths(
+                    repository_path=repository["repository_path"],
+                    base_commit=base_commit,
+                    candidate_commit=commit_sha,
+                )
+                paths_outside_scope = [
+                    path
+                    for path in changed_paths
+                    if not self._path_is_in_any_scope(path, ticket["file_scope"])
+                ]
+                if paths_outside_scope:
+                    raise ValidationError(
+                        "Candidate changes paths outside ticket write scope: "
+                        + ", ".join(paths_outside_scope)
+                    )
+            elif repository is not None:
                 worktree = _row(
                     connection.execute(
                         "SELECT * FROM worktrees WHERE ticket_id = ?", (ticket_id,)
