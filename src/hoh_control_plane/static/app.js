@@ -1,10 +1,15 @@
-const requestedProjectId = new URLSearchParams(window.location.search).get("project");
+const initialParams = new URLSearchParams(window.location.search);
+const requestedProjectId = initialParams.get("project");
+const requestedFeatureId = initialParams.get("feature");
+const requestedStatus = initialParams.get("status");
 const state = {
   projectId: requestedProjectId || "demo",
   board: null,
   activity: null,
   dispatch: null,
   selectedTicketId: null,
+  featureFilter: requestedFeatureId || "all",
+  statusFilter: requestedStatus || "all",
 };
 
 const statusColumns = [
@@ -24,7 +29,15 @@ const boardElement = document.querySelector("#board");
 const detailElement = document.querySelector("#detail");
 const errorBanner = document.querySelector("#error-banner");
 const projectPicker = document.querySelector("#project-picker");
+const featureFilterElement = document.querySelector("#feature-filter");
+const statusFilterElement = document.querySelector("#status-filter");
 const activityHeaders = { "X-HOH-Agent-Id": "ui-observer", "X-HOH-Role": "planner" };
+
+statusFilterElement.innerHTML = [
+  '<option value="all">All statuses</option>',
+  ...statusColumns.map(([value, label]) => `<option value="${value}">${label}</option>`),
+].join("");
+statusFilterElement.value = state.statusFilter;
 
 function escapeHtml(value) {
   const node = document.createElement("span");
@@ -96,6 +109,24 @@ function syncProjectPicker() {
   projectPicker.value = state.projectId;
 }
 
+function syncFeatureFilter() {
+  const options = ['<option value="all">All features</option>', ...state.board.features.map(
+    feature => `<option value="${escapeHtml(feature.feature_id)}">${escapeHtml(feature.title)}</option>`,
+  )];
+  featureFilterElement.innerHTML = options.join("");
+  const known = [...featureFilterElement.options].some(option => option.value === state.featureFilter);
+  state.featureFilter = known ? state.featureFilter : "all";
+  featureFilterElement.value = state.featureFilter;
+}
+
+function updateFilterQueryParams() {
+  const params = new URLSearchParams(window.location.search);
+  params.set("project", state.projectId);
+  if (state.featureFilter === "all") params.delete("feature"); else params.set("feature", state.featureFilter);
+  if (state.statusFilter === "all") params.delete("status"); else params.set("status", state.statusFilter);
+  window.history.replaceState(null, "", `?${params.toString()}`);
+}
+
 async function loadDashboard() {
   clearError();
   const boardRequest = fetch(`/api/v1/projects/${encodeURIComponent(state.projectId)}/board`);
@@ -122,6 +153,7 @@ async function loadDashboard() {
   }
   document.querySelector("#project-description").textContent = state.board.project.description;
   syncProjectPicker();
+  syncFeatureFilter();
   document.querySelector("#connection-label").textContent = "Live";
   renderBoard();
   renderFeatures();
@@ -129,13 +161,21 @@ async function loadDashboard() {
   renderActivity();
 }
 
+function matchesFeatureFilter(ticket) {
+  return state.featureFilter === "all" || ticket.feature_id === state.featureFilter;
+}
+
 function renderBoard() {
-  const populated = statusColumns.filter(([status]) => (state.board.columns[status] || []).length || ["READY", "DEV_IN_PROGRESS", "QA_READY", "REWORK"].includes(status));
-  boardElement.innerHTML = populated.map(([status, label]) => {
-    const tickets = state.board.columns[status] || [];
+  const alwaysVisible = ["READY", "DEV_IN_PROGRESS", "QA_READY", "REWORK"];
+  const visibleColumns = statusColumns.filter(([status]) => {
+    if (state.statusFilter !== "all") return status === state.statusFilter;
+    return (state.board.columns[status] || []).length || alwaysVisible.includes(status);
+  });
+  boardElement.innerHTML = visibleColumns.map(([status, label]) => {
+    const tickets = (state.board.columns[status] || []).filter(matchesFeatureFilter);
     return `<section class="column" aria-label="${escapeHtml(label)}">
       <div class="column-head">${escapeHtml(label)}<span>${tickets.length}</span></div>
-      ${tickets.map(ticketCard).join("")}
+      ${tickets.length ? tickets.map(ticketCard).join("") : '<p class="empty-column meta">No tickets match the current filters.</p>'}
     </section>`;
   }).join("");
   boardElement.querySelectorAll(".ticket").forEach(button => {
@@ -158,13 +198,67 @@ function ticketCard(ticket) {
   </button>`;
 }
 
-function selectTicket(ticketId) {
+async function selectTicket(ticketId) {
   const tickets = Object.values(state.board.columns).flat();
   const ticket = tickets.find(item => item.ticket_id === ticketId);
   if (!ticket) return;
   state.selectedTicketId = ticketId;
-  const owner = ticketOwner(ticket);
   boardElement.querySelectorAll(".ticket").forEach(button => button.classList.toggle("selected", button.dataset.ticketId === ticketId));
+  renderTicketDetail(ticket, undefined);
+  let context = null;
+  try {
+    const response = await fetch(`/api/v1/tickets/${encodeURIComponent(ticketId)}/context`, { headers: activityHeaders });
+    if (!response.ok) throw new Error(`context request failed (${response.status})`);
+    context = (await response.json()).data;
+  } catch {
+    context = { unavailable: "Dependencies, context references and evidence require an authenticated dashboard." };
+  }
+  if (state.selectedTicketId === ticketId) renderTicketDetail(ticket, context);
+}
+
+function renderDependencies(context) {
+  if (context === undefined) return `<p class="meta">Loading…</p>`;
+  if (context.unavailable) return `<p class="meta">${escapeHtml(context.unavailable)}</p>`;
+  const dependencies = context.dependencies || [];
+  if (!dependencies.length) return `<p class="meta">No upstream dependencies.</p>`;
+  return `<ul>${dependencies.map(dependency => `<li><code>${escapeHtml(dependency.ticket_id)}</code> ${escapeHtml(dependency.title)} · <span class="badge">${escapeHtml(dependency.status)}</span></li>`).join("")}</ul>`;
+}
+
+function renderContextReferences(context) {
+  if (context === undefined) return `<p class="meta">Loading…</p>`;
+  if (context.unavailable) return `<p class="meta">${escapeHtml(context.unavailable)}</p>`;
+  const refLine = context.context_ref ? `<p class="meta"><code>${escapeHtml(context.context_ref)}</code></p>` : "";
+  const entries = context.context_entries || [];
+  if (!entries.length) return `${refLine}<p class="meta">No recorded context entries.</p>`;
+  return `${refLine}<ul>${entries.map(entry => `<li><span class="badge">${escapeHtml(entry.entry_type)}</span> ${escapeHtml(entry.actor_id)} (${escapeHtml(roleLabel(entry.actor_role))}) · ${escapeHtml(new Date(entry.created_at).toLocaleString())}</li>`).join("")}</ul>`;
+}
+
+function renderLease(owner) {
+  return `<div class="detail-stat"><span class="meta">Current owner</span><b>${escapeHtml(owner.agent_id || "Unassigned")}</b><span class="detail-owner">${escapeHtml(owner.roleLabel)} · ${escapeHtml(ownerStatus(owner))} · ${escapeHtml(ownerTiming(owner))}</span></div>`;
+}
+
+function renderEvidenceSummary(context, ticket) {
+  const stat = `<div class="detail-stat"><span class="meta">Evidence recorded</span><b>${ticket.evidence_count}</b></div>`;
+  if (context === undefined) return `${stat}<p class="meta">Loading…</p>`;
+  if (context.unavailable) return `${stat}<p class="meta">${escapeHtml(context.unavailable)}</p>`;
+  const candidate = context.candidate;
+  const testRuns = context.test_runs || [];
+  const openFindings = context.known_failures || [];
+  const parts = [stat];
+  if (candidate) {
+    parts.push(`<p class="meta">Candidate <code>${escapeHtml(candidate.commit_sha.slice(0, 8))}</code> submitted by ${escapeHtml(candidate.submitted_by)}</p>`);
+  }
+  if (testRuns.length) {
+    parts.push(`<p class="meta">${testRuns.length} recorded test run${testRuns.length === 1 ? "" : "s"}</p>`);
+  }
+  parts.push(openFindings.length
+    ? `<ul>${openFindings.map(finding => `<li><span class="badge">${escapeHtml(finding.status)}</span> ${escapeHtml(finding.criterion)}</li>`).join("")}</ul>`
+    : `<p class="meta">No open findings.</p>`);
+  return parts.join("");
+}
+
+function renderTicketDetail(ticket, context) {
+  const owner = ticketOwner(ticket);
   const relatedCalls = (state.activity?.calls || []).filter(call => {
     const target = call.input_summary?.target || {};
     return target.ticket_id === ticket.ticket_id || target.ticket_ref === `ticket:${ticket.ticket_id}`;
@@ -175,13 +269,16 @@ function selectTicket(ticketId) {
     <div class="detail-grid">
       <div class="detail-stat"><span class="meta">Required role</span><b>${escapeHtml(roleLabel(ticket.required_role))}</b></div>
       <div class="detail-stat"><span class="meta">Version</span><b>${ticket.version}</b></div>
-      <div class="detail-stat"><span class="meta">Current owner</span><b>${escapeHtml(owner.agent_id || "Unassigned")}</b><span class="detail-owner">${escapeHtml(owner.roleLabel)} · ${escapeHtml(ownerStatus(owner))} · ${escapeHtml(ownerTiming(owner))}</span></div>
       <div class="detail-stat"><span class="meta">Candidate</span><b>${escapeHtml(ticket.candidate_commit ? ticket.candidate_commit.slice(0, 8) : "None")}</b></div>
     </div>
+    <h3>Lease</h3>${renderLease(owner)}
     <h3>Objective</h3><p>${escapeHtml(ticket.objective)}</p>
     <h3>Acceptance gate</h3><ul>${ticket.acceptance_criteria.map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
     <h3>Preservation constraints</h3><ul>${ticket.preservation_constraints.map(item => `<li>${escapeHtml(item)}</li>`).join("") || "<li>None</li>"}</ul>
     <h3>Write scope</h3><code>${escapeHtml(ticket.file_scope.join(", ") || "Not defined")}</code>
+    <h3>Dependencies</h3>${renderDependencies(context)}
+    <h3>Context references</h3>${renderContextReferences(context)}
+    <h3>Evidence summary</h3>${renderEvidenceSummary(context, ticket)}
     <h3>Agent calls</h3><p class="meta">${relatedCalls.length ? relatedCalls.map(call => `${escapeHtml(call.actor_id)} · ${escapeHtml(call.tool_name)}`).join("<br>") : "No MCP activity has targeted this ticket yet."}</p>`;
 }
 
@@ -278,8 +375,19 @@ document.querySelector("#refresh-button").addEventListener("click", () => loadDa
 projectPicker.addEventListener("change", () => {
   state.projectId = projectPicker.value;
   state.selectedTicketId = null;
-  window.history.replaceState(null, "", `?project=${encodeURIComponent(state.projectId)}`);
+  state.featureFilter = "all";
+  updateFilterQueryParams();
   loadDashboard().catch(error => showError(error.message));
+});
+featureFilterElement.addEventListener("change", () => {
+  state.featureFilter = featureFilterElement.value;
+  updateFilterQueryParams();
+  renderBoard();
+});
+statusFilterElement.addEventListener("change", () => {
+  state.statusFilter = statusFilterElement.value;
+  updateFilterQueryParams();
+  renderBoard();
 });
 document.querySelectorAll(".nav-item").forEach(button => button.addEventListener("click", () => {
   document.querySelectorAll(".nav-item").forEach(item => item.classList.toggle("active", item === button));

@@ -163,6 +163,64 @@ def test_ui_is_served(tmp_path: Path) -> None:
     assert "projectPicker.value = state.projectId" in script.text
 
 
+def test_board_view_offers_feature_and_status_filters(tmp_path: Path) -> None:
+    """The board UI must let an operator filter by project, feature and status."""
+    app = create_app(database_path=tmp_path / "api.db", local_mode=True, seed_demo=True)
+
+    with TestClient(app) as client:
+        page = client.get("/")
+        script = client.get("/static/app.js")
+
+    assert 'id="feature-filter"' in page.text
+    assert 'id="status-filter"' in page.text
+    assert "Filter by feature" in page.text
+    assert "Filter by status" in page.text
+    assert "project-picker" in page.text
+    assert "syncFeatureFilter" in script.text
+    assert "state.featureFilter" in script.text
+    assert "state.statusFilter" in script.text
+    assert '["BACKLOG", "Backlog"]' in script.text
+
+
+def test_ticket_detail_script_renders_dependencies_context_lease_and_evidence(
+    tmp_path: Path,
+) -> None:
+    """Ticket selection must surface dependencies, context refs, lease and evidence."""
+    app = create_app(database_path=tmp_path / "api.db", local_mode=True, seed_demo=True)
+
+    with TestClient(app) as client:
+        script = client.get("/static/app.js")
+
+    assert 'tickets/${encodeURIComponent(ticketId)}/context' in script.text
+    assert "<h3>Dependencies</h3>" in script.text
+    assert "<h3>Context references</h3>" in script.text
+    assert "<h3>Lease</h3>" in script.text
+    assert "<h3>Evidence summary</h3>" in script.text
+    assert "renderDependencies" in script.text
+    assert "renderContextReferences" in script.text
+    assert "renderEvidenceSummary" in script.text
+
+
+def test_ticket_context_exposes_dependencies_without_a_bearer_token(tmp_path: Path) -> None:
+    """The dashboard reads ticket context with only identity headers, in local mode."""
+    app = create_app(database_path=tmp_path / "api.db", local_mode=True, seed_demo=True)
+
+    with TestClient(app) as client:
+        context = client.get(
+            "/api/v1/tickets/DEV-148/context",
+            headers=headers("planner", "ui-observer"),
+        )
+
+    assert context.status_code == 200
+    data = context.json()["data"]
+    assert data["dependencies"] == [
+        {"ticket_id": "DEV-142", "title": "Repair checkout retry behavior", "status": "READY"}
+    ]
+    assert data["context_ref"] == f"ctx:ticket:DEV-148:v{data['context_version']}"
+    assert data["candidate"] is None
+    assert data["known_failures"] == []
+
+
 def test_ui_static_assets_include_a_favicon(tmp_path: Path) -> None:
     app = create_app(database_path=tmp_path / "api.db", local_mode=True, seed_demo=True)
 

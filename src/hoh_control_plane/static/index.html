@@ -36,7 +36,17 @@
     <div id="error-banner" class="error-banner" role="alert" hidden></div>
 
     <section id="board-view" class="workspace" aria-label="Project board">
-      <div id="board" class="board" aria-live="polite"></div>
+      <div class="board-column">
+        <div class="board-filters">
+          <label class="filter-field">Feature
+            <select id="feature-filter" aria-label="Filter by feature"><option value="all">All features</option></select>
+          </label>
+          <label class="filter-field">Status
+            <select id="status-filter" aria-label="Filter by status"><option value="all">All statuses</option></select>
+          </label>
+        </div>
+        <div id="board" class="board" aria-live="polite"></div>
+      </div>
       <aside id="detail" class="detail" aria-live="polite">
         <p class="empty-detail">Select a ticket to inspect its context, lease and evidence.</p>
       </aside>
