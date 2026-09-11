@@ -409,3 +409,47 @@ def test_an_upgrade_refuses_when_a_repaired_row_no_longer_resolves(
         SQLiteStore(path).initialize()
 
     assert "planner_interventions" in str(excinfo.value)
+
+
+def test_upgrading_a_database_written_before_event_tracing_succeeds(tmp_path) -> None:
+    """An index on a column a migration has not added yet breaks the whole upgrade.
+
+    Found against a real control-plane file, not a fixture: the schema script runs
+    before the migrations, so an index declared beside the CREATE TABLE references
+    a column that does not exist on any database predating it. Every test until
+    now used a fresh database, where the column is there from the start.
+    """
+    import sqlite3
+
+    database = tmp_path / "before-tracing.db"
+    older = SCHEMA.replace("    correlation_id TEXT,\n    causation_id TEXT,\n", "")
+    assert "correlation_id" not in older, "the fixture must really predate the columns"
+    raw = sqlite3.connect(database)
+    raw.executescript(older)
+    raw.execute(
+        """
+        INSERT INTO audit_events
+            (event_id, event_type, aggregate_type, aggregate_id, aggregate_version,
+             project_id, actor_id, actor_role, payload, occurred_at)
+        VALUES ('event_old', 'ticket.created', 'ticket', 'DEV-1', 1, 'p', 'a', 'planner',
+                '{}', '2026-01-01T00:00:00Z')
+        """
+    )
+    raw.commit()
+    raw.close()
+
+    SQLiteStore(database).initialize()
+
+    store = SQLiteStore(database)
+    with store.connection() as connection:
+        columns = {
+            row["name"] for row in connection.execute('PRAGMA table_info("audit_events")')
+        }
+        indexes = [row["name"] for row in connection.execute('PRAGMA index_list("audit_events")')]
+        surviving = connection.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE event_id = 'event_old'"
+        ).fetchone()[0]
+
+    assert {"correlation_id", "causation_id"} <= columns
+    assert any("correlation" in name for name in indexes), "the index arrives with the columns"
+    assert surviving == 1, "an event written before tracing existed survives untouched"

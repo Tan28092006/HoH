@@ -21,6 +21,11 @@ dev = [
   "pytest>=8.4,<9",
   "pytest-cov>=6.3,<7",
 ]
+# Only for a multi-host deployment. A local single-host install runs on SQLite
+# with no driver at all, which is why this is not a runtime dependency.
+postgres = [
+  "psycopg[binary]>=3.2,<4",
+]
 
 [project.scripts]
 hoh-api = "hoh_control_plane.__main__:main"

@@ -97,8 +97,13 @@ class ControlPlaneService(
 
     def __init__(self, store: SQLiteStore) -> None:
         self.store = store
-        self.git_worktrees = GitWorktreeManager(store.path.parent / "worktrees")
-        self.project_tests = ProjectTestRunner(store.path.parent / "evidence")
+        # Worktrees, evidence and recovery patches are filesystem things that were
+        # only ever sited relative to the database file. Asking the store where
+        # they belong keeps that arrangement while letting a store exist without
+        # being a file at all.
+        artifacts = store.artifact_root
+        self.git_worktrees = GitWorktreeManager(artifacts / "worktrees")
+        self.project_tests = ProjectTestRunner(artifacts / "evidence")
         # Recovery patches stay outside the worktree root so no agent can reach
         # another agent's abandoned work through its own assigned worktree.
-        self.recovery_root = store.path.parent / "recovery"
+        self.recovery_root = artifacts / "recovery"

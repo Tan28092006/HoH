@@ -134,16 +134,25 @@ class StoreConnection:
     arrives as a control-plane error rather than as driver text.
     """
 
-    def __init__(self, raw: Any, dialect: Dialect) -> None:
+    def __init__(
+        self,
+        raw: Any,
+        dialect: Dialect,
+        integrity_errors: tuple[type[BaseException], ...] = (sqlite3.IntegrityError,),
+    ) -> None:
         self._raw = raw
         self.dialect = dialect
+        # Which driver exception means "a constraint refused this". Passed in
+        # rather than hardcoded, so a second backend translates its own errors
+        # without this class learning about every driver.
+        self._integrity_errors = integrity_errors
 
     def execute(self, statement: str, parameters: Any = ()) -> Any:
         try:
             return self._raw.execute(
                 translate_placeholders(statement, self.dialect.placeholder), parameters
             )
-        except sqlite3.IntegrityError as error:
+        except self._integrity_errors as error:
             raise StoreIntegrityError(
                 "This change conflicts with a constraint the schema enforces."
             ) from error
@@ -692,9 +701,6 @@ CREATE TABLE IF NOT EXISTS audit_events (
     occurred_at TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS audit_events_correlation
-    ON audit_events (correlation_id);
-
 CREATE TABLE IF NOT EXISTS agent_tool_calls (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     call_id TEXT NOT NULL UNIQUE,
@@ -731,6 +737,10 @@ class SQLiteStore:
         # well under a second instead of waiting out the production default.
         self.busy_timeout_seconds = busy_timeout_seconds
         self.dialect = SQLITE_DIALECT
+        # Where this store's companion artifacts live. For a file-backed store
+        # that is the directory holding the file, which is where they have always
+        # been; a store that is not a file has to be told.
+        self.artifact_root = self.path.parent
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -933,6 +943,13 @@ class SQLiteStore:
         for column in ("correlation_id", "causation_id"):
             if column not in existing:
                 connection.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
+        # Created here rather than in the schema script: on a database that
+        # predates these columns the script runs before this migration, so an
+        # index declared there would reference a column that does not exist yet.
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS audit_events_correlation "
+            "ON audit_events (correlation_id)"
+        )
 
     @staticmethod
     def _migrate_workspace_model(connection: sqlite3.Connection) -> None:
