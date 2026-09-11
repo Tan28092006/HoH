@@ -462,7 +462,7 @@ Tên dưới đây là tên server thực sự đăng ký. Bảy công cụ này
 Chưa hiện thực:
 
 - `workspace.list_projects` — chưa có. Project scope hiện lấy từ `identity.get_capabilities`.
-- `events.list` — chưa có dưới dạng MCP tool; event đọc được qua REST/UI API. Phase 4.
+- `events.list` — chưa có dưới dạng MCP tool. Event đọc được qua REST, cả theo cursor lẫn qua SSE stream (HOH-221); chỉ còn thiếu mặt MCP.
 - `context.resolve` — chưa có dưới dạng MCP tool, dù `context:resolve` vẫn là capability string; hiện typed reference được resolve qua `feature.get_context` và `ticket.get_context`. Giữ lại như yêu cầu cho tới khi có nhiều loại reference hơn hai loại đó.
 
 ### 6.2. Planner tools
@@ -1313,7 +1313,7 @@ Xây:
 - Evidence không thể gắn nhầm candidate.
 - Failed verdict tạo rework context cho Dev tiếp theo.
 
-### Phase 4 - Web UI (một phần: board, filter và ticket detail đã có; event gần thời gian thực còn nợ, HOH-221)
+### Phase 4 - Web UI (hoàn thành)
 
 Xây:
 
