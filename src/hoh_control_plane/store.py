@@ -286,6 +286,8 @@ CREATE TABLE IF NOT EXISTS qa_test_runs (
     duration_ms INTEGER NOT NULL,
     storage_ref TEXT NOT NULL,
     report_path TEXT NOT NULL,
+    environment_digest TEXT,
+    storage_checksum TEXT,
     executed_by TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -317,6 +319,10 @@ CREATE INDEX IF NOT EXISTS qa_test_jobs_candidate_created
 CREATE INDEX IF NOT EXISTS qa_test_jobs_active_candidate
     ON qa_test_jobs(candidate_id, status);
 
+-- Provenance travels with the observation: which scenario or command produced
+-- it, which environment ran it, and the checksum of the artifact it points at.
+-- An observation whose artifact cannot be tied back to the frozen candidate is
+-- not acceptance evidence.
 CREATE TABLE IF NOT EXISTS evidence (
     evidence_id TEXT PRIMARY KEY,
     candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),
@@ -324,6 +330,9 @@ CREATE TABLE IF NOT EXISTS evidence (
     evidence_type TEXT NOT NULL,
     observation TEXT NOT NULL,
     storage_ref TEXT NOT NULL,
+    scenario_ref TEXT,
+    environment_digest TEXT,
+    storage_checksum TEXT,
     created_by TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -604,6 +613,7 @@ class SQLiteStore:
             self._migrate_qa_test_job_lease_foreign_key(connection)
             self._migrate_planner_job_types(connection)
             self._migrate_agent_presence_skill_columns(connection)
+            self._migrate_evidence_provenance(connection)
             repaired = self._migrate_stale_migration_table_references(connection)
             self._require_clean_foreign_keys(connection, repaired)
 
@@ -755,6 +765,28 @@ class SQLiteStore:
                     f"Upgraded table {table} has {len(violations)} unresolved "
                     "foreign key references"
                 )
+
+    @staticmethod
+    def _migrate_evidence_provenance(connection: sqlite3.Connection) -> None:
+        """Add provenance columns to evidence written before they existed.
+
+        These are added rather than rebuilt so every historical observation, and
+        the verdicts and audit events referencing it, survive untouched. Older
+        rows keep NULL provenance, which reads as "not recorded" rather than as a
+        verified environment.
+        """
+        for table, columns in (
+            ("evidence", ("scenario_ref", "environment_digest", "storage_checksum")),
+            ("qa_test_runs", ("environment_digest", "storage_checksum")),
+        ):
+            existing = {
+                row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
+            }
+            if not existing:
+                continue
+            for column in columns:
+                if column not in existing:
+                    connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
 
     @staticmethod
     def _migrate_planner_job_types(connection: sqlite3.Connection) -> None:

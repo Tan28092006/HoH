@@ -28,6 +28,124 @@ from hoh_control_plane.service._common import (
 class QaMixin:
     """QA test execution, evidence and criterion-level verdicts."""
 
+    @staticmethod
+    def _canonical_storage_ref(value: str) -> str:
+        """Reduce a storage reference to one comparable form, or refuse it.
+
+        Two references to the same artifact must not be able to disagree, so the
+        form is fixed here rather than trusted from the caller.
+        """
+        candidate = value.strip().replace("\\", "/")
+        while "//" in candidate.split("://", 1)[-1]:
+            head, _, tail = candidate.partition("://")
+            candidate = f"{head}://{tail.replace('//', '/')}"
+        if not candidate.startswith("evidence://"):
+            raise ValidationError(
+                "Evidence storage_ref must use the evidence:// scheme",
+                {"reason": "evidence_storage_ref_invalid", "storage_ref": value},
+            )
+        path = candidate[len("evidence://") :]
+        if not path or ".." in path.split("/") or path.startswith("/"):
+            raise ValidationError(
+                "Evidence storage_ref is not a valid reference",
+                {"reason": "evidence_storage_ref_invalid", "storage_ref": value},
+            )
+        return f"evidence://{path}"
+
+    def _recorded_scenario_ref(self, supplied: object, criterion: str) -> str:
+        """Name what the observation is about; no row may be left without one.
+
+        A caller that names a finer scenario keeps it. Otherwise the criterion the
+        finding addresses is the true, coarsest scenario reference, so it is
+        recorded rather than inventing a more specific one.
+        """
+        if supplied is not None and str(supplied).strip():
+            self._bounded_text(str(supplied), "evidence.scenario_ref", 1000)
+            return str(supplied)
+        return f"criterion:{criterion}"
+
+    def _recorded_environment_digest(
+        self, connection: sqlite3.Connection, supplied: object, candidate_id: str
+    ) -> str:
+        """Record the environment behind an observation, preferring the real run.
+
+        When the candidate has an executed run, that run's environment is the one
+        the evidence came from. Otherwise this records the environment the
+        observation was filed in, which is a weaker but honest statement.
+        """
+        if supplied is not None and str(supplied).strip():
+            self._bounded_text(str(supplied), "evidence.environment_digest", 128)
+            return str(supplied)
+        recorded = _row(
+            connection.execute(
+                """
+                SELECT environment_digest FROM qa_test_runs
+                WHERE candidate_id = ? AND environment_digest IS NOT NULL
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (candidate_id,),
+            ).fetchone()
+        )
+        if recorded is not None and recorded["environment_digest"]:
+            return str(recorded["environment_digest"])
+        profile = _row(
+            connection.execute(
+                "SELECT * FROM candidate_test_profiles WHERE candidate_id = ?", (candidate_id,)
+            ).fetchone()
+        )
+        command = profile["test_command"] if profile is not None else []
+        return self.project_tests.environment_digest(command, None)
+
+    def _verified_storage_checksum(
+        self, storage_ref: str, candidate_id: str, supplied: object, observation: str
+    ) -> str:
+        """Bind an observation to the bytes and the candidate it claims to describe.
+
+        A local artifact is checksummed from disk, so a supplied value that
+        disagrees fails closed instead of being recorded as provenance. A local
+        reference filed under another candidate is refused outright. When no
+        artifact is held here, the digest covers the evidence content that is
+        retained, so no row is left without a checksum and a later edit of the
+        stored record is still detectable.
+        """
+        if supplied is not None:
+            self._bounded_text(str(supplied), "evidence.storage_checksum", 128)
+
+        def recorded_content_digest() -> str:
+            if supplied is not None and str(supplied).strip():
+                return str(supplied)
+            material = json.dumps(
+                {"storage_ref": storage_ref, "observation": observation}, sort_keys=True
+            )
+            return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+        local_prefix = "evidence://local/"
+        if not storage_ref.startswith(local_prefix):
+            return recorded_content_digest()
+        relative = storage_ref[len(local_prefix) :]
+        owner = relative.split("/", 1)[0]
+        if owner != candidate_id:
+            raise ValidationError(
+                "Evidence artifact belongs to another candidate",
+                {
+                    "reason": "evidence_candidate_mismatch",
+                    "storage_ref": storage_ref,
+                    "candidate_id": candidate_id,
+                },
+            )
+        artifact = (self.project_tests.evidence_root / relative).resolve()
+        if not artifact.is_relative_to(self.project_tests.evidence_root) or not artifact.is_file():
+            # Nothing on disk to prove; a supplied digest is still recorded as the
+            # QA agent's own claim about an artifact it holds elsewhere.
+            return recorded_content_digest()
+        actual = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        if supplied is not None and str(supplied) != actual:
+            raise ValidationError(
+                "Evidence checksum does not match the stored artifact",
+                {"reason": "evidence_checksum_mismatch", "storage_ref": storage_ref},
+            )
+        return actual
+
     def record_test_run(
         self,
         actor: Actor,
@@ -239,7 +357,7 @@ class QaMixin:
         but the mismatch is still durably evidenced on disk and referenced from the
         job's error_message so QA and Planner can inspect expected-vs-observed.
         """
-        storage_ref, _report_path = self.project_tests.write_report(
+        storage_ref, _report_path, _checksum = self.project_tests.write_report(
             candidate_id=job["candidate_id"],
             test_run_id=test_run_id,
             execution=execution,
@@ -283,7 +401,7 @@ class QaMixin:
                 )
                 if candidate["commit_sha"] != job["candidate_commit"]:
                     raise ConflictError("Candidate changed while project tests were running")
-                storage_ref, report_path = self.project_tests.write_report(
+                storage_ref, report_path, checksum = self.project_tests.write_report(
                     candidate_id=job["candidate_id"],
                     test_run_id=test_run_id,
                     execution=execution,
@@ -294,8 +412,9 @@ class QaMixin:
                     """
                     INSERT INTO qa_test_runs
                         (test_run_id, candidate_id, ticket_id, command_digest, exit_code, timed_out,
-                         duration_ms, storage_ref, report_path, executed_by, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         duration_ms, storage_ref, report_path, environment_digest,
+                         storage_checksum, executed_by, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         test_run_id,
@@ -307,6 +426,8 @@ class QaMixin:
                         execution.duration_ms,
                         storage_ref,
                         report_path,
+                        execution.environment_digest,
+                        checksum,
                         actor.agent_id,
                         timestamp,
                     ),
@@ -451,15 +572,31 @@ class QaMixin:
                 for item in evidence_items:
                     self._bounded_text(str(item.get("type", "")), "evidence.type", 50)
                     self._bounded_text(str(item.get("observation", "")), "evidence.observation", 8000)
-                    self._bounded_text(str(item.get("storage_ref", "")), "evidence.storage_ref", 1000)
+                    # Canonicalize first, so every rejected reference carries the same
+                    # typed reason rather than whichever guard happened to fire.
+                    storage_ref = self._canonical_storage_ref(
+                        str(item.get("storage_ref", "evidence://inline"))
+                    )
+                    self._bounded_text(storage_ref, "evidence.storage_ref", 1000)
+                    observation = str(item.get("observation", ""))
+                    checksum = self._verified_storage_checksum(
+                        storage_ref, candidate_id, item.get("storage_checksum"), observation
+                    )
+                    scenario_ref = self._recorded_scenario_ref(
+                        item.get("scenario_ref"), criterion
+                    )
+                    environment_digest = self._recorded_environment_digest(
+                        connection, item.get("environment_digest"), candidate_id
+                    )
                     evidence_id = _id("ev")
                     evidence_ids.append(evidence_id)
                     connection.execute(
                         """
                         INSERT INTO evidence
                             (evidence_id, candidate_id, criterion, evidence_type,
-                             observation, storage_ref, created_by, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                             observation, storage_ref, scenario_ref, environment_digest,
+                             storage_checksum, created_by, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             evidence_id,
@@ -467,7 +604,10 @@ class QaMixin:
                             criterion,
                             item.get("type", "observation"),
                             item.get("observation", ""),
-                            item.get("storage_ref", "evidence://inline"),
+                            storage_ref,
+                            scenario_ref,
+                            environment_digest,
+                            checksum,
                             actor.agent_id,
                             timestamp,
                         ),

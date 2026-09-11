@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import subprocess
+import sys
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -37,6 +39,11 @@ class TestExecution:
     # Python: the hoh_control_plane.__file__ actually resolved in this execution's
     # environment, so QA evidence can show which source tree really ran.
     resolved_source: str | None = None
+    # Digest of the facts that decide reproducibility: interpreter identity and
+    # version, platform, the command, and the source tree that actually imported.
+    # Two runs sharing this digest ran the same command in the same environment.
+    environment_digest: str = ""
+
     # True only when that resolved source falls outside the frozen candidate worktree
     # (an ambient install, such as the shared venv's editable D:\HoH\src, won the
     # import instead). A mismatch is an infrastructure fault, not a candidate verdict:
@@ -74,6 +81,7 @@ class ProjectTestRunner:
                 stderr=mismatch_detail,
                 resolved_source=resolved_source,
                 artifact_mismatch=True,
+                environment_digest=self.environment_digest(command, resolved_source),
             )
         try:
             completed = subprocess.run(
@@ -107,7 +115,23 @@ class ProjectTestRunner:
             stdout=self._truncate(stdout),
             stderr=self._truncate(stderr),
             resolved_source=resolved_source,
+            environment_digest=self.environment_digest(command, resolved_source),
         )
+
+    @staticmethod
+    def environment_digest(command: list[str], resolved_source: str | None) -> str:
+        """Identify the environment a run happened in, not the machine it ran on."""
+        material = json.dumps(
+            {
+                "command": command,
+                "python": sys.version.split()[0],
+                "implementation": platform.python_implementation(),
+                "platform": platform.system(),
+                "resolved_source": resolved_source,
+            },
+            sort_keys=True,
+        )
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     def write_report(
         self,
@@ -116,7 +140,7 @@ class ProjectTestRunner:
         test_run_id: str,
         execution: TestExecution,
         candidate_commit: str | None = None,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, str]:
         if not candidate_id.startswith("cand_") or not test_run_id.startswith("testrun_"):
             raise ValidationError("Test evidence identifier is invalid")
         report_path = (self.evidence_root / candidate_id / f"{test_run_id}.json").resolve()
@@ -130,9 +154,16 @@ class ProjectTestRunner:
             "recorded_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             **asdict(execution),
         }
-        report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        # Write the bytes rather than the text: write_text would translate newlines
+        # on Windows, so the file on disk would no longer match the digest below
+        # and every later verification of this artifact would fail as a mismatch.
+        body = json.dumps(payload, indent=2).encode("utf-8")
+        report_path.write_bytes(body)
+        # Checksum the bytes actually retained, so a later reader can prove the
+        # artifact behind a storage reference has not changed.
+        checksum = hashlib.sha256(body).hexdigest()
         storage_ref = f"evidence://local/{candidate_id}/{test_run_id}.json"
-        return storage_ref, str(report_path)
+        return storage_ref, str(report_path), checksum
 
     def _build_environment(self, worktree_path: str) -> dict[str, str]:
         environment = os.environ.copy()

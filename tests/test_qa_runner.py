@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -428,17 +429,20 @@ def test_write_report_includes_the_verified_candidate_commit_and_resolved_source
         resolved_source="/worktree/src/hoh_control_plane/__init__.py",
     )
 
-    _storage_ref, report_path = runner.write_report(
+    _storage_ref, report_path, checksum = runner.write_report(
         candidate_id="cand_abc123",
         test_run_id="testrun_xyz789",
         execution=execution,
         candidate_commit="deadbeef" * 5,
     )
 
-    payload = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    body = Path(report_path).read_text(encoding="utf-8")
+    payload = json.loads(body)
     assert payload["candidate_commit"] == "deadbeef" * 5
     assert payload["resolved_source"] == "/worktree/src/hoh_control_plane/__init__.py"
     assert payload["artifact_mismatch"] is False
+    # The checksum covers the retained bytes, so a later reader can prove them.
+    assert checksum == hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def test_artifact_mismatch_fails_the_job_without_a_candidate_verdict_and_allows_retry(
