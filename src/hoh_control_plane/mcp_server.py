@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import subprocess
@@ -12,7 +13,22 @@ from typing import Any, TypeVar
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
-from hoh_control_plane.domain import Actor, ConflictError, DomainError, Role, ValidationError
+from hoh_control_plane.auth import (
+    STDIO_TRANSPORT,
+    TOKENS_VARIABLE,
+    AgentCredential,
+    credentials_from_environment,
+    requested_transport,
+    resolve_actor,
+)
+from hoh_control_plane.domain import (
+    Actor,
+    AuthorizationError,
+    ConflictError,
+    DomainError,
+    Role,
+    ValidationError,
+)
 from hoh_control_plane.service import ControlPlaneService
 from hoh_control_plane.store import ContentionError, SQLiteStore
 
@@ -1153,8 +1169,88 @@ def _strip_reference(reference: str, kind: str) -> str:
     return reference[len(prefix) :] if reference.startswith(prefix) else reference
 
 
+def create_mcp_http_app(
+    service: ControlPlaneService,
+    credentials: tuple[AgentCredential, ...],
+    transport: str = "streamable-http",
+) -> Any:
+    """Serve one authenticated MCP endpoint per configured credential.
+
+    Each credential gets its own server instance bound to its own identity, so a
+    role's tools are physically absent from the surface it reaches rather than
+    merely refused when called. Authentication happens before dispatch, so an
+    unauthenticated request never reaches a tool at all.
+    """
+    if not credentials:
+        raise ValidationError(
+            f"A network transport requires agent credentials in {TOKENS_VARIABLE}"
+        )
+    per_actor = {}
+    for credential in credentials:
+        server = create_mcp_server(service, credential.actor)
+        per_actor[credential.token] = (
+            server.sse_app() if transport == "sse" else server.streamable_http_app()
+        )
+
+    async def refuse(scope: Any, receive: Any, send: Any, detail: str) -> None:
+        body = json.dumps({"error": {"code": "unauthorized", "message": detail}})
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"www-authenticate", b"Bearer"),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body.encode("utf-8")})
+
+    async def app(scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            raise ValueError("Only HTTP scopes are served by this endpoint")
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        authorization = headers.get(b"authorization", b"").decode("latin-1") or None
+        try:
+            actor = resolve_actor(credentials, authorization)
+        except AuthorizationError as error:
+            # The reason is deliberately coarse: which of missing or wrong is not
+            # information an unauthenticated caller has earned.
+            await refuse(scope, receive, send, str(error))
+            return
+        for credential in credentials:
+            if credential.actor == actor:
+                await per_actor[credential.token](scope, receive, send)
+                return
+        await refuse(scope, receive, send, "Unknown credential")
+
+    return app
+
+
 def main() -> None:
     database_path = Path(os.getenv("HOH_DATABASE_PATH", "data/control-plane.db"))
+    store = SQLiteStore(database_path)
+    store.initialize()
+    service = ControlPlaneService(store)
+    transport = requested_transport()
+
+    if transport != STDIO_TRANSPORT:
+        credentials = credentials_from_environment()
+        if not credentials:
+            raise SystemExit(
+                f"{TOKENS_VARIABLE} is required to serve MCP on a network transport; "
+                "the environment is not trusted to grant a role off stdio"
+            )
+        import uvicorn
+
+        uvicorn.run(
+            create_mcp_http_app(service, credentials, transport),
+            host=os.getenv("HOH_MCP_HOST", "127.0.0.1"),
+            port=int(os.getenv("HOH_MCP_PORT", "8931")),
+            log_level="warning",
+        )
+        return
+
     agent_id = os.getenv("HOH_AGENT_ID")
     role_name = os.getenv("HOH_AGENT_ROLE")
     project_ids = os.getenv("HOH_PROJECT_IDS", "*")
@@ -1164,11 +1260,8 @@ def main() -> None:
         role = Role(role_name)
     except ValueError as exc:
         raise SystemExit(f"Unknown HOH_AGENT_ROLE: {role_name}") from exc
-    store = SQLiteStore(database_path)
-    store.initialize()
-    service = ControlPlaneService(store)
     actor = Actor(agent_id, role, frozenset(item.strip() for item in project_ids.split(",")))
-    create_mcp_server(service, actor).run(transport="stdio")
+    create_mcp_server(service, actor).run(transport=STDIO_TRANSPORT)
 
 
 if __name__ == "__main__":
