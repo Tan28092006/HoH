@@ -12,6 +12,8 @@ from hoh_control_plane.service._common import (
     _iso,
     _now,
     _row,
+    _serialize,
+    base64,
     datetime,
     json,
     require_project,
@@ -24,6 +26,64 @@ from hoh_control_plane.service._common import (
 class DiscoveryMixin:
     """Role-scoped work discovery, dispatch queue and agent presence."""
 
+    # Which ticket states each role is the next actor for. Used by both the
+    # implicit per-role discovery filter and the explicit awaiting_role filter.
+    _ROLE_ACTIONABLE_STATUSES: dict[Role, tuple[TicketStatus, ...]] = {
+        Role.DEVELOPER: (TicketStatus.READY, TicketStatus.REWORK),
+        Role.QA: (TicketStatus.QA_READY,),
+        Role.INTEGRATOR: (TicketStatus.VERIFIED, TicketStatus.MERGE_READY),
+    }
+
+    @classmethod
+    def _discovery_statuses(
+        cls, status: list[str] | None, awaiting_role: str | None
+    ) -> list[str] | None:
+        """Resolve the explicit status[]/awaiting_role filters into one status set."""
+        selected: set[str] | None = None
+        if status is not None:
+            if not isinstance(status, list) or not status:
+                raise ValidationError("status must be a non-empty list of ticket states")
+            if len(status) > len(TicketStatus):
+                raise ValidationError("status contains more entries than there are states")
+            for value in status:
+                try:
+                    TicketStatus(value)
+                except ValueError as error:
+                    raise ValidationError(f"Unknown ticket status: {value}") from error
+            selected = set(status)
+        if awaiting_role is not None:
+            try:
+                role = Role(awaiting_role)
+            except ValueError as error:
+                raise ValidationError(f"Unknown awaiting_role: {awaiting_role}") from error
+            actionable = cls._ROLE_ACTIONABLE_STATUSES.get(role)
+            if actionable is None:
+                raise ValidationError(f"Role {awaiting_role} is never the awaited actor")
+            awaited = {state.value for state in actionable}
+            selected = awaited if selected is None else selected & awaited
+            if not selected:
+                # An impossible combination must return nothing rather than
+                # silently widening back to every status.
+                return []
+        return sorted(selected) if selected is not None else None
+
+    @staticmethod
+    def _encoded_cursor(keyset: tuple[Any, Any, Any]) -> str:
+        raw = _serialize({"p": keyset[0], "c": keyset[1], "t": keyset[2]})
+        return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
+
+    @staticmethod
+    def _decoded_cursor(cursor: str | None) -> tuple[Any, Any, Any] | None:
+        if cursor is None:
+            return None
+        if not isinstance(cursor, str) or len(cursor) > 500:
+            raise ValidationError("cursor is not a discovery cursor")
+        try:
+            payload = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")))
+            return (int(payload["p"]), str(payload["c"]), str(payload["t"]))
+        except Exception as error:
+            raise ValidationError("cursor is not a discovery cursor") from error
+
     def discover_work(
         self,
         actor: Actor,
@@ -31,9 +91,31 @@ class DiscoveryMixin:
         dependency_ready: bool = True,
         blocked_only: bool = False,
         limit: int = 50,
+        status: list[str] | None = None,
+        feature_id: str | None = None,
+        priority_min: int | None = None,
+        awaiting_role: str | None = None,
+        unassigned_only: bool = False,
+        cursor: str | None = None,
     ) -> dict[str, Any]:
+        """List role-appropriate work as bounded metadata plus typed references.
+
+        Discovery answers "where should I look", not "what does this ticket say":
+        it returns feature identity, counts and typed ticket references, never
+        ticket bodies. The objective, acceptance criteria, preservation
+        constraints, write scope and blocked reason live behind
+        ticket.get_context, which the caller resolves for the one ticket it picks.
+        """
         require_project(actor, project_id)
         limit = min(max(limit, 1), 100)
+        selected_statuses = self._discovery_statuses(status, awaiting_role)
+        if priority_min is not None and not isinstance(priority_min, bool):
+            self._priority(priority_min)
+        elif priority_min is not None:
+            raise ValidationError("priority_min must be an integer")
+        if feature_id is not None:
+            self._bounded_text(feature_id, "feature_id", 100)
+        keyset = self._decoded_cursor(cursor)
         with self.store.connection() as connection:
             project = self._one(
                 connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
@@ -62,6 +144,21 @@ class DiscoveryMixin:
                 parameters.extend(
                     [TicketStatus.VERIFIED.value, TicketStatus.MERGE_READY.value]
                 )
+            if selected_statuses is not None:
+                where.append(f"t.status IN ({', '.join('?' for _ in selected_statuses)})")
+                parameters.extend(selected_statuses)
+            if feature_id is not None:
+                where.append("t.feature_id = ?")
+                parameters.append(feature_id)
+            if priority_min is not None:
+                where.append("t.priority >= ?")
+                parameters.append(priority_min)
+            if unassigned_only:
+                where.append(
+                    "NOT EXISTS (SELECT 1 FROM leases l WHERE l.ticket_id = t.ticket_id"
+                    " AND l.expires_at > ?)"
+                )
+                parameters.append(_iso())
             if dependency_ready:
                 where.append(
                     """NOT EXISTS (
@@ -70,43 +167,60 @@ class DiscoveryMixin:
                         WHERE d.ticket_id = t.ticket_id AND dependency.status != 'DONE'
                     )"""
                 )
-            parameters.append(limit)
+            if keyset is not None:
+                # Keyset rather than OFFSET: a ticket inserted between pages must
+                # not shift the window and silently hide a row from the caller.
+                where.append(
+                    "(t.priority < ? OR (t.priority = ? AND (t.created_at > ?"
+                    " OR (t.created_at = ? AND t.ticket_id > ?))))"
+                )
+                parameters.extend(
+                    [keyset[0], keyset[0], keyset[1], keyset[1], keyset[2]]
+                )
+            parameters.append(limit + 1)
             rows = connection.execute(
                 f"""
-                SELECT t.*, f.project_id, f.title AS feature_title,
+                SELECT t.*, f.project_id, f.title AS feature_title, f.status AS feature_status,
                        f.version AS feature_version, f.parent_feature_id
                 FROM tickets t
                 JOIN features f ON f.feature_id = t.feature_id
                 WHERE {' AND '.join(where)}
-                ORDER BY t.priority DESC, t.created_at ASC
+                ORDER BY t.priority DESC, t.created_at ASC, t.ticket_id ASC
                 LIMIT ?
                 """,
                 parameters,
             ).fetchall()
+            has_more = len(rows) > limit
+            rows = rows[:limit]
 
         grouped: dict[str, dict[str, Any]] = {}
+        last: tuple[Any, Any, Any] | None = None
         for raw in rows:
-            ticket = _row(raw)
-            assert ticket is not None
-            feature_id = ticket["feature_id"]
+            row = _row(raw)
+            assert row is not None
+            last = (row["priority"], row["created_at"], row["ticket_id"])
+            group_id = row["feature_id"]
             feature = grouped.setdefault(
-                feature_id,
+                group_id,
                 {
-                    "feature_id": feature_id,
-                    "title": ticket.pop("feature_title"),
-                    "parent_feature_id": ticket.pop("parent_feature_id"),
-                    "context_ref": f"ctx:feature:{feature_id}:v{ticket.pop('feature_version')}",
+                    "feature_id": group_id,
+                    "title": row["feature_title"],
+                    "status": row["feature_status"],
+                    "parent_feature_id": row["parent_feature_id"],
+                    "context_ref": f"ctx:feature:{group_id}:v{row['feature_version']}",
+                    "pending_ticket_refs": [],
+                    "blocked_ticket_count": 0,
                     "tickets": [],
                 },
             )
-            ticket.pop("project_id", None)
-            ticket["context_ref"] = (
-                f"ctx:ticket:{ticket['ticket_id']}:v{ticket['version']}"
-            )
+            ticket_ref = f"ticket:{row['ticket_id']}"
+            feature["pending_ticket_refs"].append(ticket_ref)
+            if row["status"] == TicketStatus.BLOCKED.value:
+                feature["blocked_ticket_count"] += 1
             calls = [
                 {
                     "tool": "ticket.get_context",
-                    "arguments": {"ticket_ref": f"ticket:{ticket['ticket_id']}"},
+                    "arguments": {"ticket_ref": ticket_ref},
                 }
             ]
             if actor.role is Role.DEVELOPER:
@@ -114,8 +228,8 @@ class DiscoveryMixin:
                     {
                         "tool": "work.claim",
                         "arguments": {
-                            "ticket_id": ticket["ticket_id"],
-                            "expected_version": ticket["version"],
+                            "ticket_id": row["ticket_id"],
+                            "expected_version": row["version"],
                         },
                     }
                 )
@@ -124,13 +238,30 @@ class DiscoveryMixin:
                     {
                         "tool": "qa.claim_candidate",
                         "arguments": {
-                            "ticket_id": ticket["ticket_id"],
-                            "expected_version": ticket["version"],
+                            "ticket_id": row["ticket_id"],
+                            "expected_version": row["version"],
                         },
                     }
                 )
-            ticket["recommended_calls"] = calls
-            feature["tickets"].append(ticket)
+            # Identity and routing fields only. Everything a worker must read
+            # before acting -- objective, acceptance criteria, preservation
+            # constraints, write scope, blocked reason, artifact identity --
+            # stays behind the typed ticket.get_context reference above.
+            feature["tickets"].append(
+                {
+                    "ticket_id": row["ticket_id"],
+                    "ticket_ref": ticket_ref,
+                    "feature_id": group_id,
+                    "title": row["title"],
+                    "ticket_type": row["ticket_type"],
+                    "status": row["status"],
+                    "priority": row["priority"],
+                    "required_role": row["required_role"],
+                    "version": row["version"],
+                    "context_ref": f"ctx:ticket:{row['ticket_id']}:v{row['version']}",
+                    "recommended_calls": calls,
+                }
+            )
 
         discovered = {
             "agent": {
@@ -140,7 +271,7 @@ class DiscoveryMixin:
             },
             "project": project,
             "features": list(grouped.values()),
-            "next_cursor": None,
+            "next_cursor": self._encoded_cursor(last) if has_more and last else None,
         }
         if actor.role in {Role.PLANNER, Role.ADMIN}:
             # Planning decisions are their own queue: a Planner sees them beside,

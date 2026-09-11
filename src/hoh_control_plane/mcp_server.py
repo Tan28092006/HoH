@@ -270,20 +270,34 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
         dependency_ready: bool = True,
         blocked_only: bool = False,
         limit: int = 50,
+        status: list[str] | None = None,
+        feature_id: str | None = None,
+        priority_min: int | None = None,
+        awaiting_role: str | None = None,
+        unassigned_only: bool = False,
+        cursor: str | None = None,
     ) -> dict[str, Any]:
-        """List role-appropriate executable work plus typed context references."""
+        """List role-appropriate work as feature metadata plus typed ticket references.
+
+        Returns identity, status and counts only. Resolve ticket.get_context for
+        the one ticket you intend to act on rather than expecting bodies here.
+        """
         arguments = {
             "project_id": project_id,
             "dependency_ready": dependency_ready,
             "blocked_only": blocked_only,
             "limit": limit,
+            "status": status,
+            "feature_id": feature_id,
+            "priority_min": priority_min,
+            "awaiting_role": awaiting_role,
+            "unassigned_only": unassigned_only,
+            "cursor": cursor,
         }
         return invoke(
             "work.discover",
             arguments,
-            lambda: service.discover_work(
-                actor, project_id, dependency_ready, blocked_only, limit
-            ),
+            lambda: service.discover_work(actor, **arguments),
         )
 
     @server.tool(name="feature.get_context", structured_output=True)
