@@ -146,8 +146,16 @@ def _iso(value: datetime | None = None) -> str:
     return (value or _now()).isoformat().replace("+00:00", "Z")
 
 
+# 64 bits of the UUID rather than all 128. These identifiers are quoted in
+# decisions, evidence references and handoff prose far more often than they are
+# generated, so half the length is a real readability gain, while 2^64 keeps a
+# collision far below the point where the primary key would ever notice. Existing
+# longer identifiers stay valid: an id is opaque and is never parsed for length.
+_ID_HEX_CHARS = 16
+
+
 def _id(prefix: str) -> str:
-    return f"{prefix}_{uuid4().hex}"
+    return f"{prefix}_{uuid4().hex[:_ID_HEX_CHARS]}"
 
 
 def _serialize(payload: Any) -> str:
