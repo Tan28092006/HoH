@@ -18,6 +18,7 @@ from hoh_control_plane.domain import (
     Actor,
     AuthorizationError,
     ConflictError,
+    ContextStaleError,
     DomainError,
     IdempotencyConflictError,
     InterventionSeverity,

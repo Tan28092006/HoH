@@ -33,6 +33,7 @@ class CandidateMixin:
         base_commit: str,
         branch_ref: str,
         developer_claims: list[str],
+        context_snapshot_id: str | None = None,
     ) -> dict[str, Any]:
         """Durably acknowledge a candidate before detached Git validation begins."""
         require_role(actor, Role.DEVELOPER)
@@ -43,6 +44,7 @@ class CandidateMixin:
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             self._expect_version(ticket, expected_version)
+            self.require_fresh_context(connection, ticket_id, context_snapshot_id)
             if ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:
                 raise ConflictError("Ticket is not in development")
             self._require_active_lease(connection, actor, ticket_id, lease_id)
@@ -245,6 +247,7 @@ class CandidateMixin:
         base_commit: str,
         branch_ref: str,
         developer_claims: list[str],
+        context_snapshot_id: str | None = None,
     ) -> dict[str, Any]:
         require_role(actor, Role.DEVELOPER)
         self._valid_commit(commit_sha, "commit_sha")
@@ -254,6 +257,7 @@ class CandidateMixin:
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             self._expect_version(ticket, expected_version)
+            self.require_fresh_context(connection, ticket_id, context_snapshot_id)
             if ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:
                 raise ConflictError("Ticket is not in development")
             self._require_active_lease(connection, actor, ticket_id, lease_id)

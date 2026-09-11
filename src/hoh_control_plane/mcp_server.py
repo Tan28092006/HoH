@@ -773,12 +773,14 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
             expected_version: int,
             lease_seconds: int = 900,
             idempotency_key: str | None = None,
+            context_snapshot_id: str | None = None,
         ) -> dict[str, Any]:
             """Claim READY or REWORK Developer work through a timed exclusive lease."""
             arguments = {
                 "ticket_id": ticket_id,
                 "expected_version": expected_version,
                 "lease_seconds": lease_seconds,
+                "context_snapshot_id": context_snapshot_id,
             }
             return invoke(
                 "work.claim",
@@ -874,6 +876,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
             branch_ref: str,
             developer_claims: list[str],
             idempotency_key: str | None = None,
+            context_snapshot_id: str | None = None,
         ) -> dict[str, Any]:
             """Queue immutable candidate validation and return immediately for polling."""
             arguments = {
@@ -884,6 +887,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 "base_commit": base_commit,
                 "branch_ref": branch_ref,
                 "developer_claims": developer_claims,
+                "context_snapshot_id": context_snapshot_id,
             }
             if not service.candidate_submission_requires_worker(actor, ticket_id):
                 return invoke(
@@ -936,12 +940,14 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
             expected_version: int,
             lease_seconds: int = 900,
             idempotency_key: str | None = None,
+            context_snapshot_id: str | None = None,
         ) -> dict[str, Any]:
             """Claim a QA-verified candidate for the protected integration gate."""
             arguments = {
                 "ticket_id": ticket_id,
                 "expected_version": expected_version,
                 "lease_seconds": lease_seconds,
+                "context_snapshot_id": context_snapshot_id,
             }
             return invoke(
                 "integrator.claim_candidate",
@@ -956,12 +962,14 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
             lease_id: str,
             expected_version: int,
             idempotency_key: str | None = None,
+            context_snapshot_id: str | None = None,
         ) -> dict[str, Any]:
             """Queue a durable merge job and return its merge_job_id before Git runs."""
             arguments = {
                 "ticket_id": ticket_id,
                 "lease_id": lease_id,
                 "expected_version": expected_version,
+                "context_snapshot_id": context_snapshot_id,
             }
 
             def queue_and_start() -> dict[str, Any]:
@@ -1016,12 +1024,14 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
             expected_version: int,
             lease_seconds: int = 900,
             idempotency_key: str | None = None,
+            context_snapshot_id: str | None = None,
         ) -> dict[str, Any]:
             """Claim a frozen candidate for an independent QA pass."""
             arguments = {
                 "ticket_id": ticket_id,
                 "expected_version": expected_version,
                 "lease_seconds": lease_seconds,
+                "context_snapshot_id": context_snapshot_id,
             }
             return invoke(
                 "qa.claim_candidate", arguments,
@@ -1097,6 +1107,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
             verdict: str,
             findings: list[dict[str, Any]],
             idempotency_key: str | None = None,
+            context_snapshot_id: str | None = None,
         ) -> dict[str, Any]:
             """Submit PASS or FAIL using evidence for every finding and acceptance criterion."""
             arguments = {
@@ -1106,6 +1117,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 "expected_version": expected_version,
                 "verdict": verdict,
                 "findings": findings,
+                "context_snapshot_id": context_snapshot_id,
             }
             return invoke(
                 "qa.submit_verdict", arguments,

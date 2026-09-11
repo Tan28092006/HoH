@@ -536,6 +536,7 @@ class QaMixin:
         expected_version: int,
         verdict: str,
         findings: list[dict[str, Any]],
+        context_snapshot_id: str | None = None,
     ) -> dict[str, Any]:
         require_role(actor, Role.QA)
         if verdict not in {"passed", "failed"}:
@@ -544,6 +545,7 @@ class QaMixin:
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             self._expect_version(ticket, expected_version)
+            self.require_fresh_context(connection, ticket_id, context_snapshot_id)
             if ticket["status"] != TicketStatus.QA_IN_PROGRESS.value:
                 raise ConflictError("Ticket is not in QA")
             self._require_active_lease(connection, actor, ticket_id, lease_id)

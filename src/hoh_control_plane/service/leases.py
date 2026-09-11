@@ -161,6 +161,7 @@ class LeaseMixin:
         allowed_statuses: set[TicketStatus],
         next_status: TicketStatus,
         event_type: str,
+        context_snapshot_id: str | None = None,
     ) -> dict[str, Any]:
         if not 30 <= lease_seconds <= 3600:
             raise ValidationError("Lease duration must be between 30 and 3600 seconds")
@@ -168,6 +169,7 @@ class LeaseMixin:
             self._expire_lease(connection, ticket_id)
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             self._expect_version(ticket, expected_version)
+            self.require_fresh_context(connection, ticket_id, context_snapshot_id)
             self._require_skill_compatible(connection, actor, project_id)
             existing = connection.execute(
                 "SELECT * FROM leases WHERE ticket_id = ?", (ticket_id,)
@@ -232,7 +234,9 @@ class LeaseMixin:
             return {
                 "ticket": self._ticket(connection, ticket_id),
                 "lease": self._lease(connection, lease_id),
-                "context_snapshot_id": _id("ctxsnap"),
+                # The snapshot the caller decided from, not a fresh identifier:
+                # inventing one here would name a packet nobody ever read.
+                "context_snapshot_id": context_snapshot_id,
             }
 
     def _authorized_ticket(

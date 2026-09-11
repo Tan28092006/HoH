@@ -32,6 +32,7 @@ class IntegrationMixin:
         ticket_id: str,
         expected_version: int,
         lease_seconds: int,
+        context_snapshot_id: str | None = None,
     ) -> dict[str, Any]:
         require_role(actor, Role.QA)
         return self._claim(
@@ -42,6 +43,7 @@ class IntegrationMixin:
             allowed_statuses={TicketStatus.QA_READY},
             next_status=TicketStatus.QA_IN_PROGRESS,
             event_type="qa.started",
+            context_snapshot_id=context_snapshot_id,
         )
 
     def claim_integration(
@@ -50,6 +52,7 @@ class IntegrationMixin:
         ticket_id: str,
         expected_version: int,
         lease_seconds: int,
+        context_snapshot_id: str | None = None,
     ) -> dict[str, Any]:
         require_role(actor, Role.INTEGRATOR)
         return self._claim(
@@ -60,6 +63,7 @@ class IntegrationMixin:
             allowed_statuses={TicketStatus.VERIFIED, TicketStatus.MERGE_READY},
             next_status=TicketStatus.MERGE_READY,
             event_type="integration.started",
+            context_snapshot_id=context_snapshot_id,
         )
 
     def merge_candidate(
@@ -587,6 +591,7 @@ class IntegrationMixin:
         ticket_id: str,
         lease_id: str,
         expected_version: int,
+        context_snapshot_id: str | None = None,
     ) -> dict[str, Any]:
         """Durably acknowledge integration before the detached Git merge worker runs."""
         require_role(actor, Role.INTEGRATOR)
@@ -599,6 +604,7 @@ class IntegrationMixin:
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             self._expect_version(ticket, expected_version)
+            self.require_fresh_context(connection, ticket_id, context_snapshot_id)
             if ticket["status"] != TicketStatus.MERGE_READY.value:
                 raise ConflictError("Ticket is not ready for integration")
             self._require_active_lease(connection, actor, ticket_id, lease_id)

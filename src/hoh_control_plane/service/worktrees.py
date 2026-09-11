@@ -34,6 +34,7 @@ class WorktreeMixin:
         ticket_id: str,
         expected_version: int,
         lease_seconds: int,
+        context_snapshot_id: str | None = None,
     ) -> dict[str, Any]:
         require_role(actor, Role.DEVELOPER)
         return self._claim(
@@ -44,6 +45,7 @@ class WorktreeMixin:
             allowed_statuses={TicketStatus.READY, TicketStatus.REWORK},
             next_status=TicketStatus.DEV_IN_PROGRESS,
             event_type="ticket.claimed",
+            context_snapshot_id=context_snapshot_id,
         )
 
     def prepare_worktree(

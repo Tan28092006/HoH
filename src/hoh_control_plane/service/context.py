@@ -4,6 +4,7 @@ from hoh_control_plane.service._common import (
     Actor,
     Any,
     CLOSED_TICKET_STATUSES,
+    ContextStaleError,
     Role,
     TicketStatus,
     _CHECKPOINT_CHARS,
@@ -17,6 +18,9 @@ from hoh_control_plane.service._common import (
     _iso,
     _row,
     _snapshot_id,
+    sqlite3,
+    json,
+    _serialize,
     _validated_budget,
     require_project,
 )
@@ -209,8 +213,16 @@ class ContextMixin:
             "test_runs": test_runs,
             "known_failures": failures,
         }
+        source_versions = {
+            "ticket_version": ticket["version"],
+            "feature_version": feature["version"],
+            "candidate_commit": candidate["commit_sha"] if candidate else None,
+            "dependencies": {
+                dependency["ticket_id"]: dependency["status"] for dependency in dependencies
+            },
+        }
         self._project_role_sections(payload, actor)
-        return self._compile_context(
+        compiled = self._compile_context(
             payload,
             token_budget=budget,
             priority=_TICKET_SECTION_PRIORITY.get(actor.role, _FALLBACK_SECTION_PRIORITY),
@@ -219,6 +231,124 @@ class ContextMixin:
             protected=_PROTECTED_SECTIONS
             | _ROLE_REQUIRED_SECTIONS.get(actor.role, frozenset()),
         )
+        self._record_context_snapshot(
+            compiled["context_snapshot_id"],
+            project_id=project_id,
+            subject_type="ticket",
+            subject_id=ticket_id,
+            role=actor.role.value,
+            source_versions=source_versions,
+            generated_at=compiled["generated_at"],
+        )
+        return compiled
+
+    def _record_context_snapshot(
+        self,
+        snapshot_id: str,
+        *,
+        project_id: str,
+        subject_type: str,
+        subject_id: str,
+        role: str,
+        source_versions: dict[str, Any],
+        generated_at: str,
+    ) -> None:
+        """Persist what a reader observed, so a later write can be checked against it.
+
+        The identifier is derived from the packet's own content, so identical
+        state compiles to an identical row and re-reading unchanged context
+        writes nothing new.
+        """
+        with self.store.connection(immediate=True) as connection:
+            connection.execute(
+                """
+                INSERT INTO context_snapshots
+                    (snapshot_id, project_id, subject_type, subject_id, role,
+                     source_versions, generated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(snapshot_id) DO NOTHING
+                """,
+                (
+                    snapshot_id,
+                    project_id,
+                    subject_type,
+                    subject_id,
+                    role,
+                    _serialize(source_versions),
+                    generated_at,
+                ),
+            )
+
+    def require_fresh_context(
+        self,
+        connection: sqlite3.Connection,
+        ticket_id: str,
+        snapshot_id: str | None,
+    ) -> None:
+        """Refuse a consequential write decided from context that has since moved.
+
+        Supplying a snapshot is optional: a caller that never read context cannot
+        be stale against it. Supplying one it cannot produce, or one taken
+        against a different ticket, is refused rather than ignored — silently
+        accepting an unknown identifier would make the check decorative.
+        """
+        if snapshot_id is None:
+            return
+        recorded = _row(
+            connection.execute(
+                "SELECT * FROM context_snapshots WHERE snapshot_id = ?", (snapshot_id,)
+            ).fetchone()
+        )
+        if recorded is None or recorded["subject_id"] != ticket_id:
+            raise ContextStaleError(
+                "The referenced context snapshot is not one this ticket produced",
+                {"stale": ["snapshot"], "ticket_id": ticket_id},
+            )
+        observed = json.loads(recorded["source_versions"])
+        ticket = self._ticket(connection, ticket_id)
+        feature = self._one(
+            connection,
+            "SELECT * FROM features WHERE feature_id = ?",
+            (ticket["feature_id"],),
+        )
+        candidate = _row(
+            connection.execute(
+                """
+                SELECT commit_sha FROM candidates WHERE ticket_id = ?
+                ORDER BY submitted_at DESC LIMIT 1
+                """,
+                (ticket_id,),
+            ).fetchone()
+        )
+        dependencies = {
+            row["ticket_id"]: row["status"]
+            for row in connection.execute(
+                """
+                SELECT dependency.ticket_id, dependency.status
+                FROM ticket_dependencies d
+                JOIN tickets dependency ON dependency.ticket_id = d.depends_on_ticket_id
+                WHERE d.ticket_id = ?
+                """,
+                (ticket_id,),
+            ).fetchall()
+        }
+        stale: list[str] = []
+        if observed.get("ticket_version") != ticket["version"]:
+            stale.append("ticket")
+        if observed.get("feature_version") != feature["version"]:
+            stale.append("feature")
+        if observed.get("candidate_commit") != (candidate["commit_sha"] if candidate else None):
+            stale.append("candidate")
+        if observed.get("dependencies") != dependencies:
+            stale.append("dependencies")
+        if stale:
+            # Name the sections rather than the values: which part to refresh is
+            # what the caller needs, and the values themselves are what it will
+            # get by refreshing.
+            raise ContextStaleError(
+                "Refresh this ticket's context before writing: " + ", ".join(stale),
+                {"stale": stale, "ticket_id": ticket_id},
+            )
 
     @staticmethod
     def _project_role_sections(payload: dict[str, Any], actor: Actor) -> None:

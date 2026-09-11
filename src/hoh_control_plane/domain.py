@@ -139,6 +139,18 @@ class SkillCompatibilityError(ConflictError):
     code = "skill_incompatible"
 
 
+class ContextStaleError(ConflictError):
+    """The context this write was decided from no longer describes current state.
+
+    Distinct from a plain version conflict because the caller did not
+    necessarily send a wrong expected_version: it may have read a correct
+    packet, then acted on it after the world moved. details["stale"] names which
+    parts to refresh so the caller reloads those rather than everything.
+    """
+
+    code = "context_stale"
+
+
 class NotFoundError(DomainError):
     code = "not_found"
     status_code = 404
