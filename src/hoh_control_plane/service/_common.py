@@ -84,6 +84,11 @@ _VERBOSE_ENTRY_TYPES = frozenset(
     {"progress_update", "qa_test_run", "qa_automated_test_run"}
 )
 
+# A long-lived feature accumulates verified behaviour without bound. A new ticket
+# needs to know what it must not break, not the feature's entire proven history,
+# so the inherited set is capped and the most recently proven wins the room.
+_MAX_INHERITED_CONSTRAINTS = 10
+
 # The vocabulary a role can actually reason from. Without one, every situation
 # grows its own label — the live control plane reached 41 types for 206 entries,
 # most used exactly once — and a type that appears once can be neither filtered
@@ -150,6 +155,7 @@ _TICKET_SECTION_PRIORITY: dict[Role, tuple[str, ...]] = {
         "dependencies",
         "feature",
         "test_runs",
+        "inherited_constraints",
     ),
     Role.QA: (
         "candidate",
@@ -159,6 +165,7 @@ _TICKET_SECTION_PRIORITY: dict[Role, tuple[str, ...]] = {
         "context_entries",
         "dependencies",
         "feature",
+        "inherited_constraints",
     ),
     Role.PLANNER: (
         "feature",
@@ -168,6 +175,7 @@ _TICKET_SECTION_PRIORITY: dict[Role, tuple[str, ...]] = {
         "candidate",
         "test_runs",
         "worktree",
+        "inherited_constraints",
     ),
     Role.INTEGRATOR: (
         "candidate",
@@ -177,6 +185,7 @@ _TICKET_SECTION_PRIORITY: dict[Role, tuple[str, ...]] = {
         "dependencies",
         "worktree",
         "context_entries",
+        "inherited_constraints",
     ),
 }
 _FALLBACK_SECTION_PRIORITY = (
@@ -187,6 +196,7 @@ _FALLBACK_SECTION_PRIORITY = (
     "dependencies",
     "feature",
     "test_runs",
+    "inherited_constraints",
 )
 
 

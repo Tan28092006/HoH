@@ -12,6 +12,7 @@ from hoh_control_plane.service._common import (
     _PROTECTED_SECTIONS,
     _ROLE_REQUIRED_SECTIONS,
     _TICKET_SECTION_PRIORITY,
+    _MAX_INHERITED_CONSTRAINTS,
     _VERBOSE_ENTRY_TYPES,
     _checkpoint,
     _estimate_tokens,
@@ -199,6 +200,7 @@ class ContextMixin:
                     (ticket_id,),
                 ).fetchall()
             ]
+        inherited = self._inherited_constraints(ticket_id, ticket)
         payload = {
             "context_ref": f"ctx:ticket:{ticket_id}:v{ticket['version']}",
             "context_version": ticket["version"],
@@ -212,6 +214,7 @@ class ContextMixin:
             "worktree": worktree,
             "test_runs": test_runs,
             "known_failures": failures,
+            "inherited_constraints": inherited,
         }
         source_versions = {
             "ticket_version": ticket["version"],
@@ -241,6 +244,49 @@ class ContextMixin:
             generated_at=compiled["generated_at"],
         )
         return compiled
+
+    def _inherited_constraints(
+        self, ticket_id: str, ticket: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """What this feature has already proved, which this ticket must not break.
+
+        Computed when the context is read rather than stored when the ticket was
+        created, so behaviour verified after the fact still reaches work that is
+        already in flight. Kept apart from the Planner's own constraints because
+        the two are different in kind: these came from evidence, those from
+        judgement, and a reader should be able to tell which is which.
+        """
+        own = {str(constraint).strip() for constraint in ticket.get("preservation_constraints") or []}
+        seen: set[str] = set()
+        inherited: list[dict[str, Any]] = []
+        with self.store.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT ticket_id, acceptance_criteria FROM tickets
+                WHERE feature_id = ? AND ticket_id != ? AND status IN (?, ?)
+                ORDER BY updated_at DESC
+                """,
+                (
+                    ticket["feature_id"],
+                    ticket_id,
+                    TicketStatus.VERIFIED.value,
+                    TicketStatus.DONE.value,
+                ),
+            ).fetchall()
+        for row in rows:
+            record = _row(row)
+            assert record is not None
+            for criterion in record["acceptance_criteria"] or []:
+                behaviour = str(criterion).strip()
+                # Already stated by the Planner, or already inherited from an
+                # earlier ticket: saying it twice does not make it truer.
+                if not behaviour or behaviour in own or behaviour in seen:
+                    continue
+                seen.add(behaviour)
+                inherited.append({"behaviour": behaviour, "verified_by": record["ticket_id"]})
+                if len(inherited) >= _MAX_INHERITED_CONSTRAINTS:
+                    return inherited
+        return inherited
 
     def _record_context_snapshot(
         self,
