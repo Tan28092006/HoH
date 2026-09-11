@@ -27,6 +27,19 @@ class TicketStatus(StrEnum):
     SUPERSEDED = "SUPERSEDED"
 
 
+class WorkspaceModel(StrEnum):
+    """Where the working tree a Developer edits actually lives.
+
+    COLOCATED is the original assumption and stays the default: the agent runs
+    beside the service, so a service-provisioned worktree path is one the agent
+    can open. AGENT_WORKSPACE is for an agent on another machine, which cannot
+    reach any path the service creates for itself.
+    """
+
+    COLOCATED = "colocated"
+    AGENT_WORKSPACE = "agent_workspace"
+
+
 class PlannerJobStatus(StrEnum):
     READY = "READY"
     IN_PROGRESS = "IN_PROGRESS"

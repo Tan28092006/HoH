@@ -30,6 +30,7 @@ from hoh_control_plane.domain import (
     SkillCompatibilityError,
     TicketStatus,
     ValidationError,
+    WorkspaceModel,
     require_project,
     require_role,
 )

@@ -344,10 +344,19 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
 
         @server.tool(name="planner.configure_repository", structured_output=True)
         def planner_configure_repository(
-            project_id: str, repository_path: str
+            project_id: str, repository_path: str, workspace_model: str = "colocated"
         ) -> dict[str, Any]:
-            """Attach a verified local Git repository so Dev candidates require a bound worktree."""
-            arguments = {"project_id": project_id, "repository_path": repository_path}
+            """Attach a verified local Git repository so Dev candidates require a bound worktree.
+
+            workspace_model is "colocated" when agents run beside the service and use
+            service-provisioned worktrees, or "agent_workspace" when each Developer
+            holds its own checkout and the service provisions none.
+            """
+            arguments = {
+                "project_id": project_id,
+                "repository_path": repository_path,
+                "workspace_model": workspace_model,
+            }
             return invoke(
                 "planner.configure_repository",
                 arguments,

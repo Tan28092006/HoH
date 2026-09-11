@@ -12,6 +12,7 @@ from hoh_control_plane.service._common import (
     Role,
     TicketStatus,
     ValidationError,
+    WorkspaceModel,
     _bounded_join,
     _id,
     _iso,
@@ -68,6 +69,25 @@ class WorktreeMixin:
             actor, ticket_id, lease_id, expected_version, snapshot, takeover
         )
 
+    @staticmethod
+    def _require_colocated_workspace(repository: dict[str, Any]) -> None:
+        """Refuse to provision a path the caller could not reach.
+
+        Under the agent-workspace model the Developer holds its own checkout on
+        its own machine, so a worktree created here would be a path that does not
+        exist for it. Failing now is the honest answer; succeeding would hand back
+        a location the agent cannot open and turn a configuration mistake into a
+        confusing Git error later.
+        """
+        if repository.get("workspace_model", WorkspaceModel.COLOCATED.value) != (
+            WorkspaceModel.COLOCATED.value
+        ):
+            raise ConflictError(
+                "This project uses the agent-workspace model, so the service does not "
+                "provision worktrees; the Developer works in its own checkout",
+                {"reason": "workspace_model_not_colocated"},
+            )
+
     def _worktree_preparation_snapshot(
         self, actor: Actor, ticket_id: str, lease_id: str, expected_version: int
     ) -> dict[str, Any]:
@@ -87,6 +107,7 @@ class WorktreeMixin:
                 raise ValidationError(
                     "Planner must configure a project Git repository before preparing a worktree"
                 )
+            self._require_colocated_workspace(repository)
             project = self._one(
                 connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
             )
@@ -409,6 +430,13 @@ class WorktreeMixin:
             if ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:
                 raise ConflictError("Worktrees can only be prepared for active development work")
             self._require_active_lease(connection, actor, ticket_id, lease_id)
+            repository = _row(
+                connection.execute(
+                    "SELECT * FROM project_repositories WHERE project_id = ?", (project_id,)
+                ).fetchone()
+            )
+            if repository is not None:
+                self._require_colocated_workspace(repository)
             existing = _row(
                 connection.execute(
                     "SELECT * FROM worktrees WHERE ticket_id = ?", (ticket_id,)

@@ -70,6 +70,8 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE TABLE IF NOT EXISTS project_repositories (
     project_id TEXT PRIMARY KEY REFERENCES projects(project_id),
     repository_path TEXT NOT NULL,
+    workspace_model TEXT NOT NULL DEFAULT 'colocated'
+        CHECK (workspace_model IN ('colocated', 'agent_workspace')),
     configured_by TEXT NOT NULL,
     configured_at TEXT NOT NULL
 );
@@ -614,6 +616,7 @@ class SQLiteStore:
             self._migrate_planner_job_types(connection)
             self._migrate_agent_presence_skill_columns(connection)
             self._migrate_evidence_provenance(connection)
+            self._migrate_workspace_model(connection)
             repaired = self._migrate_stale_migration_table_references(connection)
             self._require_clean_foreign_keys(connection, repaired)
 
@@ -765,6 +768,26 @@ class SQLiteStore:
                     f"Upgraded table {table} has {len(violations)} unresolved "
                     "foreign key references"
                 )
+
+    @staticmethod
+    def _migrate_workspace_model(connection: sqlite3.Connection) -> None:
+        """Record where a project's working trees live, defaulting to co-located.
+
+        Added rather than rebuilt so every configured repository survives. An
+        existing project was necessarily co-located, because that was the only
+        model the service could serve, so the default states the truth about it
+        rather than leaving it unknown.
+        """
+        existing = {
+            row["name"]
+            for row in connection.execute('PRAGMA table_info("project_repositories")')
+        }
+        if not existing or "workspace_model" in existing:
+            return
+        connection.execute(
+            "ALTER TABLE project_repositories ADD COLUMN workspace_model TEXT "
+            "NOT NULL DEFAULT 'colocated'"
+        )
 
     @staticmethod
     def _migrate_evidence_provenance(connection: sqlite3.Connection) -> None:

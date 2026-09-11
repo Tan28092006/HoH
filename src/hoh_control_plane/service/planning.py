@@ -9,6 +9,7 @@ from hoh_control_plane.service._common import (
     Role,
     TicketStatus,
     ValidationError,
+    WorkspaceModel,
     _id,
     _iso,
     _row,
@@ -65,12 +66,29 @@ class PlanningMixin:
         return project
 
     def configure_repository(
-        self, actor: Actor, project_id: str, repository_path: str
+        self,
+        actor: Actor,
+        project_id: str,
+        repository_path: str,
+        workspace_model: str = WorkspaceModel.COLOCATED.value,
     ) -> dict[str, Any]:
-        """Attach a checked local Git repository to a project for strict candidate gating."""
+        """Attach a checked local Git repository to a project for strict candidate gating.
+
+        workspace_model states where the tree a Developer edits actually lives.
+        It defaults to co-located because that is the only model the service can
+        serve a worktree for, and because every project configured before the
+        setting existed was necessarily co-located.
+        """
         require_role(actor, Role.PLANNER, Role.ADMIN)
         require_project(actor, project_id)
         self._bounded_text(repository_path, "repository_path", 1000)
+        try:
+            model = WorkspaceModel(workspace_model)
+        except ValueError as error:
+            raise ValidationError(
+                f"Unknown workspace_model: {workspace_model}",
+                {"reason": "workspace_model_unknown"},
+            ) from error
         normalized_path = self.git_worktrees.validate_repository(repository_path)
         timestamp = _iso()
         with self.store.connection(immediate=True) as connection:
@@ -90,18 +108,47 @@ class PlanningMixin:
                     raise ConflictError(
                         "Project repository cannot change after ticket worktrees are prepared"
                     )
+            previous_model = (
+                existing_repository["workspace_model"] if existing_repository else None
+            )
+            if previous_model is not None and previous_model != model.value:
+                # Work already in flight was started under the old model, and its
+                # worktree or lease means an agent is holding a path or a claim
+                # that the new model would not have handed out.
+                stranded = connection.execute(
+                    """
+                    SELECT COUNT(*) FROM worktrees WHERE project_id = ?
+                    """,
+                    (project_id,),
+                ).fetchone()[0]
+                stranded += connection.execute(
+                    """
+                    SELECT COUNT(*) FROM leases lease
+                    JOIN tickets t ON t.ticket_id = lease.ticket_id
+                    JOIN features f ON f.feature_id = t.feature_id
+                    WHERE f.project_id = ? AND lease.role = ? AND lease.expires_at > ?
+                    """,
+                    (project_id, Role.DEVELOPER.value, _iso()),
+                ).fetchone()[0]
+                if stranded:
+                    raise ConflictError(
+                        "Workspace model cannot change while the project has worktrees "
+                        "or active Developer leases from the current model",
+                        {"reason": "workspace_model_in_flight"},
+                    )
             next_version = project["version"] + 1
             connection.execute(
                 """
                 INSERT INTO project_repositories
-                    (project_id, repository_path, configured_by, configured_at)
-                VALUES (?, ?, ?, ?)
+                    (project_id, repository_path, workspace_model, configured_by, configured_at)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(project_id) DO UPDATE SET
                     repository_path = excluded.repository_path,
+                    workspace_model = excluded.workspace_model,
                     configured_by = excluded.configured_by,
                     configured_at = excluded.configured_at
                 """,
-                (project_id, normalized_path, actor.agent_id, timestamp),
+                (project_id, normalized_path, model.value, actor.agent_id, timestamp),
             )
             connection.execute(
                 "UPDATE projects SET version = ?, updated_at = ? WHERE project_id = ?",
