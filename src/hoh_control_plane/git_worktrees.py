@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
 import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,6 +52,9 @@ class GitWorktreeManager:
 
     def __init__(self, worktree_root: Path) -> None:
         self.worktree_root = worktree_root.resolve()
+        # A leading dot cannot appear in a project_id, so integration checkouts can
+        # never collide with a Developer worktree path.
+        self.integration_root = self.worktree_root / ".integration"
 
     def validate_repository(self, repository_path: str) -> str:
         path = self._existing_directory(repository_path, "repository_path")
@@ -322,6 +328,58 @@ class GitWorktreeManager:
             candidate,
         )
         return sorted({line.strip().replace("\\", "/") for line in result.stdout.splitlines() if line.strip()})
+
+    @contextmanager
+    def integration_checkout(
+        self,
+        *,
+        repository_path: str,
+        project_id: str,
+        ticket_id: str,
+        candidate_commit: str,
+    ) -> Iterator[str]:
+        """Materialize the exact candidate on a disposable detached integration worktree."""
+        repository = Path(self.validate_repository(repository_path))
+        candidate = self._resolve_commit(repository, candidate_commit)
+        checkout_path = self._integration_path(project_id, ticket_id)
+        checkout_path.parent.mkdir(parents=True, exist_ok=True)
+        # The happy path never needs a pre-emptive prune: the checkout path is
+        # deterministic per (project, ticket), and the finally block below always
+        # clears it after use. Only a prior crashed run leaves it behind, so pay for
+        # cleanup on that rarer path instead of spawning an extra git process here.
+        added = self._git(
+            repository, "worktree", "add", "--detach", str(checkout_path), candidate, check=False
+        )
+        if added.returncode != 0:
+            self._discard_integration_checkout(repository, checkout_path)
+            self._git(repository, "worktree", "add", "--detach", str(checkout_path), candidate)
+        try:
+            if self._resolve_commit(checkout_path, "HEAD") != candidate:
+                raise ValidationError("Integration worktree does not hold the candidate commit")
+            yield str(checkout_path)
+        finally:
+            self._discard_integration_checkout(repository, checkout_path)
+
+    def _integration_path(self, project_id: str, ticket_id: str) -> Path:
+        segments = [self._safe_segment(value, field) for value, field in (
+            (project_id, "project_id"),
+            (ticket_id, "ticket_id"),
+        )]
+        path = (self.integration_root / segments[0] / segments[1]).resolve()
+        if not path.is_relative_to(self.integration_root):
+            raise ValidationError("Integration worktree path is invalid")
+        return path
+
+    def _discard_integration_checkout(self, repository: Path, checkout_path: Path) -> None:
+        """Leave no integration checkout behind, whether or not the gate ran."""
+        if checkout_path.exists():
+            removed = self._git(
+                repository, "worktree", "remove", "--force", str(checkout_path), check=False
+            )
+            if removed.returncode != 0:
+                self._git(repository, "worktree", "prune", check=False)
+            if checkout_path.exists():
+                shutil.rmtree(checkout_path, ignore_errors=True)
 
     def fast_forward_default_branch(
         self,

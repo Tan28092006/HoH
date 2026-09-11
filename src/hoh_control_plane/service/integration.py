@@ -69,9 +69,16 @@ class IntegrationMixin:
         lease_id: str,
         expected_version: int,
     ) -> dict[str, Any]:
-        """Merge only a QA-verified candidate whose mainline base has not drifted."""
+        """Gate a QA-verified candidate on an isolated regression run, then fast-forward.
+
+        Neither the regression command nor the git fast-forward holds the SQLite
+        write lock: only the initial read and the final outcome are short, atomic
+        mutations (see HOH-214). A failing or mismatched gate leaves the default
+        branch and the frozen candidate untouched; a passing gate falls through to
+        the unchanged Integrator-only fast-forward and base-drift guard.
+        """
         require_role(actor, Role.INTEGRATOR)
-        with self.store.connection(immediate=True) as connection:
+        with self.store.connection() as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             self._expect_version(ticket, expected_version)
             if ticket["status"] != TicketStatus.MERGE_READY.value:
@@ -92,14 +99,144 @@ class IntegrationMixin:
             )
             if repository is None:
                 raise ValidationError("Project repository is required before integrating a candidate")
-            merged, mainline_commit = self.git_worktrees.fast_forward_default_branch(
-                repository_path=repository["repository_path"],
-                default_branch=project["default_branch"],
-                expected_base_commit=candidate["base_commit"],
-                candidate_commit=candidate["commit_sha"],
+            gate_profile = _row(
+                connection.execute(
+                    "SELECT * FROM candidate_test_profiles WHERE candidate_id = ?",
+                    (candidate["candidate_id"],),
+                ).fetchone()
             )
+            repository_path = repository["repository_path"]
+            default_branch = project["default_branch"]
+            candidate_id = candidate["candidate_id"]
+            candidate_commit = candidate["commit_sha"]
+            candidate_base = candidate["base_commit"]
+            gate_command: list[str] | None = None
+            gate_timeout = 0
+            if gate_profile is not None:
+                gate_command = gate_profile["test_command"]
+                self._test_command(gate_command)
+                gate_timeout = gate_profile["timeout_seconds"]
+                if not isinstance(gate_timeout, int) or not 5 <= gate_timeout <= 1800:
+                    raise ValidationError("Candidate test command timeout is invalid")
+
+        # Neither this regression run nor the fast-forward below runs inside a write
+        # transaction: a long-running external command must never hold the database
+        # write lock and block every other Developer/QA/Planner operation (HOH-214).
+        execution: TestExecution | None = None
+        if gate_command is not None:
+            with self.git_worktrees.integration_checkout(
+                repository_path=repository_path,
+                project_id=project_id,
+                ticket_id=ticket_id,
+                candidate_commit=candidate_commit,
+            ) as integration_path:
+                execution = self.project_tests.execute(gate_command, integration_path, gate_timeout)
+            if execution.artifact_mismatch:
+                raise ValidationError(
+                    "Integration regression command did not resolve the candidate's own "
+                    f"source: {execution.stderr}. This is an infrastructure fault, not a "
+                    "candidate verdict; the ticket and lease are unchanged, retry once fixed."
+                )
+
+        gate_passed = execution is None or (not execution.timed_out and execution.exit_code == 0)
+        merged = False
+        mainline_commit = ""
+        if gate_passed:
+            merged, mainline_commit = self.git_worktrees.fast_forward_default_branch(
+                repository_path=repository_path,
+                default_branch=default_branch,
+                expected_base_commit=candidate_base,
+                candidate_commit=candidate_commit,
+            )
+
+        with self.store.connection(immediate=True) as connection:
+            ticket, current_project_id = self._authorized_ticket(connection, actor, ticket_id)
+            if (
+                current_project_id != project_id
+                or ticket["status"] != TicketStatus.MERGE_READY.value
+            ):
+                raise ConflictError("Ticket changed while integration was running")
+            self._require_active_lease(connection, actor, ticket_id, lease_id)
+            current_candidate = self._one(
+                connection,
+                "SELECT * FROM candidates WHERE candidate_id = ? AND ticket_id = ?",
+                (candidate_id, ticket_id),
+            )
+            if current_candidate["commit_sha"] != candidate_commit:
+                raise ConflictError("Candidate changed while integration was running")
             timestamp = _iso()
             next_version = ticket["version"] + 1
+            gate_test_run: dict[str, Any] | None = None
+            if execution is not None:
+                gate_test_run = self._record_integration_gate(
+                    connection,
+                    actor,
+                    project_id=project_id,
+                    ticket=ticket,
+                    candidate_id=candidate_id,
+                    candidate_commit=candidate_commit,
+                    execution=execution,
+                    timestamp=timestamp,
+                )
+
+            if not gate_passed:
+                outcome = "timed out" if execution.timed_out else f"exited {execution.exit_code}"
+                reason = (
+                    f"Integration regression {outcome} on the frozen candidate; mainline "
+                    "was left unchanged. Repair the failure and submit a new QA candidate."
+                )
+                connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease_id,))
+                connection.execute(
+                    """
+                    INSERT INTO context_entries
+                        (entry_id, project_id, feature_id, ticket_id, entry_type, content,
+                         source_ref, artifact_commit, actor_id, actor_role, created_at)
+                    VALUES (?, ?, ?, ?, 'integration_regression_failed', ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        _id("ctx"),
+                        project_id,
+                        ticket["feature_id"],
+                        ticket_id,
+                        reason,
+                        gate_test_run["storage_ref"],
+                        candidate_commit,
+                        actor.agent_id,
+                        actor.role.value,
+                        timestamp,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE tickets
+                    SET status = ?, blocked_reason = ?, version = ?, updated_at = ?
+                    WHERE ticket_id = ?
+                    """,
+                    (TicketStatus.REWORK.value, reason, next_version, timestamp, ticket_id),
+                )
+                self._event(
+                    connection,
+                    actor,
+                    project_id,
+                    "integration.regression_failed",
+                    "ticket",
+                    ticket_id,
+                    next_version,
+                    {
+                        "candidate_id": candidate_id,
+                        "test_run_id": gate_test_run["test_run_id"],
+                        "exit_code": execution.exit_code,
+                        "timed_out": execution.timed_out,
+                    },
+                )
+                rework_ticket = self._ticket(connection, ticket_id)
+                self._queue_ticket(connection, actor, project_id, rework_ticket)
+                return {
+                    "ticket": rework_ticket,
+                    "merge_status": "regression_failed",
+                    "test_run": gate_test_run,
+                }
+
             connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease_id,))
             if not merged:
                 reason = (
@@ -119,7 +256,7 @@ class IntegrationMixin:
                         ticket["feature_id"],
                         ticket_id,
                         reason,
-                        f"candidate:{candidate['candidate_id']}",
+                        f"candidate:{candidate_id}",
                         mainline_commit,
                         actor.agent_id,
                         actor.role.value,
@@ -142,11 +279,15 @@ class IntegrationMixin:
                     "ticket",
                     ticket_id,
                     next_version,
-                    {"candidate_id": candidate["candidate_id"], "mainline_commit": mainline_commit},
+                    {"candidate_id": candidate_id, "mainline_commit": mainline_commit},
                 )
                 rework_ticket = self._ticket(connection, ticket_id)
                 self._queue_ticket(connection, actor, project_id, rework_ticket)
-                return {"ticket": rework_ticket, "merge_status": "base_drift"}
+                return {
+                    "ticket": rework_ticket,
+                    "merge_status": "base_drift",
+                    "test_run": gate_test_run,
+                }
             connection.execute(
                 """
                 UPDATE tickets
@@ -163,9 +304,79 @@ class IntegrationMixin:
                 "ticket",
                 ticket_id,
                 next_version,
-                {"candidate_id": candidate["candidate_id"], "commit_sha": mainline_commit},
+                {"candidate_id": candidate_id, "commit_sha": mainline_commit},
             )
-            return {"ticket": self._ticket(connection, ticket_id), "merge_status": "merged"}
+            return {
+                "ticket": self._ticket(connection, ticket_id),
+                "merge_status": "merged",
+                "test_run": gate_test_run,
+            }
+
+    def _record_integration_gate(
+        self,
+        connection: sqlite3.Connection,
+        actor: Actor,
+        *,
+        project_id: str,
+        ticket: dict[str, Any],
+        candidate_id: str,
+        candidate_commit: str,
+        execution: TestExecution,
+        timestamp: str,
+    ) -> dict[str, Any]:
+        """Persist the gate run as durable candidate evidence before mainline is touched."""
+        test_run_id = _id("testrun")
+        storage_ref, report_path, checksum = self.project_tests.write_report(
+            candidate_id=candidate_id,
+            test_run_id=test_run_id,
+            execution=execution,
+            candidate_commit=candidate_commit,
+        )
+        connection.execute(
+            """
+            INSERT INTO qa_test_runs
+                (test_run_id, candidate_id, ticket_id, command_digest, exit_code, timed_out,
+                 duration_ms, storage_ref, report_path, environment_digest,
+                 storage_checksum, executed_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                test_run_id,
+                candidate_id,
+                ticket["ticket_id"],
+                execution.command_digest,
+                execution.exit_code,
+                int(execution.timed_out),
+                execution.duration_ms,
+                storage_ref,
+                report_path,
+                execution.environment_digest,
+                checksum,
+                actor.agent_id,
+                timestamp,
+            ),
+        )
+        outcome = "timed out" if execution.timed_out else f"exited {execution.exit_code}"
+        self._event(
+            connection,
+            actor,
+            project_id,
+            "integration.regression_completed",
+            "ticket",
+            ticket["ticket_id"],
+            ticket["version"],
+            {
+                "candidate_id": candidate_id,
+                "test_run_id": test_run_id,
+                "candidate_commit": candidate_commit,
+                "exit_code": execution.exit_code,
+                "timed_out": execution.timed_out,
+                "outcome": outcome,
+            },
+        )
+        return self._one(
+            connection, "SELECT * FROM qa_test_runs WHERE test_run_id = ?", (test_run_id,)
+        )
 
     def _release_policy_snapshot(
         self, actor: Actor, ticket_id: str
