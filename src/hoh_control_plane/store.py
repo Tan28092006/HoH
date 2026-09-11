@@ -31,9 +31,27 @@ class ContentionError(DomainError):
 _DEFAULT_BUSY_TIMEOUT_SECONDS = 10.0
 
 
+class SchemaMigrationError(DomainError):
+    """An upgrade could not leave the persisted schema in a usable state.
+
+    This is raised instead of committing a half-migrated database, so the fault
+    surfaces once at startup with the table that caused it rather than as a raw
+    storage error on some unrelated write hours later.
+    """
+
+    code = "schema_migration_failed"
+    status_code = 500
+
+
 def _is_lock_contention(error: sqlite3.OperationalError) -> bool:
     message = str(error).lower()
     return "locked" in message or "busy" in message
+
+
+# A table rebuilt in place is renamed to this suffix, copied from, and dropped.
+# The suffix is also how a foreign key left pointing at one of those dropped
+# temporaries is recognized and repaired below.
+_MIGRATION_TABLE_SUFFIX = "_legacy"
 
 
 SCHEMA = """
@@ -549,9 +567,156 @@ class SQLiteStore:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = NORMAL")
             connection.executescript(SCHEMA)
+            # The migrations below rebuild a table by rename-create-copy-drop.
+            # Two pragmas make that safe, and neither can be changed once a
+            # transaction is open, so both are set here rather than inside a
+            # migration:
+            #   legacy_alter_table keeps the RENAME from rewriting *other*
+            #   tables' foreign keys to aim at the temporary table this
+            #   migration is about to drop -- that rewrite is exactly how
+            #   planner_interventions and planner_job_leases were left
+            #   referencing a planner_jobs_legacy table that no longer exists;
+            #   foreign_keys=OFF lets a rebuild copy rows across while a parent
+            #   table is momentarily renamed away, as SQLite's own table-rebuild
+            #   procedure requires.
+            # Enforcement is not weakened for anyone else: this connection is
+            # used only for the upgrade and closed immediately after, every
+            # serving connection still opens with foreign_keys=ON, and
+            # _require_clean_foreign_keys re-proves each rebuilt table before
+            # this transaction commits.
+            connection.execute("PRAGMA legacy_alter_table = ON")
+            connection.execute("PRAGMA foreign_keys = OFF")
             self._begin_immediate(connection)
             self._migrate_qa_test_job_lease_foreign_key(connection)
             self._migrate_planner_job_types(connection)
+            repaired = self._migrate_stale_migration_table_references(connection)
+            self._require_clean_foreign_keys(connection, repaired)
+
+    @classmethod
+    def _migrate_stale_migration_table_references(
+        cls, connection: sqlite3.Connection
+    ) -> list[str]:
+        """Repoint foreign keys left aiming at a dropped rebuild temporary.
+
+        A database upgraded by the earlier rename-create-copy-drop code carries
+        real damage: renaming planner_jobs out of the way silently rewrote every
+        other table's foreign key to the temporary planner_jobs_legacy, and the
+        same migration then dropped it. The child tables -- planner_interventions
+        and planner_job_leases -- were left pointing at nothing, so the first
+        insert into either failed with a raw storage error that surfaced as a
+        generic state conflict, and an evidence-bearing QA FAIL verdict could not
+        commit. Setting legacy_alter_table stops new damage; this heals databases
+        that already took it, in the same transaction, without hand repair.
+
+        Returns the tables it rebuilt. Idempotent: a database whose references
+        are already live is left untouched.
+        """
+        existing = {
+            row["name"]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        repaired: list[str] = []
+        for table in sorted(existing):
+            if table.startswith("sqlite_"):
+                continue
+            stale_targets = {
+                target
+                for target in (
+                    foreign_key["table"]
+                    for foreign_key in connection.execute(
+                        f'PRAGMA foreign_key_list("{table}")'
+                    ).fetchall()
+                )
+                # Only a name this project's own rebuild would have produced, and
+                # only when the table it stood in for is present: a foreign key to
+                # some other missing table is a different fault and is left alone
+                # for PRAGMA foreign_key_check to report rather than guessed at.
+                if target not in existing
+                and target.endswith(_MIGRATION_TABLE_SUFFIX)
+                and target[: -len(_MIGRATION_TABLE_SUFFIX)] in existing
+            }
+            if stale_targets:
+                cls._repoint_foreign_keys(connection, table, stale_targets)
+                repaired.append(table)
+        return repaired
+
+    @staticmethod
+    def _repoint_foreign_keys(
+        connection: sqlite3.Connection, table: str, stale_targets: set[str]
+    ) -> None:
+        """Rebuild one table with its foreign keys aimed back at the live parents.
+
+        The stored definition is reused verbatim apart from the reference target,
+        so any column, check or default this table has acquired since it was first
+        created survives the repair untouched.
+        """
+        definition = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+        ).fetchone()
+        repaired_sql = definition["sql"]
+        for stale in sorted(stale_targets):
+            live = stale[: -len(_MIGRATION_TABLE_SUFFIX)]
+            # SQLite quotes the target when it rewrites a reference during a
+            # rename, but a hand-written definition may not be quoted at all.
+            repaired_sql = repaired_sql.replace(f'REFERENCES "{stale}"', f'REFERENCES "{live}"')
+            repaired_sql = repaired_sql.replace(f"REFERENCES {stale}", f"REFERENCES {live}")
+        if any(stale in repaired_sql for stale in stale_targets):
+            raise SchemaMigrationError(
+                f"Foreign key references to a dropped migration table remain in {table}"
+            )
+
+        columns = ", ".join(
+            f'"{row["name"]}"'
+            for row in connection.execute(f'PRAGMA table_info("{table}")').fetchall()
+        )
+        indexes = [
+            row["sql"]
+            for row in connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? "
+                "AND sql IS NOT NULL",
+                (table,),
+            ).fetchall()
+        ]
+        index_names = [
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? "
+                "AND sql IS NOT NULL",
+                (table,),
+            ).fetchall()
+        ]
+        # The rebuilt table reclaims these names, so release them before the
+        # rename rather than colliding with the copies riding on the old table.
+        for index_name in index_names:
+            connection.execute(f'DROP INDEX IF EXISTS "{index_name}"')
+        rebuild_name = f"{table}__rebuild"
+        connection.execute(f'ALTER TABLE "{table}" RENAME TO "{rebuild_name}"')
+        connection.execute(repaired_sql)
+        connection.execute(
+            f'INSERT INTO "{table}" ({columns}) SELECT {columns} FROM "{rebuild_name}"'
+        )
+        connection.execute(f'DROP TABLE "{rebuild_name}"')
+        for index_sql in indexes:
+            connection.execute(index_sql)
+
+    @staticmethod
+    def _require_clean_foreign_keys(connection: sqlite3.Connection, tables: list[str]) -> None:
+        """Prove each rebuilt table's rows still resolve, before committing.
+
+        Scoped to the tables this upgrade actually touched: a violation that
+        predates the upgrade elsewhere in the database is not this migration's to
+        adjudicate, and refusing to start over one would take the control plane
+        down for a fault the upgrade neither caused nor can fix.
+        """
+        for table in tables:
+            violations = connection.execute(
+                f'PRAGMA foreign_key_check("{table}")'
+            ).fetchall()
+            if violations:
+                raise SchemaMigrationError(
+                    f"Upgraded table {table} has {len(violations)} unresolved "
+                    "foreign key references"
+                )
 
     @staticmethod
     def _migrate_planner_job_types(connection: sqlite3.Connection) -> None:

@@ -11,6 +11,7 @@ from hoh_control_plane.domain import Actor, ConflictError, Role, ValidationError
 from hoh_control_plane.mcp_server import create_mcp_server
 from hoh_control_plane.service import ControlPlaneService
 from hoh_control_plane.store import ContentionError, SQLiteStore
+from test_store_migrations import legacy_service, seed_project
 
 
 @pytest.mark.anyio
@@ -674,3 +675,63 @@ async def test_ticket_context_tool_accepts_a_declared_token_budget(
             "ticket.get_context",
             {"ticket_ref": f"ticket:{ticket_id}", "token_budget": 1},
         )
+
+
+@pytest.mark.anyio
+async def test_a_qa_failure_on_an_upgraded_database_is_not_reported_as_a_state_conflict(
+    tmp_path, actors
+) -> None:
+    """AC5: the caller must not be told to retry a request that was never the problem.
+
+    A control-plane file upgraded from the pre-widening schema used to leave
+    planner_interventions pointing at a dropped table, so the intervention insert
+    inside the verdict raised a raw SQLite error. The safety net in invoke() then
+    reported it as a generic "retry this request" conflict -- advice that is both
+    wrong and unactionable, because retrying can never succeed against a schema
+    fault. The verdict must simply commit.
+    """
+    database = tmp_path / "upgraded-mcp.db"
+    legacy = legacy_service(database)
+    seeded = seed_project(legacy, actors["planner"])
+    SQLiteStore(database).initialize()
+    service = ControlPlaneService(SQLiteStore(database))
+    ticket = seeded["ticket"]
+    claim = service.claim_ticket(actors["developer"], ticket["ticket_id"], ticket["version"], 900)
+    candidate = service.submit_candidate(
+        actors["developer"], ticket["ticket_id"], claim["lease"]["lease_id"],
+        claim["ticket"]["version"], "a" * 40, "b" * 40, "agent/dev-01/DEV-142",
+        ["Ready for QA."],
+    )
+    qa_claim = service.claim_qa(
+        actors["qa"], ticket["ticket_id"], candidate["ticket"]["version"], 900
+    )
+
+    _content, result = await create_mcp_server(service, actors["qa"]).call_tool(
+        "qa.submit_verdict",
+        {
+            "ticket_id": ticket["ticket_id"],
+            "lease_id": qa_claim["lease"]["lease_id"],
+            "candidate_id": candidate["candidate"]["candidate_id"],
+            "expected_version": qa_claim["ticket"]["version"],
+            "verdict": "failed",
+            "findings": [
+                {
+                    "criterion": ticket["acceptance_criteria"][0],
+                    "status": "failed",
+                    "severity": "high",
+                    "observation": "A duplicate order is still created.",
+                    "evidence": [
+                        {
+                            "type": "test_result",
+                            "observation": "duplicate-order regression reproduced",
+                            "storage_ref": "evidence://qa/duplicate-order.json",
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert result["ticket"]["status"] == "REWORK"
+    assert result["planner_job"]["job_type"] == "qa_failure"
+    assert service.list_planner_interventions(actors["planner"], "project-1")
