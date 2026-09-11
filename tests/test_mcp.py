@@ -95,11 +95,17 @@ async def test_mcp_exposes_only_role_appropriate_tools(tmp_path) -> None:
         "planner.cancel_ticket",
         "planner.supersede_ticket",
         "planner.requeue_candidate",
+        "planner.update_ticket",
+        "planner.split_ticket",
     }.issubset(planner_names)
     assert "planner.cancel_ticket" not in names
     assert "planner.cancel_ticket" not in qa_names
     assert "planner.requeue_candidate" not in names
     assert "planner.requeue_candidate" not in qa_names
+    assert "planner.update_ticket" not in names
+    assert "planner.update_ticket" not in qa_names
+    assert "planner.split_ticket" not in names
+    assert "planner.split_ticket" not in qa_names
     assert content[0].text
     assert structured["project"]["project_id"] == "project-1"
     assert identity_content[0].text
@@ -806,3 +812,78 @@ async def test_planner_mcp_requeues_stale_candidate_with_audit_redaction(
     assert activity[-1]["outcome"] == "succeeded"
     # The reason is redacted from the target summary
     assert "reason" not in activity[-1]["input_summary"].get("target", {})
+
+
+@pytest.mark.anyio
+async def test_planner_mcp_updates_ticket_fields(service, actors, seeded) -> None:
+    ticket = service.create_ticket(
+        actors["planner"],
+        feature_id="payment-retry",
+        ticket_id="MCP-UPD-1",
+        title="Original title",
+        objective="Original objective",
+        required_role=Role.DEVELOPER,
+        acceptance_criteria=["Something"],
+        preservation_constraints=[],
+        file_scope=["src/**"],
+        ready=False,
+    )
+    server = create_mcp_server(service, actors["planner"])
+
+    _content, updated = await server.call_tool(
+        "planner.update_ticket",
+        {
+            "ticket_id": ticket["ticket_id"],
+            "expected_version": ticket["version"],
+            "reason": "Scope refinement.",
+            "title": "Refined title",
+            "priority": 70,
+        },
+    )
+
+    assert updated["ticket"]["title"] == "Refined title"
+    assert updated["ticket"]["priority"] == 70
+    assert set(updated["changed_fields"]) == {"title", "priority"}
+
+    activity = service.list_agent_activity(actors["planner"], "project-1")["calls"]
+    assert activity[-1]["tool_name"] == "planner.update_ticket"
+    assert activity[-1]["outcome"] == "succeeded"
+    assert "reason" not in activity[-1]["input_summary"].get("target", {})
+
+
+@pytest.mark.anyio
+async def test_planner_mcp_splits_a_ticket(service, actors, seeded) -> None:
+    def _make(ticket_id: str, title: str):
+        return service.create_ticket(
+            actors["planner"],
+            feature_id="payment-retry",
+            ticket_id=ticket_id,
+            title=title,
+            objective=f"{title} objective",
+            required_role=Role.DEVELOPER,
+            acceptance_criteria=["Something"],
+            preservation_constraints=[],
+            file_scope=["src/**"],
+            ready=True,
+        )
+
+    original = _make("MCP-SPLIT-1", "Original")
+    part_a = _make("MCP-SPLIT-2", "Part A")
+    part_b = _make("MCP-SPLIT-3", "Part B")
+    server = create_mcp_server(service, actors["planner"])
+
+    _content, split = await server.call_tool(
+        "planner.split_ticket",
+        {
+            "ticket_id": original["ticket_id"],
+            "expected_version": original["version"],
+            "replacement_ticket_ids": [part_a["ticket_id"], part_b["ticket_id"]],
+            "reason": "Split via MCP.",
+        },
+    )
+
+    assert split["ticket"]["status"] == "SUPERSEDED"
+    assert {r["ticket_id"] for r in split["replacements"]} == {
+        part_a["ticket_id"],
+        part_b["ticket_id"],
+    }

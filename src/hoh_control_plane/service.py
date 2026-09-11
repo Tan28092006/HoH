@@ -634,6 +634,266 @@ class ControlPlaneService:
                 ),
             }
 
+    def update_ticket_fields(
+        self,
+        actor: Actor,
+        ticket_id: str,
+        expected_version: int,
+        reason: str,
+        title: str | None = None,
+        objective: str | None = None,
+        priority: int | None = None,
+        acceptance_criteria: list[str] | None = None,
+        preservation_constraints: list[str] | None = None,
+        dependency_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Update bounded planning fields on an eligible ticket with optimistic concurrency."""
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        self._bounded_text(reason, "reason", 2000)
+        if title is not None:
+            self._bounded_text(title, "title", 240)
+        if objective is not None:
+            self._bounded_text(objective, "objective", 8000)
+        if priority is not None:
+            self._priority(priority)
+        if acceptance_criteria is not None:
+            self._bounded_list(acceptance_criteria, "acceptance_criteria", 30, 2000, required=True)
+        if preservation_constraints is not None:
+            self._bounded_list(preservation_constraints, "preservation_constraints", 30, 2000)
+        normalized_dependency_ids: list[str] | None = None
+        if dependency_ids is not None:
+            self._bounded_list(dependency_ids, "dependency_ids", 100, 100)
+            normalized_dependency_ids = list(dict.fromkeys(dependency_ids))
+            if ticket_id in normalized_dependency_ids:
+                raise ValidationError("Ticket cannot depend on itself")
+        if all(
+            value is None
+            for value in (
+                title, objective, priority, acceptance_criteria,
+                preservation_constraints, dependency_ids,
+            )
+        ):
+            raise ValidationError("At least one field must be provided to update")
+
+        with self.store.connection(immediate=True) as connection:
+            ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._expect_version(ticket, expected_version)
+            if TicketStatus(ticket["status"]) not in {
+                TicketStatus.BACKLOG, TicketStatus.READY, TicketStatus.BLOCKED,
+            }:
+                raise ConflictError(
+                    "Only backlog, ready or blocked tickets can have their fields updated"
+                )
+            active_lease = connection.execute(
+                "SELECT 1 FROM leases WHERE ticket_id = ? AND expires_at > ?",
+                (ticket_id, _iso()),
+            ).fetchone()
+            if active_lease is not None:
+                raise ConflictError(
+                    "Ticket fields cannot change while a ticket has an active lease"
+                )
+
+            if normalized_dependency_ids is not None:
+                unfinished_new_dependencies = []
+                for dependency_id in normalized_dependency_ids:
+                    dependency = self._one(
+                        connection, "SELECT * FROM tickets WHERE ticket_id = ?", (dependency_id,)
+                    )
+                    if self._project_for_ticket(connection, dependency_id) != project_id:
+                        raise ValidationError(
+                            f"Dependency {dependency_id} must belong to the same project"
+                        )
+                    if self._dependency_would_cycle(connection, ticket_id, dependency_id):
+                        raise ValidationError(
+                            f"Dependency on {dependency_id} would create a dependency cycle"
+                        )
+                    if dependency["status"] != TicketStatus.DONE.value:
+                        unfinished_new_dependencies.append(dependency_id)
+                if (
+                    TicketStatus(ticket["status"]) is TicketStatus.READY
+                    and unfinished_new_dependencies
+                ):
+                    raise ConflictError(
+                        "Cannot leave a ready ticket depending on unfinished work: "
+                        + ", ".join(unfinished_new_dependencies)
+                    )
+
+            timestamp = _iso()
+            next_version = ticket["version"] + 1
+            set_clauses = ["version = ?", "updated_at = ?"]
+            params: list[Any] = [next_version, timestamp]
+            changed_fields = []
+            if title is not None:
+                set_clauses.append("title = ?")
+                params.append(title)
+                changed_fields.append("title")
+            if objective is not None:
+                set_clauses.append("objective = ?")
+                params.append(objective)
+                changed_fields.append("objective")
+            if priority is not None:
+                set_clauses.append("priority = ?")
+                params.append(priority)
+                changed_fields.append("priority")
+            if acceptance_criteria is not None:
+                set_clauses.append("acceptance_criteria = ?")
+                params.append(json.dumps(acceptance_criteria))
+                changed_fields.append("acceptance_criteria")
+            if preservation_constraints is not None:
+                set_clauses.append("preservation_constraints = ?")
+                params.append(json.dumps(preservation_constraints))
+                changed_fields.append("preservation_constraints")
+            params.append(ticket_id)
+            connection.execute(
+                f"UPDATE tickets SET {', '.join(set_clauses)} WHERE ticket_id = ?", params
+            )
+            if normalized_dependency_ids is not None:
+                connection.execute(
+                    "DELETE FROM ticket_dependencies WHERE ticket_id = ?", (ticket_id,)
+                )
+                for dependency_id in normalized_dependency_ids:
+                    connection.execute(
+                        """
+                        INSERT INTO ticket_dependencies (ticket_id, depends_on_ticket_id)
+                        VALUES (?, ?)
+                        """,
+                        (ticket_id, dependency_id),
+                    )
+                changed_fields.append("dependency_ids")
+
+            entry_id = _id("ctx")
+            connection.execute(
+                """
+                INSERT INTO context_entries
+                    (entry_id, project_id, feature_id, ticket_id, entry_type, content,
+                     actor_id, actor_role, created_at)
+                VALUES (?, ?, ?, ?, 'ticket_fields_updated', ?, ?, ?, ?)
+                """,
+                (
+                    entry_id,
+                    project_id,
+                    ticket["feature_id"],
+                    ticket_id,
+                    reason,
+                    actor.agent_id,
+                    actor.role.value,
+                    timestamp,
+                ),
+            )
+            self._event(
+                connection,
+                actor,
+                project_id,
+                "ticket.fields_updated",
+                "ticket",
+                ticket_id,
+                next_version,
+                {"changed_fields": changed_fields, "reason": reason},
+            )
+            return {
+                "ticket": self._ticket(connection, ticket_id),
+                "changed_fields": changed_fields,
+                "context_entry": self._one(
+                    connection, "SELECT * FROM context_entries WHERE entry_id = ?", (entry_id,)
+                ),
+            }
+
+    def split_ticket(
+        self,
+        actor: Actor,
+        ticket_id: str,
+        expected_version: int,
+        replacement_ticket_ids: list[str],
+        reason: str,
+    ) -> dict[str, Any]:
+        """Retire a ticket whose scope is now carried by two or more narrower tickets."""
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        self._bounded_text(reason, "reason", 2000)
+        self._bounded_list(
+            replacement_ticket_ids, "replacement_ticket_ids", 20, 100, required=True
+        )
+        if len(replacement_ticket_ids) < 2:
+            raise ValidationError("Splitting a ticket requires at least two replacement tickets")
+        if len(set(replacement_ticket_ids)) != len(replacement_ticket_ids):
+            raise ValidationError("replacement_ticket_ids cannot contain duplicates")
+
+        with self.store.connection(immediate=True) as connection:
+            ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._expect_version(ticket, expected_version)
+            if TicketStatus(ticket["status"]) not in RETIRABLE_TICKET_STATUSES:
+                raise ConflictError("Only backlog, ready or blocked tickets can be split")
+            self._require_no_active_work(connection, ticket_id)
+            replacements = [
+                self._retirement_replacement(connection, ticket_id, project_id, replacement_id)
+                for replacement_id in replacement_ticket_ids
+            ]
+
+            timestamp = _iso()
+            next_version = ticket["version"] + 1
+            closed_offers = self._close_ticket_dispatch(connection, ticket_id, timestamp)
+            connection.execute(
+                "UPDATE tickets SET status = ?, version = ?, updated_at = ? WHERE ticket_id = ?",
+                (TicketStatus.SUPERSEDED.value, next_version, timestamp, ticket_id),
+            )
+            entry_id = _id("ctx")
+            source_ref = ",".join(f"ticket:{rid}" for rid in replacement_ticket_ids)
+            connection.execute(
+                """
+                INSERT INTO context_entries
+                    (entry_id, project_id, feature_id, ticket_id, entry_type, content,
+                     source_ref, actor_id, actor_role, created_at)
+                VALUES (?, ?, ?, ?, 'ticket_split', ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry_id,
+                    project_id,
+                    ticket["feature_id"],
+                    ticket_id,
+                    reason,
+                    source_ref,
+                    actor.agent_id,
+                    actor.role.value,
+                    timestamp,
+                ),
+            )
+            # Dependents of retired work stay blocked until a Planner rewires them;
+            # naming them here keeps that consequence visible instead of silent.
+            dependents = [
+                str(row["ticket_id"])
+                for row in connection.execute(
+                    """
+                    SELECT ticket_id FROM ticket_dependencies
+                    WHERE depends_on_ticket_id = ? ORDER BY ticket_id
+                    """,
+                    (ticket_id,),
+                ).fetchall()
+            ]
+            self._event(
+                connection,
+                actor,
+                project_id,
+                "ticket.split",
+                "ticket",
+                ticket_id,
+                next_version,
+                {
+                    "previous_status": ticket["status"],
+                    "reason": reason,
+                    "replacement_ticket_ids": replacement_ticket_ids,
+                    "closed_offers": closed_offers,
+                    "dependent_ticket_ids": dependents,
+                },
+            )
+            return {
+                "ticket": self._ticket(connection, ticket_id),
+                "replacements": replacements,
+                "closed_offers": closed_offers,
+                "dependent_ticket_ids": dependents,
+                "context_entry": self._one(
+                    connection, "SELECT * FROM context_entries WHERE entry_id = ?", (entry_id,)
+                ),
+            }
+
     def cancel_ticket(
         self, actor: Actor, ticket_id: str, expected_version: int, reason: str
     ) -> dict[str, Any]:
@@ -1229,6 +1489,8 @@ class ControlPlaneService:
             Role.PLANNER: [
                 "feature:write",
                 "ticket:plan",
+                "ticket:update",
+                "ticket:split",
                 "ticket:retire",
                 "candidate:requeue",
                 "repository:configure",
@@ -5357,6 +5619,31 @@ class ControlPlaneService:
             ).fetchall()
         ]
         return candidate
+
+    @staticmethod
+    def _dependency_would_cycle(
+        connection: sqlite3.Connection, ticket_id: str, candidate_dependency_id: str
+    ) -> bool:
+        """True if candidate_dependency_id already transitively depends on ticket_id.
+
+        Adding a ticket_id -> candidate_dependency_id edge on top of that existing
+        chain would close a cycle, so the caller must refuse it before writing.
+        """
+        visited = {candidate_dependency_id}
+        queue = [candidate_dependency_id]
+        while queue:
+            current = queue.pop()
+            if current == ticket_id:
+                return True
+            for row in connection.execute(
+                "SELECT depends_on_ticket_id FROM ticket_dependencies WHERE ticket_id = ?",
+                (current,),
+            ).fetchall():
+                next_id = str(row["depends_on_ticket_id"])
+                if next_id not in visited:
+                    visited.add(next_id)
+                    queue.append(next_id)
+        return False
 
     @staticmethod
     def _unfinished_dependency_ids(connection: sqlite3.Connection, ticket_id: str) -> list[str]:

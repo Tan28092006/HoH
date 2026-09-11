@@ -574,6 +574,60 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 idempotency_key,
             )
 
+        @server.tool(name="planner.update_ticket", structured_output=True)
+        def planner_update_ticket(
+            ticket_id: str,
+            expected_version: int,
+            reason: str,
+            title: str | None = None,
+            objective: str | None = None,
+            priority: int | None = None,
+            acceptance_criteria: list[str] | None = None,
+            preservation_constraints: list[str] | None = None,
+            dependency_ids: list[str] | None = None,
+            idempotency_key: str | None = None,
+        ) -> dict[str, Any]:
+            """Update bounded planning fields on an eligible backlog, ready or blocked ticket."""
+            arguments = {
+                "ticket_id": ticket_id,
+                "expected_version": expected_version,
+                "reason": reason,
+                "title": title,
+                "objective": objective,
+                "priority": priority,
+                "acceptance_criteria": acceptance_criteria,
+                "preservation_constraints": preservation_constraints,
+                "dependency_ids": dependency_ids,
+            }
+            return invoke(
+                "planner.update_ticket",
+                arguments,
+                lambda: service.update_ticket_fields(actor, **arguments),
+                idempotency_key,
+            )
+
+        @server.tool(name="planner.split_ticket", structured_output=True)
+        def planner_split_ticket(
+            ticket_id: str,
+            expected_version: int,
+            replacement_ticket_ids: list[str],
+            reason: str,
+            idempotency_key: str | None = None,
+        ) -> dict[str, Any]:
+            """Retire a ticket whose scope is now carried by two or more narrower tickets."""
+            arguments = {
+                "ticket_id": ticket_id,
+                "expected_version": expected_version,
+                "replacement_ticket_ids": replacement_ticket_ids,
+                "reason": reason,
+            }
+            return invoke(
+                "planner.split_ticket",
+                arguments,
+                lambda: service.split_ticket(actor, **arguments),
+                idempotency_key,
+            )
+
         @server.tool(name="planner.append_context", structured_output=True)
         def planner_append_context(
             entry_type: str,
