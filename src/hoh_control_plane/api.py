@@ -21,6 +21,7 @@ from hoh_control_plane.domain import (
     DomainError,
     Role,
 )
+from hoh_control_plane.observability import WorkflowMetrics, correlation_scope
 from hoh_control_plane.seed import seed_demo as seed_demo_data
 from hoh_control_plane.service import ControlPlaneService
 from hoh_control_plane.store import SQLiteStore
@@ -165,7 +166,11 @@ def create_app(
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
-        response = await call_next(request)
+        # One request is one unit of traced work, and the identifier goes back to
+        # the caller so an operator can look up what their own click did.
+        with correlation_scope() as correlation_id:
+            response = await call_next(request)
+        response.headers["X-HOH-Correlation-Id"] = correlation_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -503,6 +508,23 @@ def create_app(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    @app.get("/api/v1/projects/{project_id}/metrics")
+    def metrics(
+        project_id: str,
+        actor: Actor = Depends(actor_dependency),
+    ) -> dict[str, Any]:
+        """Bounded operational measures for one project, aggregates only."""
+        return {"data": WorkflowMetrics(store).project_metrics(actor, project_id)}
+
+    @app.get("/api/v1/projects/{project_id}/traces/{correlation_id}")
+    def trace(
+        project_id: str,
+        correlation_id: str,
+        actor: Actor = Depends(actor_dependency),
+    ) -> dict[str, Any]:
+        """The event chain one request produced, without any event payload."""
+        return {"data": WorkflowMetrics(store).trace(actor, project_id, correlation_id)}
 
     @app.get("/api/v1/projects/{project_id}/agent-activity")
     def agent_activity(

@@ -21,6 +21,7 @@ from hoh_control_plane.auth import (
     requested_transport,
     resolve_actor,
 )
+from hoh_control_plane.observability import correlation_scope
 from hoh_control_plane.domain import (
     Actor,
     AuthorizationError,
@@ -165,7 +166,8 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
             )
 
         try:
-            result = _run_with_contention_retry(run)
+            with correlation_scope():
+                result = _run_with_contention_retry(run)
         except DomainError as error:
             service.record_tool_call(
                 actor,

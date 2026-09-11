@@ -559,8 +559,13 @@ CREATE TABLE IF NOT EXISTS audit_events (
     actor_id TEXT NOT NULL,
     actor_role TEXT NOT NULL,
     payload TEXT NOT NULL,
+    correlation_id TEXT,
+    causation_id TEXT,
     occurred_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS audit_events_correlation
+    ON audit_events (correlation_id);
 
 CREATE TABLE IF NOT EXISTS agent_tool_calls (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -630,6 +635,7 @@ class SQLiteStore:
             self._migrate_agent_presence_skill_columns(connection)
             self._migrate_evidence_provenance(connection)
             self._migrate_workspace_model(connection)
+            self._migrate_event_correlation(connection)
             repaired = self._migrate_stale_migration_table_references(connection)
             self._require_clean_foreign_keys(connection, repaired)
 
@@ -781,6 +787,23 @@ class SQLiteStore:
                     f"Upgraded table {table} has {len(violations)} unresolved "
                     "foreign key references"
                 )
+
+    @staticmethod
+    def _migrate_event_correlation(connection: sqlite3.Connection) -> None:
+        """Add trace columns to an audit trail written before they existed.
+
+        Added rather than rebuilt so no historical event is rewritten. Older
+        events keep NULL, which reads as "not traced" rather than as an event
+        that belonged to no request.
+        """
+        existing = {
+            row["name"] for row in connection.execute('PRAGMA table_info("audit_events")')
+        }
+        if not existing:
+            return
+        for column in ("correlation_id", "causation_id"):
+            if column not in existing:
+                connection.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
 
     @staticmethod
     def _migrate_workspace_model(connection: sqlite3.Connection) -> None:
