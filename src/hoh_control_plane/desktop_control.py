@@ -92,7 +92,8 @@ def create_desktop_app(root: Path):
 
     @app.get('/__local_installation')
     def installation():
-        return {'installation_id': config['installation_id'], 'version': '0.3.1'}
+        from hoh_control_plane import __version__
+        return {'installation_id': config['installation_id'], 'version': __version__}
 
     @app.get('/local/session')
     def session():

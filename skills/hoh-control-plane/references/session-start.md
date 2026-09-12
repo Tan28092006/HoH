@@ -17,6 +17,38 @@ bootstrap assignments and the role inbox. A new chat can resume the same identit
 only after the earlier session has stopped. Two concurrent workers need different
 credentials/identities; HoH leases are keyed by identity, not chat/session ID.
 
+## Event-driven GUI sessions
+
+When the operator requests continuous event-driven work, use
+`work.wait_for_event(project_id=..., timeout_seconds=43200)` after handling ready
+work. Keep the GUI turn open waiting for that MCP result; do not finish the turn
+merely because the inbox is empty. This is an ordinary asynchronous MCP tool,
+usable from Codex app and Claude Code's VS Code extension without creating a
+separate CLI conversation or a recurring model task.
+
+The host sends a wake hint after a committed change. The open tool resolves
+authorized durable work, reserves one notification recipient, and returns a
+small event. The event is not ownership: refresh context, validate readiness,
+then claim with the normal role tool. Keep `event_id`; acknowledge it using
+`ack_event_id` on the next wait once handled or found obsolete. A disconnected
+delivery is replayed until acknowledged; stale claimed offers are suppressed.
+
+For a durable worker job, replace repeated model polling with this same tool:
+pass `job_kind` (`provision`, `submission`, `qa`, or `merge`) and `job_id`.
+The host validates ownership and maintains the job's existing valid ticket
+lease while connected. After the event, invoke its `poll_tool` once to retrieve
+the authoritative result. Resume the correct assignment/worktree afterward.
+Do not call an idle-work wait while holding unrelated unfinished work.
+
+Codex's configured MCP tool timeout must exceed the wait; generated profiles
+set 86400 seconds. Claude's documented default is about 28 hours; check shorter
+client overrides. Server maintenance and transport waits consume no model
+polling turns. Timeout/reconnection can require a new turn; this is not an
+unlimited background agent. Stop, closing the chat, sleeping the machine or
+stopping HoH ends the wait. A dead process's presence expires within 90 seconds.
+Ordinary MCP cannot restart a stopped chat. Ask and stop when human input is
+needed instead of hiding a question inside a long wait.
+
 For an active assignment, resolve current ticket context and its required fields.
 In supervised deployments, a queued job waits for the service-host worker pool.
 Keep its ID and poll it; do not launch a duplicate local worker. Report a stale

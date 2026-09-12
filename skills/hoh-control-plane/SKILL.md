@@ -21,7 +21,12 @@ For a new installation or a changed machine read
 For an execution role, call `agent.register` once per session and `work.inbox`
 before discovery. When a task resumes after waiting, call `work.inbox` again:
 offers are durable but short-lived, and the first ticket lease is authoritative.
-For an unattended Codex or Claude Code execution worker, read
+For operator-requested event-driven GUI work, read
+[`references/session-start.md`](references/session-start.md) and use
+`work.wait_for_event` to keep the current turn waiting without model polling.
+Do not create a scheduled task for this mode. Each simultaneous chat needs its
+own instance. A closed/stopped chat cannot be restarted by this MCP wait.
+For a timer-based unattended Codex or Claude Code execution worker, read
 [`references/wakeup.md`](references/wakeup.md) before enabling a heartbeat or
 loop.
 
@@ -68,8 +73,10 @@ active leases/job IDs before claiming or starting work. Use dev.prepare_worktree
 for provisioning/takeover. If it returns provision_id, poll dev.get_worktree_provision
 before editing. Never reassign another agent's mutable worktree after lease expiry.
 
-Queue submission/test/merge once, retain its ID and poll that job. Honor retry
-hints; otherwise space polls roughly 10-30 seconds within the lease-renewal window.
+Queue submission/test/merge once and retain its ID. In event mode, wait on that
+job with `work.wait_for_event`, then retrieve its result once through the named
+poll tool. For older servers without event waiting, honor retry hints and space
+polls roughly 10-30 seconds within the lease-renewal window.
 Presence heartbeat is not a ticket heartbeat. If acknowledgment is lost, reconcile
 ticket/candidate/job state before retrying. Reuse an idempotency key only where the
 schema supports it. Never invent tools or repair state with direct SQL.
