@@ -59,13 +59,27 @@ def test_create_project_and_get_four_bound_prompts(qa_app, browser_case):
     page.reload()
     expect(page.locator('#project-picker').locator('option')).to_have_count(2)
     page.get_by_role('button', name='Prompt cho agent', exact=True).click()
+    page.get_by_label('Instance của chat').fill('codex-dev-2')
+    page.get_by_role('button', name='Áp dụng instance', exact=True).click()
     for role in ['Planner', 'Developer', 'QA', 'Integrator']:
         page.get_by_role('button', name=role, exact=True).click()
         expect(page.get_by_label('Prompt cài đặt')).to_have_value(re.compile('new-shop'))
         expect(page.get_by_label('Prompt cài đặt')).to_have_value(re.compile('session.bootstrap'))
+        expect(page.get_by_label('Prompt cài đặt')).to_have_value(re.compile('--instance codex-dev-2'))
+        expect(page.get_by_label('Prompt cài đặt')).to_have_value(re.compile('work.wait_for_event'))
     for width in [1440, 768, 375]:
         page.set_viewport_size({'width': width, 'height': 900})
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    assert not errors
+
+
+def test_agent_wait_monitor_is_visible_without_spawning_agents(qa_app, browser_case):
+    from playwright.sync_api import expect
+    page, errors, _ = browser_case
+    page.goto(qa_app['url'] + '/?project=alpha')
+    page.get_by_role('button', name='Phiên agent', exact=True).click()
+    expect(page.get_by_text('Chưa có phiên chờ sự kiện trên project này.', exact=True)).to_be_visible()
+    expect(page.get_by_text('Chat cần mở và đang chờ MCP. Bấm Stop hoặc đóng chat sẽ ngắt chờ.', exact=True)).to_be_visible()
     assert not errors
 
 
