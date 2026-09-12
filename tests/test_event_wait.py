@@ -241,4 +241,6 @@ def test_one_ticket_wakes_one_idle_agent_instead_of_racing_models(service, actor
             db.execute("UPDATE agent_event_waiters SET expires_at='2000-01-01' WHERE agent_id=?", (actors['developer'].agent_id,))
         rerouted = await wait_for_event(service, actors['developer_2'], 'project-1', timeout_seconds=.1)
         assert rerouted['status'] == 'event'
+        returned = await wait_for_event(service, actors['developer'], 'project-1', timeout_seconds=.1)
+        assert returned['status'] == 'timeout', 'Reconnecting must not revive an old reservation'
     asyncio.run(check())
