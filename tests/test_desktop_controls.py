@@ -79,3 +79,47 @@ def test_project_bound_agent_installs_both_clients_and_preserves_other_settings(
     assert profile_actor('shop', 'developer', 'second').agent_id != profile_actor('shop', 'developer', 'primary').agent_id
     with pytest.raises(Exception):
         install_profile(root, 'missing', 'planner', 'primary', 'codex', tmp_path / 'other')
+
+
+def test_drain_waits_for_workers_and_reopen_restores_admission(desktop):
+    import sqlite3
+    from hoh_control_plane.desktop_control import shutdown_ready, prepare_desktop_start
+    client, root = desktop
+    client.post('/local/shutdown', headers=headers(client))
+    assert not shutdown_ready(root)  # A quiet period allows an in-flight tick to publish.
+    marker = root / 'config/shutdown.request'
+    content = json.loads(marker.read_text())
+    content['requested_at'] = 0
+    marker.write_text(json.dumps(content))
+    database = json.loads((root / 'config/settings.json').read_text())['database_path']
+    with sqlite3.connect(database) as db:
+        db.execute("INSERT INTO worker_executions (execution_id, runner_id, job_kind, job_id, status, started_at, heartbeat_at) VALUES ('x','test','qa','test-job','RUNNING','now','now')")
+    assert not shutdown_ready(root)
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE worker_executions SET status='FINISHED' WHERE execution_id='x'")
+    assert shutdown_ready(root)
+    prepare_desktop_start(root)
+    assert not marker.exists()
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT state_value FROM runtime_state WHERE state_key='paused'").fetchone()[0] == '0'
+
+
+def test_explicit_skill_upgrade_keeps_backup_and_rolls_back_config_conflict(desktop, tmp_path):
+    from hoh_control_plane.local_agent import install_profile
+    client, root = desktop
+    client.post('/local/projects', json={'project_id': 'shop', 'name': 'Shop'}, headers=headers(client))
+    home = tmp_path / 'upgrade-client'
+    result = install_profile(root, 'shop', 'planner', 'primary', 'codex', home)
+    skill = home / '.codex/skills/hoh-planner/SKILL.md'
+    skill.write_text('old user customization')
+    with pytest.raises(ValueError):
+        install_profile(root, 'shop', 'planner', 'primary', 'codex', home)
+    upgraded = install_profile(root, 'shop', 'planner', 'primary', 'codex', home, upgrade_skills=True)
+    assert len(upgraded['skill_backups']) == 1
+    assert (Path(upgraded['skill_backups'][0]) / 'SKILL.md').read_text() == 'old user customization'
+    config = home / '.codex/config.toml'
+    config.write_text(config.read_text().replace('hoh_control_plane.local_agent', 'conflicting_module'))
+    skill.write_text('preserve me on failure')
+    with pytest.raises(ValueError):
+        install_profile(root, 'shop', 'planner', 'primary', 'codex', home, upgrade_skills=True)
+    assert skill.read_text() == 'preserve me on failure'
