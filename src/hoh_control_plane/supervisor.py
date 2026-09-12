@@ -142,6 +142,11 @@ class Supervisor:
     def _submit(self, kind, identifier):
         execution_id = uuid4().hex
         with self.service.store.connection(immediate=True) as db:
+            # Serialize admission with operator pause; the earlier tick snapshot
+            # may predate a shutdown request while scanning the durable queue.
+            paused = db.execute("SELECT state_value FROM runtime_state WHERE state_key = 'paused'").fetchone()
+            if self.stopping.is_set() or (paused and paused[0] == '1'):
+                return None
             db.execute('''INSERT INTO worker_executions
                 (execution_id, runner_id, job_kind, job_id, status, started_at, heartbeat_at)
                 VALUES (?, ?, ?, ?, 'RUNNING', ?, ?)''', (execution_id, self.runner_id, kind, identifier, now(), now()))
@@ -209,7 +214,10 @@ class Supervisor:
                 if len(self.active) >= self.max_workers:
                     break
                 if key not in self.active:
-                    self.active[key] = self._submit(*key)
+                    future = self._submit(*key)
+                    if future is None:
+                        break
+                    self.active[key] = future
                     started += 1
         return {'started': started, 'active': len(self.active)}
 
