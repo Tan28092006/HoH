@@ -1,8 +1,8 @@
 # Start with only installed skills and an authenticated MCP
 
 When an operator prompt names a project ID, call `session.bootstrap(project_id=...)`
-with that exact ID and check `selected_project_id`, `identity.role` and
-`identity.project_ids` before registration or mutation. A chat's working directory
+with that exact ID and check `selected_project_id`, plus `role` and `project_ids`
+inside `identity`, before registration or mutation. A chat's working directory
 does not select a project. Never fall back to a different project or MCP role when
 the expected profile is unavailable. Desktop-generated profiles are scoped to one
 project and role; another concurrent worker of that role needs its own instance.
