@@ -103,3 +103,25 @@ def test_dirty_integration_checkout_cannot_be_silently_overwritten(service, tmp_
     with pytest.raises(ValidationError, match='clean'):
         service.git_worktrees.fast_forward_default_branch(repository_path=str(repo), default_branch='main',
             expected_base_commit=base, candidate_commit=base)
+
+
+def test_recovery_retains_changed_ticket_for_operator_review(service, actors, seeded, tmp_path, monkeypatch):
+    _, _, job = queued_merge(service, actors, seeded, tmp_path)
+    complete = service._complete_queued_merge
+    monkeypatch.setattr(service, '_complete_queued_merge', lambda *a, **k: (_ for _ in ()).throw(SystemExit('worker died')))
+    with pytest.raises(SystemExit):
+        service.execute_queued_merge(job['merge_job_id'])
+    monkeypatch.setattr(service, '_complete_queued_merge', complete)
+    with service.store.connection(immediate=True) as db:
+        db.execute('UPDATE tickets SET version = version + 1 WHERE ticket_id = ?', (job['ticket_id'],))
+    recovered = service.reconcile_merge_job(ADMIN, job['merge_job_id'])
+    assert recovered['status'] == 'RUNNING'
+    assert 'Reconciliation required' in recovered['error_message']
+
+
+def test_expired_merge_cannot_execute_after_authorization_was_revoked(service, actors, seeded, tmp_path):
+    repo, candidate, job = queued_merge(service, actors, seeded, tmp_path)
+    with service.store.connection(immediate=True) as db:
+        db.execute("UPDATE leases SET expires_at = '2000-01-01T00:00:00Z' WHERE lease_id = ?", (job['lease_id'],))
+    assert service.execute_queued_merge(job['merge_job_id'])['status'] == 'FAILED'
+    assert _git(repo, 'rev-parse', 'HEAD') == candidate['base_commit']

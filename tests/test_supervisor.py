@@ -159,3 +159,24 @@ def test_operations_check_reports_missing_supervisor(service):
     report = check_health(service)
     assert report['healthy'] is False
     assert 'supervisor_stale' in report['alerts']
+
+
+def test_another_host_cannot_consume_local_artifact_jobs(service):
+    from hoh_control_plane.supervisor import Supervisor
+    from hoh_control_plane.domain import ConflictError
+    import pytest
+    with service.store.connection(immediate=True) as db:
+        db.execute('INSERT INTO runtime_state VALUES (?, ?, ?)', ('execution_host', 'another-host:other-filesystem', '2026-01-01T00:00:00+00:00'))
+    with pytest.raises(ConflictError, match='host'):
+        with Supervisor(service):
+            pytest.fail('A second host must not silently consume jobs with local paths')
+
+
+def test_worker_mode_typo_cannot_fall_back_to_unbounded_execution(monkeypatch, tmp_path):
+    from hoh_control_plane import mcp_server
+    from hoh_control_plane.domain import ValidationError
+    import pytest
+    monkeypatch.setenv('HOH_WORKER_MODE', 'supevised')
+    monkeypatch.setattr(mcp_server.subprocess, 'Popen', lambda *a, **kw: None)
+    with pytest.raises(ValidationError, match='HOH_WORKER_MODE'):
+        mcp_server._start_qa_test_worker(tmp_path / 'unused.db', 'testrun_queued')
