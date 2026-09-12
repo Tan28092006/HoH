@@ -110,6 +110,10 @@ def _deliver(service, actor, project, candidates):
                 if source is None or source['status'] not in {'pending', 'offered'}:
                     db.execute("UPDATE agent_event_deliveries SET state='obsolete' WHERE event_id=?", (pending['event_id'],))
         for key, payload in candidates:
+            reserved = db.execute("SELECT 1 FROM agent_event_deliveries d JOIN agent_event_waiters w ON w.agent_id=d.agent_id WHERE d.project_id=? AND d.event_key=? AND d.agent_id<>? AND d.state='pending' AND w.state IN ('waiting','notified') AND w.expires_at>? LIMIT 1",
+                                  (project, key, actor.agent_id, _iso())).fetchone()
+            if reserved:
+                continue
             exists = db.execute('SELECT 1 FROM agent_event_deliveries WHERE agent_id=? AND project_id=? AND event_key=?', (actor.agent_id, project, key)).fetchone()
             if exists:
                 continue
