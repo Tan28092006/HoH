@@ -5,6 +5,7 @@ import hmac
 import json
 from pathlib import Path
 import secrets
+import sqlite3
 import threading
 import time
 
@@ -14,6 +15,34 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from hoh_control_plane.api import create_app, ProjectCreate
 from hoh_control_plane.domain import Actor, Role
 from hoh_control_plane.supervisor import operations_status, set_paused
+
+
+def shutdown_ready(root: Path):
+    marker = root / 'config/shutdown.request'
+    if not marker.exists():
+        return False
+    request = json.loads(marker.read_text(encoding='utf-8'))
+    if time.time() - request['requested_at'] < 2:
+        return False
+    config = json.loads((root / 'config/settings.json').read_text(encoding='utf-8'))
+    database = Path(config['database_path']).resolve()
+    with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as db:
+        return db.execute("SELECT count(*) FROM worker_executions WHERE status='RUNNING'").fetchone()[0] == 0
+
+
+def prepare_desktop_start(root: Path):
+    marker = root / 'config/shutdown.request'
+    if not marker.exists():
+        return
+    request = json.loads(marker.read_text(encoding='utf-8'))
+    if request['resume_on_start']:
+        from hoh_control_plane.service import ControlPlaneService
+        from hoh_control_plane.store import SQLiteStore
+        config = json.loads((root / 'config/settings.json').read_text(encoding='utf-8'))
+        store = SQLiteStore(Path(config['database_path']))
+        store.initialize()
+        set_paused(ControlPlaneService(store), False, reason='Desktop reopened after its requested shutdown')
+    marker.unlink()
 
 
 def create_desktop_app(root: Path):
