@@ -163,3 +163,65 @@ def test_consumed_offer_does_not_replay_stale_work_to_another_session(service, a
         result = await wait_for_event(service, actors['developer'], 'project-1', timeout_seconds=.1)
         assert result['status'] == 'timeout'
     asyncio.run(check())
+
+
+@pytest.mark.parametrize('timeout', [0, -1, 43201, True, float('nan'), float('inf'), '1'])
+def test_invalid_wait_limits_are_rejected(service, actors, timeout):
+    from hoh_control_plane.event_wait import wait_for_event
+    from hoh_control_plane.domain import ValidationError
+    with pytest.raises(ValidationError):
+        asyncio.run(wait_for_event(service, actors['developer'], 'project-1', timeout_seconds=timeout))
+
+
+def test_wrong_ack_and_partial_job_reference_are_rejected(service, actors):
+    from hoh_control_plane.event_wait import wait_for_event
+    from hoh_control_plane.domain import ValidationError
+    register(service, actors['developer'])
+    async def check():
+        with pytest.raises(AuthorizationError):
+            await wait_for_event(service, actors['developer'], 'project-1', ack_event_id='not-owned', timeout_seconds=1)
+        with pytest.raises(ValidationError):
+            await wait_for_event(service, actors['developer'], 'project-1', job_kind='qa', timeout_seconds=1)
+        with pytest.raises(AuthorizationError):
+            await wait_for_event(service, actors['developer'], 'project-1', job_kind='qa', job_id='private', timeout_seconds=1)
+    asyncio.run(check())
+
+
+def test_notification_failure_keeps_committed_work_and_recovery_finds_it(service, actors, monkeypatch):
+    import hoh_control_plane.event_wait as events
+    register(service, actors['developer'])
+    monkeypatch.setattr(events, 'notify_waiters', lambda connection: None)
+    monkeypatch.setattr(events, 'RECOVERY_SECONDS', .05)
+    async def check():
+        waiting = asyncio.create_task(events.wait_for_event(service, actors['developer'], 'project-1', timeout_seconds=1))
+        await asyncio.sleep(.1)
+        release(service, actors)
+        assert (await waiting)['event']['ticket_ref'] == 'ticket:DEV-142'
+    asyncio.run(check())
+
+
+def test_separate_publisher_process_wakes_open_mcp_session(service, actors, tmp_path):
+    import os
+    import sys
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    async def check():
+        environment = {**os.environ, 'HOH_DATABASE_PATH': str(service.store.path),
+                       'HOH_AGENT_ROLE': 'developer', 'HOH_AGENT_ID': actors['developer'].agent_id,
+                       'HOH_PROJECT_IDS': 'project-1', 'HOH_MCP_TRANSPORT': 'stdio'}
+        environment.pop('HOH_DATABASE_URL', None)
+        async with stdio_client(StdioServerParameters(command=sys.executable, args=['-m','hoh_control_plane.mcp_server'], env=environment)) as (read, write):
+            async with ClientSession(read, write) as client:
+                await client.initialize()
+                result = await client.call_tool('agent.register', {'skills': ['hoh-developer']})
+                assert not result.isError
+                waiting = asyncio.create_task(client.call_tool('work.wait_for_event', {'project_id':'project-1','timeout_seconds':5}))
+                await asyncio.sleep(.3)
+                assert not waiting.done()
+                started = time.monotonic()
+                release(service, actors)
+                result = await waiting
+                assert not result.isError, result
+                assert result.structuredContent['event']['ticket_ref'] == 'ticket:DEV-142'
+                assert time.monotonic() - started < 1.5
+    asyncio.run(check())
