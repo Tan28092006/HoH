@@ -201,6 +201,7 @@ class ContextMixin:
                 ).fetchall()
             ]
         inherited = self._inherited_constraints(ticket_id, ticket)
+        experience = self._relevant_experience(project_id, ticket)
         payload = {
             "context_ref": f"ctx:ticket:{ticket_id}:v{ticket['version']}",
             "context_version": ticket["version"],
@@ -215,6 +216,7 @@ class ContextMixin:
             "test_runs": test_runs,
             "known_failures": failures,
             "inherited_constraints": inherited,
+            "experience": experience,
         }
         source_versions = {
             "ticket_version": ticket["version"],

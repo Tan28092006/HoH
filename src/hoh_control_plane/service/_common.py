@@ -150,6 +150,7 @@ _TICKET_SECTION_PRIORITY: dict[Role, tuple[str, ...]] = {
     Role.DEVELOPER: (
         "worktree",
         "known_failures",
+        "experience",
         "context_entries",
         "candidate",
         "dependencies",
@@ -165,6 +166,7 @@ _TICKET_SECTION_PRIORITY: dict[Role, tuple[str, ...]] = {
         "context_entries",
         "dependencies",
         "feature",
+        "experience",
         "inherited_constraints",
     ),
     Role.PLANNER: (
@@ -175,6 +177,7 @@ _TICKET_SECTION_PRIORITY: dict[Role, tuple[str, ...]] = {
         "candidate",
         "test_runs",
         "worktree",
+        "experience",
         "inherited_constraints",
     ),
     Role.INTEGRATOR: (
@@ -185,6 +188,7 @@ _TICKET_SECTION_PRIORITY: dict[Role, tuple[str, ...]] = {
         "dependencies",
         "worktree",
         "context_entries",
+        "experience",
         "inherited_constraints",
     ),
 }
@@ -196,6 +200,7 @@ _FALLBACK_SECTION_PRIORITY = (
     "dependencies",
     "feature",
     "test_runs",
+    "experience",
     "inherited_constraints",
 )
 

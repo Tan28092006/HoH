@@ -276,6 +276,59 @@ CREATE TABLE IF NOT EXISTS context_entries (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS spec_sections (
+    section_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    document TEXT NOT NULL,
+    heading_path TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    -- A span rather than the prose: the document stays the source of truth in
+    -- git, and this row only says which part of it to open.
+    start_line INTEGER NOT NULL,
+    end_line INTEGER NOT NULL,
+    token_estimate INTEGER NOT NULL,
+    -- The revision this section last moved at, which is what a reader compares
+    -- its own cursor against to learn whether it has drifted.
+    changed_at_revision INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'present',
+    first_seen_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, document, heading_path)
+);
+
+CREATE INDEX IF NOT EXISTS spec_sections_cursor
+    ON spec_sections(project_id, changed_at_revision);
+
+CREATE TABLE IF NOT EXISTS spec_revisions (
+    project_id TEXT PRIMARY KEY REFERENCES projects(project_id),
+    revision INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS experience_notes (
+    note_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    -- The code this was learned in, not the ticket it was learned on. A ticket
+    -- closes; the trap in the file stays. Indexing by scope is what lets a note
+    -- reach an agent who was not there when it was written.
+    file_scope TEXT NOT NULL,
+    lesson TEXT NOT NULL,
+    -- Provenance so a reader can weigh it, held as a plain reference rather than
+    -- a foreign key: removing the ticket must not remove what it taught.
+    learned_on_ticket TEXT,
+    actor_id TEXT NOT NULL,
+    actor_role TEXT NOT NULL,
+    -- The same lesson learned again is not a second lesson. Counting instead of
+    -- appending is what keeps this from becoming the prose nobody reads, and
+    -- turns repetition into the signal that it is worth reading first.
+    times_seen INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS experience_notes_project
+    ON experience_notes(project_id, times_seen DESC, last_seen_at DESC);
+
 CREATE TABLE IF NOT EXISTS leases (
     lease_id TEXT PRIMARY KEY,
     ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),

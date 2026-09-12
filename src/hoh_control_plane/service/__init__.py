@@ -66,6 +66,8 @@ from hoh_control_plane.service._common import (
 from hoh_control_plane.service.planning import PlanningMixin
 from hoh_control_plane.service.discovery import DiscoveryMixin
 from hoh_control_plane.service.context import ContextMixin
+from hoh_control_plane.service.experience import ExperienceMixin
+from hoh_control_plane.service.spec import SpecMixin
 from hoh_control_plane.service.worktrees import WorktreeMixin
 from hoh_control_plane.service.integration import IntegrationMixin
 from hoh_control_plane.service.qa import QaMixin
@@ -82,6 +84,8 @@ class ControlPlaneService(
     PlanningMixin,
     DiscoveryMixin,
     ContextMixin,
+    ExperienceMixin,
+    SpecMixin,
     WorktreeMixin,
     IntegrationMixin,
     QaMixin,

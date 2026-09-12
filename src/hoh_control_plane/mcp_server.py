@@ -357,6 +357,46 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
             lambda: service.get_ticket_context(actor, ticket_ref, token_budget),
         )
 
+    @server.tool(name="spec.digest", structured_output=True)
+    def spec_digest(project_id: str, after_revision: int = 0, limit: int = 50) -> dict[str, Any]:
+        """Which specification sections moved since a revision, with line spans to open.
+
+        From revision 0 this is the table of contents. From a later one it is only
+        what changed, so staying current costs a cursor rather than a re-read.
+        """
+        arguments = {
+            "project_id": project_id,
+            "after_revision": after_revision,
+            "limit": limit,
+        }
+        return invoke(
+            "spec.digest",
+            arguments,
+            lambda: service.spec_digest(actor, **arguments),
+        )
+
+    @server.tool(name="experience.record", structured_output=True)
+    def experience_record(
+        ticket_id: str, lesson: str, file_scope: list[str] | None = None
+    ) -> dict[str, Any]:
+        """File a lesson against the file scope it was learned in, for whoever works there next."""
+        arguments = {"ticket_ref": ticket_id, "lesson": lesson, "file_scope": file_scope}
+        return invoke(
+            "experience.record",
+            arguments,
+            lambda: service.record_experience(actor, **arguments),
+        )
+
+    @server.tool(name="experience.list", structured_output=True)
+    def experience_list(project_id: str, limit: int = 5) -> dict[str, Any]:
+        """Read the lessons this project has accumulated, most reinforced first."""
+        arguments = {"project_id": project_id, "limit": limit}
+        return invoke(
+            "experience.list",
+            arguments,
+            lambda: {"notes": service.list_experience(actor, **arguments)},
+        )
+
     if actor.role in {Role.DEVELOPER, Role.QA, Role.INTEGRATOR}:
 
         @server.tool(name="work.inbox", structured_output=True)
@@ -790,6 +830,16 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 "planner.requirement_coverage",
                 arguments,
                 lambda: service.requirement_coverage(actor, **arguments),
+            )
+
+        @server.tool(name="spec.sync", structured_output=True)
+        def spec_sync(project_id: str, document: str, text: str) -> dict[str, Any]:
+            """Re-index the specification, reporting which sections were added, changed or removed."""
+            arguments = {"project_id": project_id, "document": document, "text": text}
+            return invoke(
+                "spec.sync",
+                arguments,
+                lambda: service.sync_spec(actor, **arguments),
             )
 
         @server.tool(name="planner.append_context", structured_output=True)
