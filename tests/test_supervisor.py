@@ -39,6 +39,20 @@ def test_paused_supervisor_keeps_queued_work_durable(service, actors, seeded, tm
         assert service._qa_test_job(db, job['test_run_id'])['status'] == 'COMPLETED'
 
 
+def test_pause_during_queue_scan_prevents_a_late_worker_start(service, monkeypatch):
+    from hoh_control_plane.supervisor import Supervisor, set_paused
+    with Supervisor(service, max_workers=1) as supervisor:
+        def pending_after_operator_pause():
+            set_paused(service, True, reason='desktop drain during queue scan')
+            return [('qa', 'queued-before-shutdown')]
+        monkeypatch.setattr(supervisor, '_pending', pending_after_operator_pause)
+        monkeypatch.setattr(supervisor, '_execute', lambda *args: None)
+        assert supervisor.tick()['started'] == 0
+        assert not supervisor.active
+        with service.store.connection() as db:
+            assert db.execute('SELECT count(*) FROM worker_executions').fetchone()[0] == 0
+
+
 def test_supervised_mcp_does_not_launch_unbounded_detached_workers(monkeypatch, tmp_path):
     from hoh_control_plane import mcp_server
     monkeypatch.setenv('HOH_WORKER_MODE', 'supervised')
