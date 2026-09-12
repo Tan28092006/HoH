@@ -191,3 +191,23 @@ def test_local_reads_close_database_handles(desktop, monkeypatch):
     finally:
         for connection in connections:
             connection.close()
+
+
+def test_gui_wait_profiles_have_long_timeout_and_unique_instances(desktop, tmp_path):
+    import tomllib
+    from hoh_control_plane.local_agent import install_profile, make_prompts
+    client, root = desktop
+    client.post('/local/projects', json={'project_id': 'shop', 'name': 'Shop'}, headers=headers(client))
+    home = tmp_path / 'gui-client'
+    result = install_profile(root, 'shop', 'developer', 'codex-1', 'codex', home)
+    config = home / '.codex/config.toml'
+    assert tomllib.loads(config.read_text())['mcp_servers'][result['server_name']]['tool_timeout_sec'] == 86400
+    # Upgrading an otherwise identical 0.3.1 profile preserves unrelated config.
+    config.write_text('model = "configured-model"\n' + config.read_text().replace('tool_timeout_sec = 86400\n', ''))
+    install_profile(root, 'shop', 'developer', 'codex-1', 'codex', home)
+    assert tomllib.loads(config.read_text())['model'] == 'configured-model'
+    prompt = make_prompts(root, 'shop', instance='codex-1')['developer']
+    assert 'work.wait_for_event' in prompt
+    assert '--instance codex-1' in prompt
+    assert result['server_name'] in prompt
+    assert client.get('/local/agents?project_id=shop').json() == {'agents': []}
