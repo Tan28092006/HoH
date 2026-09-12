@@ -299,10 +299,10 @@ def test_qa_records_a_failing_registered_test_without_accepting_the_candidate(
     assert context["test_runs"][0]["exit_code"] == 7
 
 
-def test_qa_refuses_to_run_when_the_candidate_worktree_becomes_dirty(
+def test_qa_uses_frozen_snapshot_when_the_developer_worktree_becomes_dirty(
     service, actors, seeded, tmp_path: Path
 ) -> None:
-    test_command = [sys.executable, "-c", "print('should not execute')"]
+    test_command = [sys.executable, "-c", "from pathlib import Path; assert not Path('untracked.txt').exists();print('frozen source')"]
     ticket, _candidate, qa_claim = _candidate_waiting_for_qa(
         service, actors, seeded, tmp_path, test_command
     )
@@ -310,10 +310,9 @@ def test_qa_refuses_to_run_when_the_candidate_worktree_becomes_dirty(
     worktree = Path(context["worktree"]["worktree_path"])
     (worktree / "untracked.txt").write_text("not frozen\n", encoding="utf-8")
 
-    with pytest.raises(ValidationError, match="clean"):
-        service.run_project_tests(
-            actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"]
-        )
+    result = service.run_project_tests(actors['qa'], ticket['ticket_id'], qa_claim['lease']['lease_id'])
+    assert result['test_run']['exit_code'] == 0
+    assert (worktree / 'untracked.txt').read_text() == 'not frozen\n'
 
 
 def test_test_command_requires_a_verified_project_repository(service, actors, seeded) -> None:

@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import sys
 import subprocess
+import signal
 import time
 
 from hoh_control_plane.domain import Actor, Role
@@ -121,9 +122,22 @@ def test_supervisor_crash_is_recovered_from_durable_execution_record(service, ac
         while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
             time.sleep(0.05)
         assert ready.exists()
-        process.kill()
+        with service.store.connection() as db:
+            owner_pid = int(db.execute("SELECT state_value FROM runtime_state WHERE state_key = 'supervisor_pid'").fetchone()[0])
+        os.kill(owner_pid, signal.SIGTERM)
         process.wait(timeout=5)
-        with Supervisor(service, max_workers=1) as supervisor:
+        from contextlib import ExitStack
+        from hoh_control_plane.domain import ConflictError
+        with ExitStack() as stack:
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    supervisor = stack.enter_context(Supervisor(service, max_workers=1))
+                    break
+                except ConflictError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.05)
             deadline = time.monotonic() + 8
             while time.monotonic() < deadline:
                 supervisor.recover()

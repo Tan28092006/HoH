@@ -33,6 +33,8 @@ hoh-api = "hoh_control_plane.__main__:main"
 hoh-mcp = "hoh_control_plane.mcp_server:main"
 hoh-scheduler = "hoh_control_plane.scheduler:main"
 hoh-agent-kit = "hoh_control_plane.agent_kit:main"
+hoh-supervisor = "hoh_control_plane.supervisor:main"
+hoh-ops = "hoh_control_plane.operations:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hoh_control_plane"]

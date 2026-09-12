@@ -1045,7 +1045,10 @@ class IntegrationMixin:
             except DomainError as error:
                 return self._merge_needs_attention(merge_job_id, str(error))
         if head == intent['base_commit']:
-            return self.fail_queued_merge(merge_job_id, 'Recovered interrupted merge: mainline is unchanged; a new authorized job is required')
+            reason = job['error_message']
+            if reason:
+                reason = reason.removeprefix('Reconciliation required: ')
+            return self.fail_queued_merge(merge_job_id, reason or 'Recovered interrupted merge: mainline is unchanged; a new authorized job is required')
         return self._merge_needs_attention(merge_job_id, 'Mainline diverged from both the authorized base and candidate')
 
     def _merge_git_inputs(

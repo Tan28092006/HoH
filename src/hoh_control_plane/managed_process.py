@@ -31,7 +31,10 @@ try:
 except OSError:
     sys.stderr.write('[hoh:exec-error] Command could not be started\n')
     sys.exit(127)
-sys.exit(child.wait())
+code = child.wait()
+# The POSIX watchdog may still be reading stdin. Avoid interpreter shutdown
+# trying to acquire its buffered-reader lock; the owner reaps the process group.
+os._exit(code if 0 <= code <= 255 else 1)
 '''
 
 

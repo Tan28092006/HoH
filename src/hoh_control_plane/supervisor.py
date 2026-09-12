@@ -59,6 +59,7 @@ def operations_status(service):
     heartbeat = state.get('supervisor_heartbeat')
     stale = heartbeat is None or (datetime.now(UTC) - datetime.fromisoformat(heartbeat)).total_seconds() > 15
     return {'paused': state.get('paused') == '1', 'supervisor_stale': stale,
+            'supervisor_pid': state.get('supervisor_pid'),
             'supervisor_heartbeat': heartbeat, 'queues': queues, 'needs_attention': attention}
 
 
@@ -74,6 +75,7 @@ class Supervisor:
         self.stopping = threading.Event()
         self.pool = None
         self.lock = exclusive_file_lock(service.store.artifact_root / 'supervisor.lock')
+        self.last_recovery = 0.0
 
     def __enter__(self):
         self.lock.__enter__()
@@ -112,6 +114,8 @@ class Supervisor:
             merges = [r[0] for r in db.execute("SELECT merge_job_id FROM merge_jobs WHERE status = 'RUNNING' ORDER BY created_at LIMIT 100").fetchall()]
         for execution in interrupted:
             kind, identifier = execution['job_kind'], execution['job_id']
+            if (kind, identifier) in self.active:
+                continue
             try:
                 with job_lock(self.service, kind, identifier):
                     job = self._job(kind, identifier)
@@ -171,7 +175,7 @@ class Supervisor:
             job = self._job(kind, identifier)
             if kind == 'merge' and job and job['status'] == 'RUNNING':
                 self.service.reconcile_merge_job(ADMIN, identifier)
-            elif job and job['status'] == 'RUNNING':
+            elif job and (job['status'] == 'RUNNING' or (job['status'] == 'QUEUED' and outcome != 'exit 0')):
                 getattr(self.service, JOBS[kind][3])(identifier, 'Worker stopped before publishing a result: ' + outcome)
             with self.service.store.connection(immediate=True) as db:
                 db.execute("UPDATE worker_executions SET status = 'FINISHED', completed_at = ?, outcome = ? WHERE execution_id = ?",
@@ -184,10 +188,15 @@ class Supervisor:
                 if future.exception() is not None:
                     print(json.dumps({'event': 'worker_error', 'kind': key[0], 'job_id': key[1], 'error_type': type(future.exception()).__name__}), flush=True)
                 del self.active[key]
+        if time.monotonic() - self.last_recovery > 5:
+            self.recover()
+            self.last_recovery = time.monotonic()
         with self.service.store.connection(immediate=True) as db:
             paused = db.execute("SELECT state_value FROM runtime_state WHERE state_key = 'paused'").fetchone()
             db.execute("DELETE FROM runtime_state WHERE state_key = 'supervisor_heartbeat'")
             db.execute('INSERT INTO runtime_state VALUES (?, ?, ?)', ('supervisor_heartbeat', now(), now()))
+            db.execute("DELETE FROM runtime_state WHERE state_key = 'supervisor_pid'")
+            db.execute('INSERT INTO runtime_state VALUES (?, ?, ?)', ('supervisor_pid', str(os.getpid()), now()))
         started = 0
         if not self.stopping.is_set() and not (paused and paused[0] == '1'):
             for key in self._pending():
