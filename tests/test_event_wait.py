@@ -12,6 +12,17 @@ def register(service, actor):
     service.register_agent(actor, skills=[actor.role.value], capacity=1)
 
 
+@pytest.fixture(autouse=True)
+def planned_ticket(service, seeded):
+    with service.store.connection(immediate=True) as db:
+        db.execute("UPDATE tickets SET status='BACKLOG' WHERE ticket_id='DEV-142'")
+        db.execute("UPDATE work_queue SET status='cancelled' WHERE ticket_id='DEV-142'")
+
+
+def release(service, actors):
+    service.set_ticket_ready(actors['planner'], 'DEV-142', expected_version=1)
+
+
 def test_wait_delivers_committed_work_without_model_polling(service, actors, seeded):
     from hoh_control_plane.event_wait import wait_for_event
     register(service, actors['developer'])
@@ -20,7 +31,7 @@ def test_wait_delivers_committed_work_without_model_polling(service, actors, see
         await asyncio.sleep(.1)
         assert not waiting.done()
         started = time.monotonic()
-        service.release_ticket(actors['planner'], 'DEV-142')
+        release(service, actors)
         result = await waiting
         assert time.monotonic() - started < 1
         assert result['event']['ticket_ref'] == 'ticket:DEV-142'
@@ -33,7 +44,7 @@ def test_wait_delivers_committed_work_without_model_polling(service, actors, see
 def test_delivery_replays_after_disconnect_until_acknowledged(service, actors, seeded):
     from hoh_control_plane.event_wait import wait_for_event
     register(service, actors['developer'])
-    service.release_ticket(actors['planner'], 'DEV-142')
+    release(service, actors)
     async def scenario():
         first = await wait_for_event(service, actors['developer'], 'project-1', timeout_seconds=1)
         replay = await wait_for_event(service, actors['developer'], 'project-1', timeout_seconds=1)
@@ -62,7 +73,7 @@ def test_concurrent_wait_same_identity_is_rejected_and_cancel_cleans_up(service,
 def test_other_project_and_role_do_not_wake_a_waiter(service, actors, seeded):
     from hoh_control_plane.event_wait import wait_for_event
     register(service, actors['qa'])
-    service.release_ticket(actors['planner'], 'DEV-142')
+    release(service, actors)
     async def scenario():
         with pytest.raises(AuthorizationError):
             await wait_for_event(service, actors['qa'], 'private-project', timeout_seconds=1)
@@ -76,7 +87,9 @@ def test_busy_agent_does_not_hold_work_away_from_idle_peer(service, actors, seed
     from datetime import UTC, datetime, timedelta
     for name in ('developer', 'developer_2'):
         register(service, actors[name])
-    service.release_ticket(actors['planner'], 'DEV-142')
+    release(service, actors)
+    service.create_ticket(actors['planner'], 'payment-retry', 'elsewhere', 'Other work', 'Busy fixture',
+                          Role.DEVELOPER, ['Done'], [], ['other/**'])
     now = datetime.now(UTC)
     with service.store.connection(immediate=True) as db:
         # Same actor is occupied in another project too: capacity is global.
