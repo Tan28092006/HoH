@@ -1,0 +1,19 @@
+.head-actions,.desktop-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.desktop-actions button{white-space:nowrap}
+.desktop-danger{color:var(--danger)}
+.desktop-notice{font-size:14px;color:var(--muted);line-height:1.5;margin:0 0 18px}
+.desktop-notice:empty{display:none}
+.desktop-dialog{border:1px solid var(--border);border-radius:14px;background:var(--panel);color:var(--text);padding:24px;width:min(720px,calc(100vw - 24px));max-height:90vh;overflow:auto}
+.desktop-dialog::backdrop{background:rgba(10,15,30,.5)}
+.desktop-dialog h2{margin:0 0 16px;font-size:22px}
+.desktop-dialog p{line-height:1.6}
+.desktop-dialog label{display:grid;gap:7px;margin:14px 0;font-size:14px;font-weight:600}
+.desktop-dialog input,.desktop-dialog textarea{width:100%;min-width:0;padding:10px;border:1px solid var(--border);border-radius:7px;background:var(--panel-2);color:var(--text);font:inherit;resize:vertical}
+.desktop-dialog textarea[readonly]{font-family:ui-monospace,monospace;font-size:12px;line-height:1.6;font-weight:400}
+.desktop-hint{font-size:13px;color:var(--muted)}
+.desktop-dialog-actions,.desktop-role-tabs{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;margin-top:16px}
+.desktop-role-tabs{justify-content:flex-start}
+.desktop-role-tabs [aria-pressed=true]{border-color:var(--accent);background:var(--accent-soft)}
+.desktop-form-error{color:var(--danger);font-size:14px}
+.desktop-prompt-project{overflow-wrap:anywhere}
+@media(max-width:768px){.page-head{flex-wrap:wrap;gap:16px}.head-actions{width:100%}.desktop-dialog{padding:16px}.desktop-actions{gap:6px}.desktop-actions button{font-size:12px}}
