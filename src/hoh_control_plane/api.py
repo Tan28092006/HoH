@@ -23,6 +23,7 @@ from hoh_control_plane.domain import (
     Role,
     require_project,
 )
+from hoh_control_plane import __version__
 from hoh_control_plane.observability import WorkflowMetrics, correlation_scope
 from hoh_control_plane.seed import seed_demo as seed_demo_data
 from hoh_control_plane.service import ControlPlaneService
@@ -139,7 +140,7 @@ def create_app(
     if seed_demo:
         seed_demo_data(service)
 
-    app = FastAPI(title="Harness Control Plane", version="0.3.0")
+    app = FastAPI(title="Harness Control Plane", version=__version__)
     app.state.service = service
     app.state.local_mode = is_local
     static_dir = Path(__file__).parent / "static"
@@ -270,7 +271,7 @@ def create_app(
 
     @app.get("/api/v1/health")
     def health() -> dict[str, Any]:
-        return {"data": {"status": "ok", "version": "0.3.0"}}
+        return {"data": {"status": "ok", "version": __version__}}
 
     @app.get("/api/v1/projects/{project_id}/board")
     def board(project_id: str, actor: Actor = Depends(observer_dependency)) -> dict[str, Any]:

@@ -121,7 +121,7 @@
   });
 
   document.querySelector('#shutdown-hoh').addEventListener('click', () => {
-    const dialog = modal('Tắt HoH trên máy này?', `<p>HoH sẽ dừng nhận job mới, chờ worker hiện tại kết thúc rồi tắt UI, MCP và các service nền. Các phiên agent đang kết nối sẽ mất kết nối. Mở lại bằng icon Desktop.</p>
+    const dialog = modal('Tắt HoH trên máy này?', `<p>HoH sẽ dừng khởi chạy job mới, chờ worker hiện tại kết thúc rồi tắt UI, MCP và các service nền. Các phiên agent đang kết nối sẽ mất kết nối. Mở lại bằng icon Desktop.</p>
       <p role="alert" class="desktop-form-error"></p><div class="desktop-dialog-actions"><button class="secondary" data-close>Tiếp tục sử dụng</button><button id="confirm-shutdown" class="primary desktop-danger">Xác nhận tắt</button></div>`);
     dialog.querySelector('#confirm-shutdown').addEventListener('click', async event => {
       event.target.disabled = true;
@@ -130,6 +130,8 @@
     });
   });
   controls.querySelectorAll('button').forEach(button => {button.disabled = true;});
-  loadSession().then(() => {if (!draining) controls.querySelectorAll('button').forEach(button => {button.disabled = false;});})
+  loadSession().then(() => {if (!draining) controls.querySelectorAll('button').forEach(button => {
+    button.disabled = button.id === 'agent-prompts' && !session.projects.some(project => project.project_id === document.querySelector('#project-picker').value);
+  });})
     .catch(error => {notice.textContent = error.message;});
 })();

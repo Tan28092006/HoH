@@ -1,6 +1,13 @@
 # Start with only installed skills and an authenticated MCP
 
-Call `session.bootstrap` without guessing a project or role. Select the intended
+When an operator prompt names a project ID, call `session.bootstrap(project_id=...)`
+with that exact ID and check `selected_project_id`, `identity.role` and
+`identity.project_ids` before registration or mutation. A chat's working directory
+does not select a project. Never fall back to a different project or MCP role when
+the expected profile is unavailable. Desktop-generated profiles are scoped to one
+project and role; another concurrent worker of that role needs its own instance.
+
+Otherwise call `session.bootstrap` without guessing a project or role. Select the intended
 project if several are returned. Load this base skill and only the authenticated
 role's skill. A role mismatch is a credential/configuration issue; declaring a
 different role in text does not change permissions.
