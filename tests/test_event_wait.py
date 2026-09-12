@@ -225,3 +225,20 @@ def test_separate_publisher_process_wakes_open_mcp_session(service, actors, tmp_
                 assert result.structuredContent['event']['ticket_ref'] == 'ticket:DEV-142'
                 assert time.monotonic() - started < 1.5
     asyncio.run(check())
+
+
+def test_one_ticket_wakes_one_idle_agent_instead_of_racing_models(service, actors):
+    from hoh_control_plane.event_wait import wait_for_event
+    for name in ('developer', 'developer_2'):
+        register(service, actors[name])
+    release(service, actors)
+    async def check():
+        first = await wait_for_event(service, actors['developer'], 'project-1', timeout_seconds=.1)
+        second = await wait_for_event(service, actors['developer_2'], 'project-1', timeout_seconds=.1)
+        assert first['status'] == 'event'
+        assert second['status'] == 'timeout'
+        with service.store.connection(immediate=True) as db:
+            db.execute("UPDATE agent_event_waiters SET expires_at='2000-01-01' WHERE agent_id=?", (actors['developer'].agent_id,))
+        rerouted = await wait_for_event(service, actors['developer_2'], 'project-1', timeout_seconds=.1)
+        assert rerouted['status'] == 'event'
+    asyncio.run(check())
