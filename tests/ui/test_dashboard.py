@@ -28,6 +28,31 @@ def test_operator_can_follow_ticket_and_filter_state(qa_app, browser_case, viewp
     assert all(request["method"] == "GET" for request in requests), "Read-only board mutated state"
 
 
+def test_background_refresh_preserves_ticket_keyboard_focus(qa_app, browser_case):
+    from playwright.sync_api import expect
+    page, errors, _ = browser_case
+    page.goto(qa_app["url"] + "/?project=demo&status=BACKLOG")
+    ticket = page.locator('[data-ticket-id="UI-BACKLOG"]')
+    expect(ticket).to_be_visible()
+    baseline = page.request.get(qa_app["url"] + "/api/v1/projects/demo/board").json()
+    baseline["data"]["columns"]["BACKLOG"][0]["title"] = "Updated while using the keyboard"
+    page.route("**/api/v1/projects/demo/board", lambda route: route.fulfill(json=baseline))
+    ticket.focus()
+    expect(ticket).to_be_focused()
+    # Trigger the same refresh without moving focus to the Refresh button.
+    page.locator("#refresh-button").evaluate("button => button.click()")
+    expect(ticket).to_contain_text("Updated while using the keyboard")
+    expect(ticket).to_be_focused()
+    page.keyboard.press("Enter")
+    expect(page.locator("#detail")).to_contain_text("Visible backlog")
+    # A status transition may remove the focused ticket from this filtered view.
+    baseline["data"]["columns"]["BACKLOG"] = []
+    page.locator("#refresh-button").evaluate("button => button.click()")
+    expect(ticket).to_have_count(0)
+    expect(page.get_by_role("combobox", name="Filter by status")).to_be_focused()
+    assert not errors
+
+
 def test_old_response_cannot_replace_a_newer_snapshot(qa_app, browser_case):
     from copy import deepcopy
     from playwright.sync_api import expect
