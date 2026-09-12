@@ -244,3 +244,17 @@ def test_one_ticket_wakes_one_idle_agent_instead_of_racing_models(service, actor
         returned = await wait_for_event(service, actors['developer'], 'project-1', timeout_seconds=.1)
         assert returned['status'] == 'timeout', 'Reconnecting must not revive an old reservation'
     asyncio.run(check())
+
+
+def test_planner_receives_new_intervention_job(service, actors):
+    from hoh_control_plane.event_wait import wait_for_event
+    register(service, actors['planner'])
+    async def check():
+        waiting = asyncio.create_task(wait_for_event(service, actors['planner'], 'project-1', timeout_seconds=2))
+        await asyncio.sleep(.05)
+        with service.store.connection(immediate=True) as db:
+            db.execute("INSERT INTO planner_jobs (planner_job_id,project_id,ticket_id,job_type,status,summary,evidence_refs,created_by,created_at,updated_at) VALUES ('plan-event','project-1','DEV-142','developer_blocker','READY','Clarify requirement','[]','dev-01','now','now')")
+        result = await waiting
+        assert result['event']['kind'] == 'planner_work'
+        assert result['event']['planner_job_id'] == 'plan-event'
+    asyncio.run(check())
