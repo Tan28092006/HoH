@@ -287,6 +287,10 @@ CREATE TABLE IF NOT EXISTS spec_sections (
     start_line INTEGER NOT NULL,
     end_line INTEGER NOT NULL,
     token_estimate INTEGER NOT NULL,
+    -- Heading level, so a cold reader can ask for the outline rather than all
+    -- 106 sections: a table of contents that costs half the document it indexes
+    -- has not saved anybody anything.
+    depth INTEGER NOT NULL DEFAULT 1,
     -- The revision this section last moved at, which is what a reader compares
     -- its own cursor against to learn whether it has drifted.
     changed_at_revision INTEGER NOT NULL,
@@ -859,6 +863,7 @@ class SQLiteStore:
             self._migrate_workspace_model(connection)
             self._migrate_event_correlation(connection)
             self._migrate_agent_wakeup(connection)
+            self._migrate_spec_section_depth(connection)
             repaired = self._migrate_stale_migration_table_references(connection)
             self._require_clean_foreign_keys(connection, repaired)
 
@@ -1010,6 +1015,24 @@ class SQLiteStore:
                     f"Upgraded table {table} has {len(violations)} unresolved "
                     "foreign key references"
                 )
+
+    @staticmethod
+    def _migrate_spec_section_depth(connection: sqlite3.Connection) -> None:
+        """Add the heading level to an index written before the outline needed it.
+
+        CREATE TABLE IF NOT EXISTS does nothing to a table that already exists,
+        so the first database to carry this index -- written minutes before the
+        column was added -- needs the column put there explicitly. Existing rows
+        default to depth 1, which shows them in every outline until the next sync
+        records their real level: too much rather than too little.
+        """
+        existing = {
+            row["name"] for row in connection.execute('PRAGMA table_info("spec_sections")')
+        }
+        if existing and "depth" not in existing:
+            connection.execute(
+                "ALTER TABLE spec_sections ADD COLUMN depth INTEGER NOT NULL DEFAULT 1"
+            )
 
     @staticmethod
     def _migrate_agent_wakeup(connection: sqlite3.Connection) -> None:

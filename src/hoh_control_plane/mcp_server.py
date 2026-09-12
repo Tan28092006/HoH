@@ -358,16 +358,24 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
         )
 
     @server.tool(name="spec.digest", structured_output=True)
-    def spec_digest(project_id: str, after_revision: int = 0, limit: int = 50) -> dict[str, Any]:
+    def spec_digest(
+        project_id: str,
+        after_revision: int = 0,
+        limit: int = 50,
+        max_depth: int | None = None,
+    ) -> dict[str, Any]:
         """Which specification sections moved since a revision, with line spans to open.
 
-        From revision 0 this is the table of contents. From a later one it is only
-        what changed, so staying current costs a cursor rather than a re-read.
+        From revision 0 this is the table of contents; pass max_depth=2 there, as
+        a full outline of a large document costs about half of what reading it
+        would. From a later revision it is only what changed, so staying current
+        costs a cursor rather than a re-read; leave max_depth off for that.
         """
         arguments = {
             "project_id": project_id,
             "after_revision": after_revision,
             "limit": limit,
+            "max_depth": max_depth,
         }
         return invoke(
             "spec.digest",

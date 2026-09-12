@@ -19,7 +19,6 @@ from hoh_control_plane.service._common import (
     Connection,
     Role,
     ValidationError,
-    _estimate_tokens,
     _iso,
     _row,
     hashlib,
@@ -95,21 +94,30 @@ class SpecMixin:
                 ):
                     changed.append(section["heading_path"])
                 else:
-                    # The lines may have moved without the content changing, and
-                    # a stale span sends a reader to the wrong place, so the span
-                    # is refreshed while the revision stays put.
+                    # Everything derived from the text may be stale even when the
+                    # text is not: the lines move when anything above is edited,
+                    # and the size and level are recomputed by code that can
+                    # itself change. A stale span sends a reader to the wrong
+                    # place, so all of it is refreshed while the revision, which
+                    # is what says the content moved, stays put.
                     if (
                         prior["start_line"] != section["start_line"]
                         or prior["end_line"] != section["end_line"]
+                        or prior["token_estimate"] != section["token_estimate"]
+                        or prior["depth"] != section["depth"]
                     ):
                         connection.execute(
                             """
-                            UPDATE spec_sections SET start_line = ?, end_line = ?, updated_at = ?
+                            UPDATE spec_sections
+                            SET start_line = ?, end_line = ?, token_estimate = ?,
+                                depth = ?, updated_at = ?
                             WHERE section_id = ?
                             """,
                             (
                                 section["start_line"],
                                 section["end_line"],
+                                section["token_estimate"],
+                                section["depth"],
                                 now,
                                 prior["section_id"],
                             ),
@@ -175,12 +183,18 @@ class SpecMixin:
         project_id: str,
         after_revision: int = 0,
         limit: int = _MAX_DIGEST_SECTIONS,
+        max_depth: int | None = None,
     ) -> dict[str, Any]:
         """Which sections to open, and nothing else.
 
         From revision 0 this is the table of contents, which is what a cold agent
         needs. From a later revision it is only what moved since, which is what a
         warm one needs; the common answer is an empty list.
+
+        max_depth trims the outline to its top levels. It matters at the cold
+        read: this project's own specification has 106 sections, and listing all
+        of them costs half of what the document costs, which would be no saving
+        at all. Left off when asking what changed, where precision is the point.
         """
         require_project(actor, project_id)
         if not isinstance(after_revision, int) or isinstance(after_revision, bool):
@@ -189,6 +203,12 @@ class SpecMixin:
             raise ValidationError("after_revision must not be negative")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
             raise ValidationError("limit must be between 1 and 200")
+        if max_depth is not None and (
+            not isinstance(max_depth, int)
+            or isinstance(max_depth, bool)
+            or not 1 <= max_depth <= 6
+        ):
+            raise ValidationError("max_depth must be between 1 and 6")
 
         with self.store.connection() as connection:
             revision = self._current_revision(connection, project_id)
@@ -205,23 +225,36 @@ class SpecMixin:
                 """
                 SELECT * FROM spec_sections
                 WHERE project_id = ? AND changed_at_revision > ?
+                  AND (? IS NULL OR depth <= ?)
                 ORDER BY document ASC, start_line ASC
                 LIMIT ?
                 """,
-                (project_id, after_revision, limit + 1),
+                (project_id, after_revision, max_depth, max_depth, limit + 1),
             ).fetchall()
+            extents = (
+                self._subtree_extents(connection, project_id)
+                if max_depth is not None
+                else {}
+            )
 
         has_more = len(rows) > limit
         sections = []
         for row in rows[:limit]:
             section = _row(row)
             assert section is not None
+            # A trimmed outline hides the children, so an entry has to stand for
+            # the whole branch: its own span ends at its first child, and sending
+            # a reader there would hand them the preamble and call it the section.
+            end_line, tokens = extents.get(
+                str(section["section_id"]),
+                (section["end_line"], section["token_estimate"]),
+            )
             sections.append(
                 {
                     "document": section["document"],
                     "heading": section["heading_path"],
-                    "lines": [section["start_line"], section["end_line"]],
-                    "tokens": section["token_estimate"],
+                    "lines": [section["start_line"], end_line],
+                    "tokens": tokens,
                     "status": section["status"],
                 }
             )
@@ -231,6 +264,44 @@ class SpecMixin:
             "reset": False,
             "has_more": has_more,
         }
+
+    @staticmethod
+    def _subtree_extents(
+        connection: Connection, project_id: str
+    ) -> dict[str, tuple[int, int]]:
+        """How far each section reaches once its nested sections are counted in.
+
+        Computed on read rather than stored: a child's edit would otherwise have
+        to write to its parent's row, which is exactly the coupling that makes a
+        parent look changed when nothing in it was touched.
+        """
+        rows = [
+            _row(row)
+            for row in connection.execute(
+                """
+                SELECT section_id, document, start_line, end_line, token_estimate, depth
+                FROM spec_sections
+                WHERE project_id = ? AND status = 'present'
+                ORDER BY document ASC, start_line ASC
+                """,
+                (project_id,),
+            ).fetchall()
+        ]
+        extents: dict[str, tuple[int, int]] = {}
+        for index, section in enumerate(rows):
+            assert section is not None
+            end_line = section["end_line"]
+            tokens = section["token_estimate"]
+            for following in rows[index + 1 :]:
+                assert following is not None
+                if following["document"] != section["document"]:
+                    break
+                if following["depth"] <= section["depth"]:
+                    break
+                end_line = max(end_line, following["end_line"])
+                tokens += following["token_estimate"]
+            extents[str(section["section_id"])] = (end_line, tokens)
+        return extents
 
     # --- parsing ----------------------------------------------------------------
 
@@ -282,7 +353,13 @@ class SpecMixin:
                     "content_hash": hashlib.sha256(body.encode("utf-8")).hexdigest(),
                     "start_line": line_index + 1,
                     "end_line": end_index,
-                    "token_estimate": _estimate_tokens(body),
+                    # Measured on the prose, not on a JSON rendering of it. The
+                    # shared estimator serializes first, and this document is
+                    # mostly Vietnamese: every accented character becomes a
+                    # six-character escape, which reported sections as costing
+                    # half again what reading them actually costs.
+                    "token_estimate": len(body) // 4,
+                    "depth": level,
                 }
             )
         return sections
@@ -305,7 +382,7 @@ class SpecMixin:
                 """
                 UPDATE spec_sections
                 SET content_hash = ?, start_line = ?, end_line = ?, token_estimate = ?,
-                    changed_at_revision = ?, status = 'present', updated_at = ?
+                    depth = ?, changed_at_revision = ?, status = 'present', updated_at = ?
                 WHERE section_id = ?
                 """,
                 (
@@ -313,6 +390,7 @@ class SpecMixin:
                     section["start_line"],
                     section["end_line"],
                     section["token_estimate"],
+                    section["depth"],
                     revision,
                     now,
                     prior["section_id"],
@@ -323,9 +401,9 @@ class SpecMixin:
             """
             INSERT INTO spec_sections
                 (section_id, project_id, document, heading_path, content_hash,
-                 start_line, end_line, token_estimate, changed_at_revision, status,
-                 first_seen_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'present', ?, ?)
+                 start_line, end_line, token_estimate, depth, changed_at_revision,
+                 status, first_seen_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'present', ?, ?)
             """,
             (
                 self._section_id(project_id, document, section["heading_path"]),
@@ -336,6 +414,7 @@ class SpecMixin:
                 section["start_line"],
                 section["end_line"],
                 section["token_estimate"],
+                section["depth"],
                 revision,
                 now,
                 now,

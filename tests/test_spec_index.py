@@ -283,3 +283,77 @@ def test_two_documents_do_not_collide(service, actors, seeded) -> None:
     sections = _digest(service, planner, 0, limit=200)["sections"]
     assert len(sections) == 10, "five sections indexed under each document"
     assert {section["document"] for section in sections} == {DOCUMENT, "OTHER.md"}
+
+
+# --- the outline a cold agent can afford ------------------------------------------
+
+
+def test_the_outline_can_be_trimmed_to_its_top_levels(service, actors, seeded) -> None:
+    """106 sections costing half the document is no saving at all."""
+    planner = actors["planner"]
+    _sync(service, planner, SPEC)
+
+    shallow = _digest(service, planner, 0, max_depth=2)
+
+    assert "Control Plane > 2. Context packets > 2.1 Compaction" not in _headings(shallow)
+    assert "Control Plane > 2. Context packets" in _headings(shallow)
+    assert _tokens(shallow) < _tokens(_digest(service, planner))
+
+
+def test_a_trimmed_entry_covers_the_sections_it_hides(service, actors, seeded) -> None:
+    """Otherwise it sends a reader to the preamble and calls it the section."""
+    planner = actors["planner"]
+    _sync(service, planner, SPEC)
+
+    trimmed = [
+        entry for entry in _digest(service, planner, 0, max_depth=2)["sections"]
+        if entry["heading"].endswith("2. Context packets")
+    ][0]
+    full = [
+        entry for entry in _digest(service, planner)["sections"]
+        if entry["heading"].endswith("2. Context packets")
+    ][0]
+
+    start, end = trimmed["lines"]
+    assert "Least important last." in "\n".join(SPEC.splitlines()[start - 1 : end])
+    assert trimmed["tokens"] > full["tokens"], "the nested section counts toward it"
+
+
+def test_asking_what_changed_is_not_trimmed_by_default(service, actors, seeded) -> None:
+    """Precision is the point there; a nested edit must not be silently dropped."""
+    planner = actors["planner"]
+    revision = _sync(service, planner, SPEC)["revision"]
+
+    _sync(service, planner, SPEC.replace("Least important last.", "Least important first."))
+
+    assert _headings(_digest(service, planner, revision)) == [
+        "Control Plane > 2. Context packets > 2.1 Compaction"
+    ]
+
+
+def test_a_depth_outside_the_heading_range_is_refused(service, actors, seeded) -> None:
+    with pytest.raises(ValidationError):
+        _digest(service, actors["planner"], 0, max_depth=0)
+    with pytest.raises(ValidationError):
+        _digest(service, actors["planner"], 0, max_depth=7)
+
+
+def test_derived_metadata_is_refreshed_even_when_the_text_did_not_change(
+    service, actors, seeded
+) -> None:
+    """A stale span or size outlives the edit that invalidated it otherwise."""
+    planner = actors["planner"]
+    _sync(service, planner, SPEC)
+    with service.store.connection(immediate=True) as connection:
+        connection.execute("UPDATE spec_sections SET token_estimate = 1, end_line = 1")
+
+    revision = service.spec_digest(planner, "project-1", 0)["revision"]
+    _sync(service, planner, SPEC)
+
+    section = [
+        entry for entry in _digest(service, planner)["sections"]
+        if entry["heading"].endswith("3. Leases")
+    ][0]
+    assert section["tokens"] > 1, "the size was recomputed"
+    assert section["lines"][1] > 1, "and so was the span"
+    assert _digest(service, planner, revision)["sections"] == [], "without looking like a change"
