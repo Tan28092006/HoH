@@ -80,6 +80,12 @@ class Supervisor:
     def __enter__(self):
         self.lock.__enter__()
         try:
+            with self.service.store.connection(immediate=True) as db:
+                bound = db.execute("SELECT state_value FROM runtime_state WHERE state_key = 'execution_host'").fetchone()
+                if bound is not None and bound[0] != self.runner_id:
+                    raise ConflictError('Database is bound to another execution host; local artifacts require explicit host migration')
+                if bound is None:
+                    db.execute('INSERT INTO runtime_state VALUES (?, ?, ?)', ('execution_host', self.runner_id, now()))
             self.pool = ThreadPoolExecutor(max_workers=self.max_workers)
             self.recover()
             return self

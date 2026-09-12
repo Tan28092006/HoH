@@ -72,9 +72,16 @@ def _worker_location(database_path: Path | str) -> tuple[str, dict[str, str] | N
     return location, None
 
 
+def _supervised_workers() -> bool:
+    mode = os.getenv('HOH_WORKER_MODE', 'legacy')
+    if mode not in {'legacy', 'supervised'}:
+        raise ValidationError('HOH_WORKER_MODE must be legacy or supervised')
+    return mode == 'supervised'
+
+
 def _start_qa_test_worker(database_path: Path, test_run_id: str) -> None:
     """Launch one isolated runner so stdio MCP calls stay available for polling."""
-    if os.getenv('HOH_WORKER_MODE', 'legacy') == 'supervised':
+    if _supervised_workers():
         return  # The durable queue is drained by hoh-supervisor.
     database_argument, environment = _worker_location(database_path)
     subprocess.Popen(
@@ -97,7 +104,7 @@ def _start_qa_test_worker(database_path: Path, test_run_id: str) -> None:
 
 def _start_worktree_provision_worker(database_path: Path, provision_id: str) -> None:
     """Launch Git worktree setup away from the synchronous MCP stdio request."""
-    if os.getenv('HOH_WORKER_MODE', 'legacy') == 'supervised':
+    if _supervised_workers():
         return
     database_argument, environment = _worker_location(database_path)
     subprocess.Popen(
@@ -120,7 +127,7 @@ def _start_worktree_provision_worker(database_path: Path, provision_id: str) -> 
 
 def _start_candidate_submission_worker(database_path: Path, submission_id: str) -> None:
     """Validate candidate Git identity away from the MCP request."""
-    if os.getenv('HOH_WORKER_MODE', 'legacy') == 'supervised':
+    if _supervised_workers():
         return
     database_argument, environment = _worker_location(database_path)
     subprocess.Popen(
@@ -143,7 +150,7 @@ def _start_candidate_submission_worker(database_path: Path, submission_id: str) 
 
 def _start_merge_worker(database_path: Path, merge_job_id: str) -> None:
     """Fast-forward the protected default branch away from the MCP stdio request."""
-    if os.getenv('HOH_WORKER_MODE', 'legacy') == 'supervised':
+    if _supervised_workers():
         return
     database_argument, environment = _worker_location(database_path)
     subprocess.Popen(
