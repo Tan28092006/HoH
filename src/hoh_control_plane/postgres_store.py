@@ -119,7 +119,14 @@ class PostgresStore:
             # The list is shared rather than restated: a second copy is the one
             # that quietly misses the next entry, and that failure surfaces as a
             # query against a column that is not there, long after startup.
-            apply_additive_columns(connection, self._existing_columns(connection))
+            #
+            # Wrapped rather than used raw: the shared migration is written in
+            # qmark style like every other statement in this codebase, and only
+            # the seam knows to translate it for this driver.
+            apply_additive_columns(
+                StoreConnection(connection, self.dialect),
+                self._existing_columns(connection),
+            )
             connection.commit()
         finally:
             connection.close()

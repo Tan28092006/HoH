@@ -357,3 +357,41 @@ def test_migrating_a_postgres_database_twice_changes_nothing(pg_service) -> None
         ).fetchone()[0]
 
     assert count > 0, "no duplicate-column error, and the table is intact"
+
+
+def test_the_experience_index_is_rebuilt_on_postgres_too(pg_service, pg_seeded) -> None:
+    """The backfill is written in qmark style; only the seam translates it.
+
+    A statement that runs on SQLite and not here is the whole reason this suite
+    exists, and a backfill that fails leaves every recorded lesson invisible.
+    """
+    ticket = pg_seeded["ticket"]
+    pg_service.record_experience(_developer(), f"ticket:{ticket['ticket_id']}", "Read me.")
+    pg_service.create_ticket(
+        pg_seeded["planner"],
+        feature_id="f-pg",
+        ticket_id="PG-IDX",
+        title="Later work in the same scope",
+        objective="Prove the rebuilt index still surfaces it",
+        required_role=Role.DEVELOPER,
+        acceptance_criteria=["It behaves"],
+        preservation_constraints=[],
+        file_scope=["src/deeper/**"],
+    )
+    with pg_service.store.connection(immediate=True) as connection:
+        connection.execute("DELETE FROM experience_note_scopes")
+    assert pg_service.get_ticket_context(_developer(), "ticket:PG-IDX")["experience"] == []
+
+    pg_service.store.initialize()
+
+    surfaced = pg_service.get_ticket_context(_developer(), "ticket:PG-IDX")["experience"]
+    assert [note["lesson"] for note in surfaced] == ["Read me."]
+
+
+def test_evidence_records_how_its_checksum_was_obtained_on_postgres(pg_service) -> None:
+    checksum, source = pg_service._verified_storage_checksum(
+        "evidence://remote/elsewhere/report.json", "cand-pg", None, "seen"
+    )
+
+    assert checksum
+    assert source == "claimed"
