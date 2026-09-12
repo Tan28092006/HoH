@@ -29,15 +29,18 @@ def test_operator_can_follow_ticket_and_filter_state(qa_app, browser_case, viewp
 
 
 def test_old_response_cannot_replace_a_newer_snapshot(qa_app, browser_case):
+    from copy import deepcopy
     from playwright.sync_api import expect
     page, _, _ = browser_case
     page.goto(qa_app["url"] + "/?project=demo")
     expect(page.locator("#board .ticket").first).to_be_visible()
+    baseline = page.request.get(qa_app["url"] + "/api/v1/projects/demo/board").json()
     held = []
 
     def delay_first(route):
-        response = route.fetch()
-        data = response.json()
+        # Fetch fixture data before routing: route.fetch() can re-enter this
+        # handler while another refresh/SSE request is still being processed.
+        data = deepcopy(baseline)
         if not held:
             data["data"]["project"]["description"] = "STALE RESPONSE"
             held.append((route, data))
@@ -47,11 +50,15 @@ def test_old_response_cannot_replace_a_newer_snapshot(qa_app, browser_case):
 
     page.route("**/api/v1/projects/demo/board", delay_first)
     page.get_by_role("button", name="Refresh", exact=True).click()
-    page.wait_for_function("true")
+    page.wait_for_timeout(50)
+    assert len(held) == 1, "The earlier request must be held before the next refresh"
     page.get_by_role("button", name="Refresh", exact=True).click()
     expect(page.locator("#project-description")).to_have_text("CURRENT RESPONSE")
-    held[0][0].fulfill(json=held[0][1])
-    page.unroute("**/api/v1/projects/demo/board", delay_first)
+    with page.expect_response("**/api/v1/projects/demo/board") as delayed:
+        held[0][0].fulfill(json=held[0][1])
+    delayed.value.finished()
+    # Keep the handler until context teardown so background refreshes cannot
+    # race unroute() while a callback is fulfilling a response.
     # A further browser task runs after the fulfilled fetch's continuation.
     page.wait_for_timeout(100)
     expect(page.locator("#project-description")).to_have_text("CURRENT RESPONSE")
