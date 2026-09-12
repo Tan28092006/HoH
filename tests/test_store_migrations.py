@@ -453,3 +453,72 @@ def test_upgrading_a_database_written_before_event_tracing_succeeds(tmp_path) ->
     assert {"correlation_id", "causation_id"} <= columns
     assert any("correlation" in name for name in indexes), "the index arrives with the columns"
     assert surviving == 1, "an event written before tracing existed survives untouched"
+
+
+# --- one list of additive columns, applied by whichever backend is in use -------
+
+
+def test_every_additive_column_is_in_the_shared_schema(tmp_path) -> None:
+    """A column added to one and forgotten in the other is the failure to stop."""
+    from hoh_control_plane.store import ADDITIVE_COLUMNS, SQLiteStore
+
+    path = tmp_path / "fresh.db"
+    SQLiteStore(path).initialize()
+
+    connection = sqlite3.connect(path)
+    try:
+        for table, column, _declaration in ADDITIVE_COLUMNS:
+            present = {row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')}
+            assert present, f"{table} is not in the schema at all"
+            assert column in present, (
+                f"{table}.{column} is migrated onto old databases but missing from "
+                "SCHEMA, so a new database would never get it"
+            )
+    finally:
+        connection.close()
+
+
+def test_a_database_missing_every_added_column_upgrades_cleanly(tmp_path) -> None:
+    """The whole list at once, which is what a long-dormant deployment looks like."""
+    from hoh_control_plane.store import ADDITIVE_COLUMNS, SQLiteStore
+
+    path = tmp_path / "old.db"
+    SQLiteStore(path).initialize()
+    connection = sqlite3.connect(path)
+    try:
+        # The migrated index is built on one of these columns, so it has to go
+        # first -- which is the same order the real upgrade path implies: the
+        # index is created by the migration, after the column it indexes.
+        connection.execute("DROP INDEX IF EXISTS audit_events_correlation")
+        for table, column, _declaration in ADDITIVE_COLUMNS:
+            connection.execute(f'ALTER TABLE "{table}" DROP COLUMN "{column}"')
+        connection.commit()
+    finally:
+        connection.close()
+
+    SQLiteStore(path).initialize()
+
+    connection = sqlite3.connect(path)
+    try:
+        for table, column, _declaration in ADDITIVE_COLUMNS:
+            present = {row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')}
+            assert column in present, f"{table}.{column} was not restored"
+    finally:
+        connection.close()
+
+
+def test_migrating_twice_changes_nothing(tmp_path) -> None:
+    from hoh_control_plane.store import SQLiteStore
+
+    path = tmp_path / "twice.db"
+    SQLiteStore(path).initialize()
+
+    SQLiteStore(path).initialize()
+    SQLiteStore(path).initialize()
+
+    connection = sqlite3.connect(path)
+    try:
+        columns = {row[1] for row in connection.execute('PRAGMA table_info("agent_presence")')}
+    finally:
+        connection.close()
+    assert "endpoint" in columns, "still there, and no duplicate-column error was raised"

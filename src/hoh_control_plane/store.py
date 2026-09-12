@@ -805,6 +805,76 @@ CREATE INDEX IF NOT EXISTS agent_tool_calls_project_sequence
 """
 
 
+# Columns added to tables that already existed by the time they were needed.
+#
+# Declared once rather than implemented per backend. Every one of these is the
+# same operation -- add the column if the table is missing it -- and the only
+# thing that differs between SQLite and PostgreSQL is how you ask which columns
+# a table has. Written as two implementations, the PostgreSQL copy is the one
+# that silently does not get the next entry, and the failure shows up as a
+# query against a column that does not exist rather than as a failed upgrade.
+#
+# Every declaration is valid in both dialects, and every default states what was
+# already true of the rows being migrated rather than inventing a new fact.
+ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    # Skill and protocol compatibility, for presence rows written before it.
+    ("agent_presence", "skill_manifest", "TEXT NOT NULL DEFAULT '[]'"),
+    ("agent_presence", "protocol_version", "TEXT"),
+    ("agent_presence", "skill_compatibility", "TEXT NOT NULL DEFAULT '{}'"),
+    # Where to knock. No endpoint means polling, which was the only path before.
+    ("agent_presence", "endpoint", "TEXT"),
+    # A pending delivery on an existing offer is one that was never attempted.
+    ("work_offers", "delivery_status", "TEXT NOT NULL DEFAULT 'pending'"),
+    ("work_offers", "delivery_attempts", "INTEGER NOT NULL DEFAULT 0"),
+    ("work_offers", "delivered_at", "TEXT"),
+    # Trace columns. Older events keep NULL, which reads as "not traced" rather
+    # than as an event that belonged to no request.
+    ("audit_events", "correlation_id", "TEXT"),
+    ("audit_events", "causation_id", "TEXT"),
+    # An existing project was necessarily co-located, because that was the only
+    # model the service could serve, so the default states the truth about it.
+    ("project_repositories", "workspace_model", "TEXT NOT NULL DEFAULT 'colocated'"),
+    # Provenance. Older rows keep NULL, which reads as "not recorded" rather
+    # than as a verified environment.
+    ("evidence", "scenario_ref", "TEXT"),
+    ("evidence", "environment_digest", "TEXT"),
+    ("evidence", "storage_checksum", "TEXT"),
+    ("qa_test_runs", "environment_digest", "TEXT"),
+    ("qa_test_runs", "storage_checksum", "TEXT"),
+    # Heading level, so a cold reader can ask for an outline instead of all of it.
+    ("spec_sections", "depth", "INTEGER NOT NULL DEFAULT 1"),
+)
+
+# Indexes that cannot be declared in SCHEMA. The schema script runs before these
+# migrations, so on a database that predates the column an index declared there
+# would reference something that does not exist yet -- fine on a new database,
+# fatal on every existing one.
+MIGRATED_INDEXES: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS audit_events_correlation "
+    "ON audit_events (correlation_id)",
+)
+
+
+def apply_additive_columns(connection: Any, columns_of: Any) -> None:
+    """Add every missing column, asking the backend which ones are missing.
+
+    columns_of takes a table name and returns the set of column names it has,
+    or an empty set if the table does not exist -- in which case there is
+    nothing to migrate, because the schema script just created it whole.
+    """
+    seen: dict[str, set[str]] = {}
+    for table, column, declaration in ADDITIVE_COLUMNS:
+        if table not in seen:
+            seen[table] = columns_of(table)
+        existing = seen[table]
+        if not existing or column in existing:
+            continue
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+        existing.add(column)
+    for statement in MIGRATED_INDEXES:
+        connection.execute(statement)
+
+
 class SQLiteStore:
     """Small transactional store for the local-pilot control plane.
 
@@ -856,39 +926,27 @@ class SQLiteStore:
             connection.execute("PRAGMA legacy_alter_table = ON")
             connection.execute("PRAGMA foreign_keys = OFF")
             self._begin_immediate(connection)
+            # The rebuilds below repair foreign keys and CHECK constraints that
+            # only a SQLite database ever had wrong, so they stay here rather
+            # than moving into the shared list: a PostgreSQL database created
+            # from the current schema never had the defect they undo.
             self._migrate_qa_test_job_lease_foreign_key(connection)
             self._migrate_planner_job_types(connection)
-            self._migrate_agent_presence_skill_columns(connection)
-            self._migrate_evidence_provenance(connection)
-            self._migrate_workspace_model(connection)
-            self._migrate_event_correlation(connection)
-            self._migrate_agent_wakeup(connection)
-            self._migrate_spec_section_depth(connection)
+            apply_additive_columns(connection, self._existing_columns(connection))
             repaired = self._migrate_stale_migration_table_references(connection)
             self._require_clean_foreign_keys(connection, repaired)
 
     @staticmethod
-    def _migrate_agent_presence_skill_columns(connection: sqlite3.Connection) -> None:
-        """Add skill/protocol compatibility columns to a database created before them.
+    def _existing_columns(connection: sqlite3.Connection) -> Any:
+        """How this backend answers "which columns does this table have?"."""
 
-        Plain additive columns with defaults: no CHECK or foreign key changes, so
-        this needs none of the rename-create-copy-drop machinery the other
-        migrations require, just ALTER TABLE ADD COLUMN guarded by presence.
-        """
-        existing_columns = {
-            row["name"]
-            for row in connection.execute('PRAGMA table_info("agent_presence")').fetchall()
-        }
-        if "skill_manifest" not in existing_columns:
-            connection.execute(
-                "ALTER TABLE agent_presence ADD COLUMN skill_manifest TEXT NOT NULL DEFAULT '[]'"
-            )
-        if "protocol_version" not in existing_columns:
-            connection.execute("ALTER TABLE agent_presence ADD COLUMN protocol_version TEXT")
-        if "skill_compatibility" not in existing_columns:
-            connection.execute(
-                "ALTER TABLE agent_presence ADD COLUMN skill_compatibility TEXT NOT NULL DEFAULT '{}'"
-            )
+        def columns_of(table: str) -> set[str]:
+            return {
+                row["name"]
+                for row in connection.execute(f'PRAGMA table_info("{table}")').fetchall()
+            }
+
+        return columns_of
 
     @classmethod
     def _migrate_stale_migration_table_references(
@@ -1016,119 +1074,10 @@ class SQLiteStore:
                     "foreign key references"
                 )
 
-    @staticmethod
-    def _migrate_spec_section_depth(connection: sqlite3.Connection) -> None:
-        """Add the heading level to an index written before the outline needed it.
 
-        CREATE TABLE IF NOT EXISTS does nothing to a table that already exists,
-        so the first database to carry this index -- written minutes before the
-        column was added -- needs the column put there explicitly. Existing rows
-        default to depth 1, which shows them in every outline until the next sync
-        records their real level: too much rather than too little.
-        """
-        existing = {
-            row["name"] for row in connection.execute('PRAGMA table_info("spec_sections")')
-        }
-        if existing and "depth" not in existing:
-            connection.execute(
-                "ALTER TABLE spec_sections ADD COLUMN depth INTEGER NOT NULL DEFAULT 1"
-            )
 
-    @staticmethod
-    def _migrate_agent_wakeup(connection: sqlite3.Connection) -> None:
-        """Add delivery columns to a database written before wakeups existed.
 
-        Additive, and every default is the behaviour that database already had:
-        no endpoint means polling, and a pending delivery on an existing offer is
-        simply one that was never attempted.
-        """
-        for table, columns in (
-            ("agent_presence", (("endpoint", "TEXT"),)),
-            (
-                "work_offers",
-                (
-                    ("delivery_status", "TEXT NOT NULL DEFAULT 'pending'"),
-                    ("delivery_attempts", "INTEGER NOT NULL DEFAULT 0"),
-                    ("delivered_at", "TEXT"),
-                ),
-            ),
-        ):
-            existing = {
-                row["name"] for row in connection.execute(f'PRAGMA table_info("{table}")')
-            }
-            if not existing:
-                continue
-            for column, declaration in columns:
-                if column not in existing:
-                    connection.execute(
-                        f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"
-                    )
 
-    @staticmethod
-    def _migrate_event_correlation(connection: sqlite3.Connection) -> None:
-        """Add trace columns to an audit trail written before they existed.
-
-        Added rather than rebuilt so no historical event is rewritten. Older
-        events keep NULL, which reads as "not traced" rather than as an event
-        that belonged to no request.
-        """
-        existing = {
-            row["name"] for row in connection.execute('PRAGMA table_info("audit_events")')
-        }
-        if not existing:
-            return
-        for column in ("correlation_id", "causation_id"):
-            if column not in existing:
-                connection.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
-        # Created here rather than in the schema script: on a database that
-        # predates these columns the script runs before this migration, so an
-        # index declared there would reference a column that does not exist yet.
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS audit_events_correlation "
-            "ON audit_events (correlation_id)"
-        )
-
-    @staticmethod
-    def _migrate_workspace_model(connection: sqlite3.Connection) -> None:
-        """Record where a project's working trees live, defaulting to co-located.
-
-        Added rather than rebuilt so every configured repository survives. An
-        existing project was necessarily co-located, because that was the only
-        model the service could serve, so the default states the truth about it
-        rather than leaving it unknown.
-        """
-        existing = {
-            row["name"]
-            for row in connection.execute('PRAGMA table_info("project_repositories")')
-        }
-        if not existing or "workspace_model" in existing:
-            return
-        connection.execute(
-            "ALTER TABLE project_repositories ADD COLUMN workspace_model TEXT "
-            "NOT NULL DEFAULT 'colocated'"
-        )
-
-    @staticmethod
-    def _migrate_evidence_provenance(connection: sqlite3.Connection) -> None:
-        """Add provenance columns to evidence written before they existed.
-
-        These are added rather than rebuilt so every historical observation, and
-        the verdicts and audit events referencing it, survive untouched. Older
-        rows keep NULL provenance, which reads as "not recorded" rather than as a
-        verified environment.
-        """
-        for table, columns in (
-            ("evidence", ("scenario_ref", "environment_digest", "storage_checksum")),
-            ("qa_test_runs", ("environment_digest", "storage_checksum")),
-        ):
-            existing = {
-                row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
-            }
-            if not existing:
-                continue
-            for column in columns:
-                if column not in existing:
-                    connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
 
     @staticmethod
     def _migrate_planner_job_types(connection: sqlite3.Connection) -> None:

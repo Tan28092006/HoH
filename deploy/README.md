@@ -82,11 +82,14 @@ expired lease, what dispatches queued work, and what knocks on an agent to say
 the work is there. Without it, work still flows — every agent polls — but
 nothing is ever recovered from a crashed agent.
 
-## Known gap: upgrading an existing PostgreSQL database
+## Upgrading
 
-`initialize()` creates any table that does not exist, so a **fresh** PostgreSQL
-database gets the whole current schema. It does not run the column-adding
-migrations, which are written against SQLite's `PRAGMA table_info`. Upgrading a
-PostgreSQL database that predates a column will therefore fail at query time
-rather than at startup. A fresh deployment is unaffected; an upgrade needs the
-column added by hand until those migrations are ported.
+Run the new version against the same database. `initialize()` creates any table
+that does not exist and adds any column that does not exist, on both backends:
+the list of added columns is declared once in `store.py` and applied by whichever
+store is in use, so an upgrade is not a thing you do by hand.
+
+Two migrations are SQLite-only by design. They rebuild tables to repair foreign
+keys and CHECK constraints that only ever went wrong in SQLite, because it
+cannot alter a constraint in place; a PostgreSQL database created from the
+current schema never had the defect they undo.

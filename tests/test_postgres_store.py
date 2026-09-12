@@ -295,3 +295,65 @@ def test_the_outline_depth_filter_runs_on_postgres(pg_service, pg_seeded) -> Non
 
     assert len(shallow["sections"]) == 2
     assert len(everything["sections"]) == 3
+
+
+def test_an_older_postgres_database_gains_the_columns_it_is_missing(pg_service) -> None:
+    """The gap the README used to have to warn about.
+
+    initialize() creates a missing table whole, but never a missing column, so a
+    PostgreSQL database from an earlier version failed at query time rather than
+    at startup -- the worst place to find out.
+    """
+    from hoh_control_plane.store import ADDITIVE_COLUMNS
+
+    with pg_service.store.connection(immediate=True) as connection:
+        connection.execute("DROP INDEX IF EXISTS audit_events_correlation")
+        for table, column, _declaration in ADDITIVE_COLUMNS:
+            connection.execute(f'ALTER TABLE "{table}" DROP COLUMN "{column}"')
+
+    pg_service.store.initialize()
+
+    with pg_service.store.connection() as connection:
+        for table, column, _declaration in ADDITIVE_COLUMNS:
+            found = connection.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() "
+                "AND table_name = ? AND column_name = ?",
+                (table, column),
+            ).fetchone()
+            assert found is not None, f"{table}.{column} was not restored"
+
+
+def test_the_upgraded_postgres_database_still_works(pg_service, pg_seeded) -> None:
+    """Columns back is not the same as usable; the paths that need them must run."""
+    from hoh_control_plane.store import ADDITIVE_COLUMNS
+
+    with pg_service.store.connection(immediate=True) as connection:
+        connection.execute("DROP INDEX IF EXISTS audit_events_correlation")
+        for table, column, _declaration in ADDITIVE_COLUMNS:
+            connection.execute(f'ALTER TABLE "{table}" DROP COLUMN "{column}"')
+    pg_service.store.initialize()
+
+    ticket = pg_seeded["ticket"]
+    presence = pg_service.register_agent(
+        _developer(), skills=["hoh-developer"], endpoint="http://127.0.0.1:9099/wake"
+    )
+    claim = pg_service.claim_ticket(
+        _developer(), ticket["ticket_id"], ticket["version"], 900
+    )
+
+    assert presence["endpoint"] == "http://127.0.0.1:9099/wake", "the added column carries data"
+    assert claim["ticket"]["status"] == "DEV_IN_PROGRESS"
+
+
+def test_migrating_a_postgres_database_twice_changes_nothing(pg_service) -> None:
+    pg_service.store.initialize()
+    pg_service.store.initialize()
+
+    with pg_service.store.connection() as connection:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = 'agent_presence'"
+        ).fetchone()[0]
+
+    assert count > 0, "no duplicate-column error, and the table is intact"

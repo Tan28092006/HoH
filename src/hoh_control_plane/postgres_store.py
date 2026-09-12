@@ -21,6 +21,7 @@ from hoh_control_plane.store import (
     Dialect,
     StoreConnection,
     StoreIntegrityError,
+    apply_additive_columns,
 )
 
 
@@ -112,9 +113,36 @@ class PostgresStore:
         connection = self._connect()
         try:
             connection.execute(translate_schema())
+            # The schema script creates anything missing whole, but it cannot
+            # add a column to a table that already exists, so a database from an
+            # earlier version needs the same additive migrations SQLite runs.
+            # The list is shared rather than restated: a second copy is the one
+            # that quietly misses the next entry, and that failure surfaces as a
+            # query against a column that is not there, long after startup.
+            apply_additive_columns(connection, self._existing_columns(connection))
             connection.commit()
         finally:
             connection.close()
+
+    @staticmethod
+    def _existing_columns(connection: Any) -> Any:
+        """How this backend answers "which columns does this table have?".
+
+        Scoped to current_schema() so a deployment that puts the control plane
+        in its own schema, and the test suite that gives each run a throwaway
+        one, both see their own tables rather than a same-named table elsewhere
+        on the search path.
+        """
+
+        def columns_of(table: str) -> set[str]:
+            rows = connection.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = %s",
+                (table,),
+            ).fetchall()
+            return {row[0] for row in rows}
+
+        return columns_of
 
     @contextmanager
     def connection(self, *, immediate: bool = False) -> Iterator[StoreConnection]:
