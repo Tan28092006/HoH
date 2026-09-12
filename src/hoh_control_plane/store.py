@@ -550,6 +550,10 @@ CREATE TABLE IF NOT EXISTS evidence (
     scenario_ref TEXT,
     environment_digest TEXT,
     storage_checksum TEXT,
+    -- Whether that digest was read from bytes this machine holds, or is the
+    -- agent's claim about a file kept elsewhere. Indistinguishable otherwise,
+    -- and the difference is exactly what "verified" means here.
+    checksum_source TEXT,
     created_by TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -826,6 +830,13 @@ CREATE INDEX IF NOT EXISTS agent_tool_calls_project_sequence
 """
 
 
+# How an evidence row's checksum was obtained. Both are legitimate, but only one
+# proves an artifact, and section 25 asks that no verdict hang off an artifact
+# nobody identified -- so which it was has to survive in the row.
+CHECKSUM_ARTIFACT = "artifact"
+CHECKSUM_CLAIMED = "claimed"
+
+
 # Columns added to tables that already existed by the time they were needed.
 #
 # Declared once rather than implemented per backend. Every one of these is the
@@ -857,6 +868,7 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("project_repositories", "workspace_model", "TEXT NOT NULL DEFAULT 'colocated'"),
     # Provenance. Older rows keep NULL, which reads as "not recorded" rather
     # than as a verified environment.
+    ("evidence", "checksum_source", "TEXT"),
     ("evidence", "scenario_ref", "TEXT"),
     ("evidence", "environment_digest", "TEXT"),
     ("evidence", "storage_checksum", "TEXT"),

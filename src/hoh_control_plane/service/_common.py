@@ -38,6 +38,8 @@ from hoh_control_plane.domain import (
 from hoh_control_plane.git_worktrees import CLEAN_CHECKPOINT, DIRTY, GitWorktreeManager
 from hoh_control_plane.qa_runner import ProjectTestRunner, TestExecution
 from hoh_control_plane.store import (
+    CHECKSUM_ARTIFACT,
+    CHECKSUM_CLAIMED,
     SQLiteStore,
     StoreConnection as Connection,
     StoreIntegrityError,

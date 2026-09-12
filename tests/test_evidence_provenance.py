@@ -195,13 +195,14 @@ def test_a_runner_report_checksum_matches_the_bytes_on_disk(
 
     assert stored["storage_checksum"] == hashlib.sha256(raw).hexdigest()
     # The same artifact must survive the validation path QA evidence goes through.
-    verified = service._verified_storage_checksum(
+    verified, source = service._verified_storage_checksum(
         stored["storage_ref"],
         candidate["candidate"]["candidate_id"],
         stored["storage_checksum"],
         "seen",
     )
     assert verified == stored["storage_checksum"]
+    assert source == "artifact", "read from the bytes, not taken on the agent's word"
 
 
 def test_a_runner_artifact_is_accepted_as_qa_evidence_without_a_mismatch(
@@ -518,3 +519,52 @@ def test_a_developer_claim_is_never_stored_as_evidence(
     assert stored == []
     assert candidate["candidate"]["developer_claims"] == ["Ready for QA."]
     assert isinstance(service, ControlPlaneService)
+
+
+# --- telling a proved artifact from a claimed one --------------------------------
+
+
+def test_a_claimed_digest_is_not_recorded_as_a_proved_artifact(
+    service, actors, seeded
+) -> None:
+    """Section 25: no verdict may hang off an artifact nobody identified.
+
+    The two cases are indistinguishable once written, so which one it was has to
+    survive in the row -- otherwise storage that stopped reaching this machine
+    silently downgrades every verdict and nothing says so.
+    """
+    checksum, source = service._verified_storage_checksum(
+        "evidence://remote/somewhere/report.json", "cand-1", None, "I saw it pass"
+    )
+
+    assert checksum, "a row is never left without a checksum"
+    assert source == "claimed", "nothing here read those bytes"
+
+
+def test_a_local_artifact_that_is_not_on_this_machine_reads_as_claimed(
+    service, actors, seeded
+) -> None:
+    """What a misconfigured shared evidence root actually looks like."""
+    _checksum, source = service._verified_storage_checksum(
+        "evidence://local/cand-9/never-written.json", "cand-9", None, "trust me"
+    )
+
+    assert source == "claimed"
+
+
+def test_the_metric_shows_how_much_evidence_is_actually_backed(
+    service, store, actors, seeded
+) -> None:
+    from hoh_control_plane.observability import WorkflowMetrics
+
+    metrics = WorkflowMetrics(store).project_metrics(actors["planner"], "project-1")
+
+    evidence = metrics["evidence"]
+    assert set(evidence) >= {
+        "artifact_backed_items",
+        "claimed_items",
+        "artifact_backed_ratio",
+    }
+    assert evidence["artifact_backed_items"] + evidence["claimed_items"] == (
+        evidence["evidence_items"]
+    ), "every item is one or the other"

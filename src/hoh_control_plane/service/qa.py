@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from hoh_control_plane.service._common import (
+    CHECKSUM_ARTIFACT,
+    CHECKSUM_CLAIMED,
     Actor,
     Any,
     AuthorizationError,
@@ -98,7 +100,7 @@ class QaMixin:
 
     def _verified_storage_checksum(
         self, storage_ref: str, candidate_id: str, supplied: object, observation: str
-    ) -> str:
+    ) -> tuple[str, str]:
         """Bind an observation to the bytes and the candidate it claims to describe.
 
         A local artifact is checksummed from disk, so a supplied value that
@@ -107,6 +109,14 @@ class QaMixin:
         artifact is held here, the digest covers the evidence content that is
         retained, so no row is left without a checksum and a later edit of the
         stored record is still detectable.
+
+        Returns how the digest was obtained alongside it. Section 25 asks that no
+        verdict be attached to an unidentified artifact, and the two cases are
+        indistinguishable once written: a digest read from bytes this machine
+        holds proves the artifact, while one covering the retained record is the
+        agent's own claim about a file kept elsewhere. Both are legitimate; only
+        one is evidence, and an operator whose shared storage is misconfigured
+        needs to see the second quietly replacing the first.
         """
         if supplied is not None:
             self._bounded_text(str(supplied), "evidence.storage_checksum", 128)
@@ -121,7 +131,7 @@ class QaMixin:
 
         local_prefix = "evidence://local/"
         if not storage_ref.startswith(local_prefix):
-            return recorded_content_digest()
+            return recorded_content_digest(), CHECKSUM_CLAIMED
         relative = storage_ref[len(local_prefix) :]
         owner = relative.split("/", 1)[0]
         if owner != candidate_id:
@@ -137,14 +147,14 @@ class QaMixin:
         if not artifact.is_relative_to(self.project_tests.evidence_root) or not artifact.is_file():
             # Nothing on disk to prove; a supplied digest is still recorded as the
             # QA agent's own claim about an artifact it holds elsewhere.
-            return recorded_content_digest()
+            return recorded_content_digest(), CHECKSUM_CLAIMED
         actual = hashlib.sha256(artifact.read_bytes()).hexdigest()
         if supplied is not None and str(supplied) != actual:
             raise ValidationError(
                 "Evidence checksum does not match the stored artifact",
                 {"reason": "evidence_checksum_mismatch", "storage_ref": storage_ref},
             )
-        return actual
+        return actual, CHECKSUM_ARTIFACT
 
     def record_test_run(
         self,
@@ -581,7 +591,7 @@ class QaMixin:
                     )
                     self._bounded_text(storage_ref, "evidence.storage_ref", 1000)
                     observation = str(item.get("observation", ""))
-                    checksum = self._verified_storage_checksum(
+                    checksum, checksum_source = self._verified_storage_checksum(
                         storage_ref, candidate_id, item.get("storage_checksum"), observation
                     )
                     scenario_ref = self._recorded_scenario_ref(
@@ -597,8 +607,8 @@ class QaMixin:
                         INSERT INTO evidence
                             (evidence_id, candidate_id, criterion, evidence_type,
                              observation, storage_ref, scenario_ref, environment_digest,
-                             storage_checksum, created_by, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             storage_checksum, checksum_source, created_by, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             evidence_id,
@@ -610,6 +620,7 @@ class QaMixin:
                             scenario_ref,
                             environment_digest,
                             checksum,
+                            checksum_source,
                             actor.agent_id,
                             timestamp,
                         ),

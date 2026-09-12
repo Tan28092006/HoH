@@ -182,17 +182,31 @@ class WorkflowMetrics:
                    JOIN candidates c ON c.candidate_id = ev.candidate_id
                    JOIN tickets t ON t.ticket_id = c.ticket_id
                    JOIN features f ON f.feature_id = t.feature_id
-                  WHERE f.project_id = ?) AS evidence_rows
+                  WHERE f.project_id = ?) AS evidence_rows,
+                (SELECT COUNT(*) FROM evidence ev
+                   JOIN candidates c ON c.candidate_id = ev.candidate_id
+                   JOIN tickets t ON t.ticket_id = c.ticket_id
+                   JOIN features f ON f.feature_id = t.feature_id
+                  WHERE f.project_id = ? AND ev.checksum_source = 'artifact')
+                  AS proved_rows
             """,
-            (project_id, project_id),
+            (project_id, project_id, project_id),
         ).fetchone()
         findings = row["findings"] or 0
+        items = row["evidence_rows"] or 0
+        proved = row["proved_rows"] or 0
         return {
             "findings": findings,
-            "evidence_items": row["evidence_rows"] or 0,
-            "evidence_per_finding": (
-                round((row["evidence_rows"] or 0) / findings, 3) if findings else None
-            ),
+            "evidence_items": items,
+            "evidence_per_finding": (round(items / findings, 3) if findings else None),
+            # Section 25 asks that no verdict hang off an unidentified artifact.
+            # A digest read from bytes proves one; a digest covering the retained
+            # record is the agent's claim about a file kept somewhere else. Both
+            # are permitted, so the only way an operator sees storage that no
+            # longer reaches the machine writing evidence is this ratio falling.
+            "artifact_backed_items": proved,
+            "claimed_items": items - proved,
+            "artifact_backed_ratio": (round(proved / items, 3) if items else None),
         }
 
     def _leases(self, connection: sqlite3.Connection, project_id: str) -> dict[str, Any]:

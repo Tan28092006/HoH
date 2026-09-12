@@ -59,6 +59,25 @@ role's tools are **physically absent** from the surface its token reaches rather
 than merely refused when called. To rotate, add the new token, move the agent,
 then drop the old entry and restart.
 
+### Evidence storage must be reachable from every machine
+
+`HOH_ARTIFACT_ROOT` is where evidence, worktrees and recovery patches live. QA
+writes a report there and records it as `evidence://local/<candidate>/<run>.json`;
+the Integrator later resolves that same reference against its own artifact root.
+**If the two machines do not see the same storage, that resolution finds nothing.**
+
+Point `HOH_ARTIFACT_ROOT` at a mount every machine shares. Worktrees are the
+exception and are meant to be local — a Developer works in its own checkout and
+what travels to the next role is the commit, not the tree.
+
+Failing this does not raise. When the artifact is absent, the digest falls back
+to covering the retained record, which is the QA agent's claim about a file it
+holds elsewhere — a legitimate path for evidence genuinely kept off-box, and
+indistinguishable from misconfiguration if nothing counts it. So it is counted:
+`evidence.artifact_backed_ratio` in the project metrics is the number to watch,
+and a deployment where it falls toward zero has storage that no longer reaches
+the machines writing to it.
+
 ### Reverse proxy
 
 [`caddy/Caddyfile`](caddy/Caddyfile) and [`nginx/hoh.conf`](nginx/hoh.conf) are
