@@ -672,6 +672,29 @@ CREATE UNIQUE INDEX IF NOT EXISTS planner_interventions_one_open_per_job
 CREATE INDEX IF NOT EXISTS planner_interventions_project_status
     ON planner_interventions(project_id, status, created_at);
 
+CREATE TABLE IF NOT EXISTS requirements (
+    requirement_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    statement TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    registered_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+-- A requirement is satisfied when the work pointing at it is done, so there is
+-- deliberately no status column here to disagree with the board.
+CREATE TABLE IF NOT EXISTS requirement_links (
+    requirement_id TEXT NOT NULL REFERENCES requirements(requirement_id),
+    subject_type TEXT NOT NULL CHECK (subject_type IN ('ticket', 'feature')),
+    subject_id TEXT NOT NULL,
+    linked_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (requirement_id, subject_type, subject_id)
+);
+
+CREATE INDEX IF NOT EXISTS requirement_links_subject
+    ON requirement_links (subject_type, subject_id);
+
 CREATE TABLE IF NOT EXISTS context_snapshots (
     snapshot_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,

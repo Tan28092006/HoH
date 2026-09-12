@@ -726,6 +726,55 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 lambda: service.recover_candidate_for_qa(actor, **arguments),
             )
 
+        @server.tool(name="planner.register_requirement", structured_output=True)
+        def planner_register_requirement(
+            project_id: str, requirement_id: str, statement: str, source_ref: str
+        ) -> dict[str, Any]:
+            """Record something the specification asks for, so coverage can be computed."""
+            arguments = {
+                "project_id": project_id,
+                "requirement_id": requirement_id,
+                "statement": statement,
+                "source_ref": source_ref,
+            }
+            return invoke(
+                "planner.register_requirement",
+                arguments,
+                lambda: service.register_requirement(actor, **arguments),
+            )
+
+        @server.tool(name="planner.link_requirement", structured_output=True)
+        def planner_link_requirement(
+            requirement_id: str,
+            ticket_id: str | None = None,
+            feature_id: str | None = None,
+        ) -> dict[str, Any]:
+            """Point a ticket or feature at the requirement it serves."""
+            arguments = {
+                "requirement_id": requirement_id,
+                "ticket_id": ticket_id,
+                "feature_id": feature_id,
+            }
+            return invoke(
+                "planner.link_requirement",
+                arguments,
+                lambda: service.link_requirement(actor, **arguments),
+            )
+
+        @server.tool(name="planner.requirement_coverage", structured_output=True)
+        def planner_requirement_coverage(project_id: str) -> dict[str, Any]:
+            """List what nothing points at, what is in flight, and what is finished.
+
+            Read this instead of re-reading the specification: it answers what has
+            been missed from the board's own state.
+            """
+            arguments = {"project_id": project_id}
+            return invoke(
+                "planner.requirement_coverage",
+                arguments,
+                lambda: service.requirement_coverage(actor, **arguments),
+            )
+
         @server.tool(name="planner.append_context", structured_output=True)
         def planner_append_context(
             entry_type: str,
