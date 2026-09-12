@@ -1,6 +1,9 @@
 from concurrent.futures import Future
+import os
 from pathlib import Path
 import sys
+import subprocess
+import time
 
 from hoh_control_plane.domain import Actor, Role
 from test_qa_runner import _candidate_waiting_for_qa
@@ -69,3 +72,76 @@ def test_second_supervisor_cannot_own_the_same_execution_root(service):
         with pytest.raises(ConflictError):
             with Supervisor(service):
                 pytest.fail('Two supervisors owned the same execution root')
+
+
+def test_failed_worker_start_does_not_respawn_forever(service, actors, seeded, tmp_path, monkeypatch):
+    from hoh_control_plane import supervisor as runtime
+    job = make_job(service, actors, seeded, tmp_path)
+    monkeypatch.setattr(runtime, 'run_managed', lambda *a, **kw: (_ for _ in ()).throw(OSError('cannot start worker')))
+    with runtime.Supervisor(service, max_workers=1) as supervisor:
+        try:
+            supervisor.run_until_idle(timeout=1)
+        except TimeoutError:
+            pass
+    with service.store.connection() as db:
+        assert service._qa_test_job(db, job['test_run_id'])['status'] == 'FAILED'
+        assert db.execute('SELECT count(*) FROM worker_executions').fetchone()[0] == 1
+
+
+def test_revoked_lease_stops_running_qa(service, actors, seeded, tmp_path):
+    from hoh_control_plane.supervisor import Supervisor
+    ready, escaped = tmp_path / 'ready', tmp_path / 'escaped'
+    command = [sys.executable, '-c', f"from pathlib import Path;import time;Path({str(ready)!r}).touch();time.sleep(4);Path({str(escaped)!r}).touch()"]
+    job = make_job(service, actors, seeded, tmp_path, command)
+    with Supervisor(service, max_workers=1) as supervisor:
+        supervisor.tick()
+        deadline = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert ready.exists()
+        with service.store.connection(immediate=True) as db:
+            db.execute("UPDATE leases SET expires_at = '2000-01-01T00:00:00Z' WHERE lease_id = ?", (job['lease_id'],))
+        supervisor.run_until_idle(timeout=10)
+    assert not escaped.exists()
+    with service.store.connection() as db:
+        assert service._qa_test_job(db, job['test_run_id'])['status'] == 'FAILED'
+
+
+def test_supervisor_crash_is_recovered_from_durable_execution_record(service, actors, seeded, tmp_path):
+    from hoh_control_plane.supervisor import Supervisor
+    ready, escaped = tmp_path / 'ready', tmp_path / 'escaped'
+    command = [sys.executable, '-c', f"from pathlib import Path;import time;Path({str(ready)!r}).touch();time.sleep(4);Path({str(escaped)!r}).touch()"]
+    job = make_job(service, actors, seeded, tmp_path, command)
+    environment = {key: value for key, value in os.environ.items() if not key.startswith('HOH_')}
+    environment['HOH_DATABASE_PATH'] = str(service.store.path)
+    process = subprocess.Popen([sys.executable, '-m', 'hoh_control_plane.supervisor', '--max-workers', '1'],
+                               env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert ready.exists()
+        process.kill()
+        process.wait(timeout=5)
+        with Supervisor(service, max_workers=1) as supervisor:
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                supervisor.recover()
+                with service.store.connection() as db:
+                    if service._qa_test_job(db, job['test_run_id'])['status'] == 'FAILED':
+                        break
+                time.sleep(0.1)
+            else:
+                raise AssertionError('Interrupted job was not recovered')
+        assert not escaped.exists()
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+
+
+def test_operations_check_reports_missing_supervisor(service):
+    from hoh_control_plane.operations import check_health
+    report = check_health(service)
+    assert report['healthy'] is False
+    assert 'supervisor_stale' in report['alerts']
