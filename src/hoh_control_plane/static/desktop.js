@@ -3,7 +3,7 @@
   let session;
   const controls = document.createElement('div');
   controls.className = 'desktop-actions';
-  controls.innerHTML = '<button id="new-project" class="secondary">Thêm dự án</button><button id="agent-prompts" class="secondary">Prompt cho agent</button><button id="shutdown-hoh" class="secondary desktop-danger">Tắt HoH</button>';
+  controls.innerHTML = '<button id="new-project" class="secondary">Thêm dự án</button><button id="agent-prompts" class="secondary">Prompt cho agent</button><button id="agent-sessions" class="secondary">Phiên agent</button><button id="shutdown-hoh" class="secondary desktop-danger">Tắt HoH</button>';
   document.querySelector('.head-actions').prepend(controls);
   const notice = document.createElement('p');
   notice.className = 'desktop-notice';
@@ -94,20 +94,38 @@
     try {
       const response = await fetch('/local/prompts?project_id=' + encodeURIComponent(project));
       if (!response.ok) throw new Error('Không tải được prompt cho dự án này.');
-      const data = await response.json();
+      let data = await response.json();
       const dialog = modal('Prompt cho agent', `<p class="desktop-prompt-project"></p>
+        <form id="agent-instance-form" class="desktop-instance-form"><label>Instance của chat<input name="instance" required value="primary" pattern="[A-Za-z0-9_-]+" maxlength="40" autocomplete="off"></label><button class="secondary" type="submit">Áp dụng instance</button></form>
         <div class="desktop-role-tabs" role="group" aria-label="Vai trò">${['Planner','Developer','QA','Integrator'].map(role => `<button class="secondary" type="button" data-role="${role.toLowerCase()}">${role}</button>`).join('')}</div>
         <label>Prompt cài đặt<textarea id="agent-prompt-text" readonly rows="14" spellcheck="false"></textarea></label>
         <p class="desktop-hint">Dành cho session trên máy này. Mỗi vai trò/instance chỉ dùng cho một chat đang làm việc. Project trong prompt đã được gắn cố định.</p>
         <p class="desktop-copy-status" role="status"></p><div class="desktop-dialog-actions"><button class="secondary" data-close>Đóng</button><button id="copy-agent-prompt" class="primary">Sao chép prompt</button></div>`);
       dialog.querySelector('.desktop-prompt-project').textContent = 'Project ID: ' + project;
       const text = dialog.querySelector('textarea');
+      let currentRole = 'planner';
       function choose(role) {
+        currentRole = role;
         text.value = data.prompts[role];
         dialog.querySelectorAll('[data-role]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.role === role)));
       }
       dialog.querySelectorAll('[data-role]').forEach(button => button.addEventListener('click', () => choose(button.dataset.role)));
       choose('planner');
+      dialog.querySelector('#agent-instance-form').addEventListener('submit', async event => {
+        event.preventDefault();
+        const button = event.target.querySelector('button');
+        const copy = dialog.querySelector('#copy-agent-prompt');
+        button.disabled = true; copy.disabled = true;
+        try {
+          const instance = event.target.elements.instance.value;
+          const updated = await fetch('/local/prompts?project_id=' + encodeURIComponent(project) + '&instance=' + encodeURIComponent(instance));
+          if (!updated.ok) throw new Error('Không tạo được prompt cho instance này.');
+          data = await updated.json();
+          choose(currentRole);
+          dialog.querySelector('.desktop-copy-status').textContent = 'Prompt đã gắn instance: ' + instance;
+        } catch (error) { dialog.querySelector('.desktop-copy-status').textContent = error.message; }
+        finally { button.disabled = false; copy.disabled = false; }
+      });
       dialog.querySelector('#copy-agent-prompt').addEventListener('click', async () => {
         try {
           await navigator.clipboard.writeText(text.value);
@@ -118,6 +136,36 @@
         }
       });
     } catch (error) { notice.textContent = error.message; }
+  });
+
+  document.querySelector('#agent-sessions').addEventListener('click', () => {
+    const project = document.querySelector('#project-picker').value;
+    const dialog = modal('Phiên agent', `<p>Chat cần mở và đang chờ MCP. Bấm Stop hoặc đóng chat sẽ ngắt chờ.</p>
+      <div class="desktop-session-list" aria-live="polite"></div><p class="desktop-hint">Thông báo là tín hiệu nhận việc; lease xác định quyền xử lý ticket. Danh sách này phản ánh kết nối chờ của HoH, không đọc trạng thái bên trong ứng dụng chat.</p>
+      <div class="desktop-dialog-actions"><button class="secondary" data-close>Đóng</button></div>`);
+    const labels = {waiting: 'Đang chờ sự kiện', notified: 'Đã báo việc cho chat', timed_out: 'Hết thời gian chờ', disconnected: 'Đã ngắt chờ'};
+    let refreshing = false;
+    async function refresh() {
+      if (refreshing || !dialog.isConnected) return;
+      refreshing = true;
+      try {
+        const response = await fetch('/local/agents?project_id=' + encodeURIComponent(project), {cache: 'no-store'});
+        if (!response.ok) throw new Error('Không đọc được các phiên HoH.');
+        const result = await response.json();
+        const list = dialog.querySelector('.desktop-session-list');
+        list.replaceChildren();
+        if (!result.agents.length) list.textContent = 'Chưa có phiên chờ sự kiện trên project này.';
+        for (const agent of result.agents) {
+          const row = document.createElement('p');
+          row.textContent = `${agent.role} · ${agent.agent_id} — ${labels[agent.state] || agent.state}`;
+          list.append(row);
+        }
+      } catch (error) { dialog.querySelector('.desktop-session-list').textContent = error.message; }
+      finally { refreshing = false; }
+    }
+    refresh();
+    const timer = setInterval(refresh, 2000);
+    dialog.addEventListener('close', () => clearInterval(timer));
   });
 
   document.querySelector('#shutdown-hoh').addEventListener('click', () => {
