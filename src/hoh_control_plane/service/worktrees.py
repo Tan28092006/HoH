@@ -119,7 +119,10 @@ class WorktreeMixin:
                 ).fetchone()
             )
             reused = None
-            if existing is not None and existing["agent_id"] == actor.agent_id:
+            ownership = connection.execute('SELECT * FROM worktree_ownership WHERE ticket_id = ?', (ticket_id,)).fetchone()
+            if (existing is not None and existing["agent_id"] == actor.agent_id
+                    and ownership is not None and ownership['lease_id'] == lease_id
+                    and ownership['branch_ref'] == existing['branch_ref']):
                 reused = {"ticket": ticket, "worktree": existing, "reused": True}
             return {
                 "ticket": ticket,
@@ -231,7 +234,10 @@ class WorktreeMixin:
                     "SELECT * FROM worktrees WHERE ticket_id = ?", (ticket_id,)
                 ).fetchone()
             )
-            if existing is not None and existing["agent_id"] == actor.agent_id:
+            ownership = connection.execute('SELECT * FROM worktree_ownership WHERE ticket_id = ?', (ticket_id,)).fetchone()
+            if (existing is not None and existing["agent_id"] == actor.agent_id
+                    and ownership is not None and ownership['lease_id'] == lease_id
+                    and ownership['branch_ref'] == existing['branch_ref']):
                 return {"ticket": ticket, "worktree": existing, "reused": True}
             inspected = None if snapshot["existing"] is None else snapshot["existing"]["branch_ref"]
             current = None if existing is None else existing["branch_ref"]
@@ -241,6 +247,9 @@ class WorktreeMixin:
                 )
 
             timestamp = _iso()
+            connection.execute('DELETE FROM worktree_ownership WHERE ticket_id = ?', (ticket_id,))
+            connection.execute('INSERT INTO worktree_ownership (ticket_id, lease_id, branch_ref) VALUES (?, ?, ?)',
+                               (ticket_id, lease_id, prepared.branch_ref))
             if existing is None:
                 connection.execute(
                     """

@@ -493,6 +493,19 @@ CREATE INDEX IF NOT EXISTS merge_jobs_ticket_created
 CREATE UNIQUE INDEX IF NOT EXISTS merge_jobs_one_active_ticket
     ON merge_jobs(ticket_id) WHERE status IN ('QUEUED', 'RUNNING');
 
+CREATE TABLE IF NOT EXISTS worktree_ownership (
+    ticket_id TEXT PRIMARY KEY REFERENCES tickets(ticket_id),
+    lease_id TEXT NOT NULL,
+    branch_ref TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS merge_intents (
+    merge_job_id TEXT PRIMARY KEY REFERENCES merge_jobs(merge_job_id),
+    repository_path TEXT NOT NULL,
+    default_branch TEXT NOT NULL,
+    base_commit TEXT NOT NULL,
+    candidate_commit TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS qa_test_runs (
     test_run_id TEXT PRIMARY KEY,
     candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),

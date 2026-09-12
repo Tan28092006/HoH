@@ -243,8 +243,7 @@ class QaMixin:
             # Queueing must return promptly. The detached worker re-verifies this
             # immutable path and commit before it executes the test command.
             test_run_id = _id("testrun")
-            worktree_path = (str(self.git_worktrees.qa_path(test_run_id)) if remote_workspace
-                             else worktree["worktree_path"])
+            worktree_path = str(self.git_worktrees.qa_path(test_run_id))
             timestamp = _iso()
             connection.execute(
                 """

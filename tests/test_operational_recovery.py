@@ -77,7 +77,7 @@ def test_reconcile_merge_after_git_completed_and_worker_crashed(service, actors,
     assert service.reconcile_merge_job(ADMIN, job['merge_job_id'])['status'] == 'COMPLETED'
     with service.store.connection() as db:
         assert service._ticket(db, job['ticket_id'])['status'] == 'DONE'
-        assert db.execute("SELECT count(*) FROM events WHERE event_type = 'integration.completed' AND aggregate_id = ?", (job['ticket_id'],)).fetchone()[0] == 1
+        assert db.execute("SELECT count(*) FROM audit_events WHERE event_type = 'integration.completed' AND aggregate_id = ?", (job['ticket_id'],)).fetchone()[0] == 1
 
 
 def test_reconcile_pre_git_crash_does_not_merge_without_live_authorization(service, actors, seeded, tmp_path, monkeypatch):

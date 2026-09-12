@@ -57,6 +57,10 @@ class LeaseMixin:
             for lease_row in expired_leases:
                 lease = _row(lease_row)
                 assert lease is not None
+                if connection.execute("SELECT 1 FROM merge_jobs WHERE lease_id = ? AND status = 'RUNNING'", (lease['lease_id'],)).fetchone():
+                    # Git may have landed. Recovery holds the repository lock
+                    # and settles this intent before another owner is admitted.
+                    continue
                 ticket = self._ticket(connection, lease["ticket_id"])
                 project_id = self._project_for_ticket(connection, ticket["ticket_id"])
                 require_project(actor, project_id)
@@ -272,6 +276,8 @@ class LeaseMixin:
             "SELECT * FROM leases WHERE ticket_id = ?", (ticket_id,)
         ).fetchone()
         if lease and datetime.fromisoformat(lease["expires_at"].replace("Z", "+00:00")) <= _now():
+            if connection.execute("SELECT 1 FROM merge_jobs WHERE lease_id = ? AND status = 'RUNNING'", (lease['lease_id'],)).fetchone():
+                raise ConflictError('Interrupted merge requires reconciliation before lease takeover')
             self._retire_expired_jobs(connection, dict(lease))
             connection.execute("DELETE FROM leases WHERE ticket_id = ?", (ticket_id,))
             current = self._ticket(connection, ticket_id)

@@ -936,7 +936,22 @@ class IntegrationMixin:
             }
 
     def execute_queued_merge(self, merge_job_id: str) -> dict[str, Any]:
-        """Worker-only Git fast-forward for a previously authorized merge job."""
+        """Serialize the Git/DB boundary with recovery using an OS-owned lock."""
+        with self.store.connection() as connection:
+            job = self._merge_job(connection, merge_job_id)
+        if job['status'] != 'QUEUED':
+            return job
+        repository, _, _ = self._merge_git_inputs(merge_job_id)
+        if repository is None:
+            return self.fail_queued_merge(merge_job_id, 'Project repository is required')
+        try:
+            with self.git_worktrees.repository_lock(repository['repository_path']):
+                return self._execute_queued_merge_locked(merge_job_id)
+        except ConflictError:
+            with self.store.connection() as connection:
+                return self._merge_job(connection, merge_job_id)
+
+    def _execute_queued_merge_locked(self, merge_job_id: str) -> dict[str, Any]:
         preflight_error: str | None = None
         with self.store.connection(immediate=True) as connection:
             job = self._merge_job(connection, merge_job_id)
@@ -954,6 +969,15 @@ class IntegrationMixin:
             except DomainError as error:
                 preflight_error = str(error)
             if preflight_error is None:
+                repository = self._one(connection, 'SELECT * FROM project_repositories WHERE project_id = ?', (job['project_id'],))
+                project = self._one(connection, 'SELECT * FROM projects WHERE project_id = ?', (job['project_id'],))
+                candidate = self._one(connection, 'SELECT * FROM candidates WHERE candidate_id = ?', (job['candidate_id'],))
+                if ticket['candidate_commit'] != candidate['commit_sha']:
+                    raise ConflictError('Merge candidate no longer matches the ticket')
+                connection.execute('''INSERT INTO merge_intents
+                    (merge_job_id, repository_path, default_branch, base_commit, candidate_commit, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)''', (merge_job_id, repository['repository_path'],
+                    project['default_branch'], candidate['base_commit'], candidate['commit_sha'], _iso()))
                 connection.execute(
                     "UPDATE merge_jobs SET status = 'RUNNING', started_at = ? WHERE merge_job_id = ?",
                     (_iso(), merge_job_id),
@@ -961,9 +985,6 @@ class IntegrationMixin:
         if preflight_error is not None:
             return self.fail_queued_merge(merge_job_id, preflight_error)
         try:
-            repository, project, candidate = self._merge_git_inputs(merge_job_id)
-            if repository is None:
-                raise ValidationError("Project repository is required before integrating a candidate")
             merged, mainline_commit = self.git_worktrees.fast_forward_default_branch(
                 repository_path=repository["repository_path"],
                 default_branch=project["default_branch"],
@@ -972,7 +993,60 @@ class IntegrationMixin:
             )
             return self._complete_queued_merge(merge_job_id, merged, mainline_commit)
         except DomainError as error:
-            return self.fail_queued_merge(merge_job_id, str(error))
+            # Git may already have changed. Preserve the intent and reconcile
+            # facts instead of turning an uncertain side effect into a retry.
+            self._merge_needs_attention(merge_job_id, str(error))
+            return self._reconcile_merge_locked(merge_job_id)
+
+    def reconcile_merge_job(self, actor: Actor, merge_job_id: str) -> dict[str, Any]:
+        require_role(actor, Role.ADMIN)
+        with self.store.connection() as connection:
+            job = self._merge_job(connection, merge_job_id)
+            self._authorized_ticket(connection, actor, job['ticket_id'])
+            intent = _row(connection.execute('SELECT * FROM merge_intents WHERE merge_job_id = ?', (merge_job_id,)).fetchone())
+        if job['status'] != 'RUNNING':
+            return job
+        if intent is None:
+            return self._merge_needs_attention(merge_job_id, 'Missing durable merge intent; operator reconciliation required')
+        try:
+            with self.git_worktrees.repository_lock(intent['repository_path']):
+                return self._reconcile_merge_locked(merge_job_id)
+        except ConflictError:
+            return job  # A live operation owns this repository. Never race it.
+        except (DomainError, OSError) as error:
+            return self._merge_needs_attention(merge_job_id, str(error))
+
+    def _merge_needs_attention(self, merge_job_id: str, message: str) -> dict[str, Any]:
+        with self.store.connection(immediate=True) as connection:
+            connection.execute("UPDATE merge_jobs SET error_message = ? WHERE merge_job_id = ? AND status = 'RUNNING'",
+                               ('Reconciliation required: ' + message[:3500], merge_job_id))
+            return self._merge_job(connection, merge_job_id)
+
+    def _reconcile_merge_locked(self, merge_job_id: str) -> dict[str, Any]:
+        with self.store.connection() as connection:
+            job = self._merge_job(connection, merge_job_id)
+            intent = _row(connection.execute('SELECT * FROM merge_intents WHERE merge_job_id = ?', (merge_job_id,)).fetchone())
+        if job['status'] != 'RUNNING' or intent is None:
+            return job
+        repository, project, candidate = self._merge_git_inputs(merge_job_id)
+        if (repository is None or repository['repository_path'] != intent['repository_path']
+                or project['default_branch'] != intent['default_branch']
+                or candidate['commit_sha'] != intent['candidate_commit']
+                or candidate['base_commit'] != intent['base_commit']):
+            return self._merge_needs_attention(merge_job_id, 'Repository or candidate configuration changed')
+        from pathlib import Path
+        path = Path(intent['repository_path'])
+        if self.git_worktrees._git(path, 'status', '--porcelain').stdout.strip():
+            return self._merge_needs_attention(merge_job_id, 'Repository has uncommitted work; it was preserved')
+        head = self.git_worktrees._resolve_commit(path, 'refs/heads/' + intent['default_branch'])
+        if self.git_worktrees.commit_is_on_branch(repository_path=str(path), default_branch=intent['default_branch'], commit=intent['candidate_commit']):
+            try:
+                return self._complete_queued_merge(merge_job_id, True, intent['candidate_commit'], recovered=True)
+            except DomainError as error:
+                return self._merge_needs_attention(merge_job_id, str(error))
+        if head == intent['base_commit']:
+            return self.fail_queued_merge(merge_job_id, 'Recovered interrupted merge: mainline is unchanged; a new authorized job is required')
+        return self._merge_needs_attention(merge_job_id, 'Mainline diverged from both the authorized base and candidate')
 
     def _merge_git_inputs(
         self, merge_job_id: str
@@ -993,7 +1067,7 @@ class IntegrationMixin:
             return repository, project, candidate
 
     def _complete_queued_merge(
-        self, merge_job_id: str, merged: bool, mainline_commit: str
+        self, merge_job_id: str, merged: bool, mainline_commit: str, *, recovered: bool = False
     ) -> dict[str, Any]:
         with self.store.connection(immediate=True) as connection:
             job = self._merge_job(connection, merge_job_id)
@@ -1004,7 +1078,13 @@ class IntegrationMixin:
             if ticket["status"] != TicketStatus.MERGE_READY.value:
                 raise ConflictError("Ticket changed while the merge worker ran")
             self._expect_version(ticket, job["expected_version"])
-            self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
+            if not recovered:
+                self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
+            elif not merged or connection.execute('SELECT 1 FROM merge_intents WHERE merge_job_id = ? AND candidate_commit = ?',
+                                                  (merge_job_id, mainline_commit)).fetchone() is None:
+                raise ConflictError('Recovery requires the original merge intent')
+            if ticket['candidate_commit'] != mainline_commit and merged:
+                raise ConflictError('Recovery cannot replace a newer candidate')
             timestamp = _iso()
             next_version = ticket["version"] + 1
             connection.execute("DELETE FROM leases WHERE lease_id = ?", (job["lease_id"],))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -8,8 +9,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 from hoh_control_plane.domain import ValidationError
+from hoh_control_plane.resource_lock import exclusive_file_lock
 
 
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
@@ -374,18 +377,48 @@ class GitWorktreeManager:
 
     @contextmanager
     def qa_checkout(self, *, repository_path: str, test_run_id: str, candidate_commit: str) -> Iterator[str]:
-        """Execute a remote Developer's frozen SHA in a separate service checkout."""
+        """Run the frozen SHA with private objects, refs and configuration."""
         repository = Path(self.validate_repository(repository_path))
         candidate = self._resolve_commit(repository, candidate_commit)
         path = self.qa_path(test_run_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         # A previous run is never force-removed on entry. A crash needs explicit
         # recovery, and a second worker must not delete a live browser/test tree.
-        self._git(repository, "worktree", "add", "--detach", str(path), candidate)
+        with self._snapshot_checkout(repository, path, candidate) as snapshot:
+            yield snapshot
+
+    @contextmanager
+    def _snapshot_checkout(self, repository: Path, path: Path, candidate: str) -> Iterator[str]:
+        if path.exists() or path.is_symlink():
+            raise ValidationError('Existing test checkout requires explicit recovery')
+        path.mkdir(parents=True)
         try:
+            self._git(path, 'init', '--template=')
+            # Fetch copies objects. There is no shared .git, alternate object
+            # directory, remote configuration or hardlink back to production.
+            self._git(path, '-c', 'protocol.file.allow=always', 'fetch', '--no-tags', str(repository), candidate)
+            self._git(path, '-c', 'core.hooksPath=', 'checkout', '--detach', candidate)
             yield self.verify_frozen_candidate(str(path), candidate)
         finally:
-            self._discard_integration_checkout(repository, path)
+            if path.is_symlink() or (hasattr(path, 'is_junction') and path.is_junction()):
+                raise ValidationError('Test checkout became a filesystem link; retained for recovery')
+            if not path.resolve().is_relative_to(self.worktree_root):
+                raise ValidationError('Test checkout escaped its managed root')
+            if path.exists():
+                def remove_readonly(function, filename, error):
+                    item = Path(filename)
+                    if not isinstance(error, PermissionError) or not item.resolve().is_relative_to(path.resolve()) or item.is_symlink():
+                        raise error
+                    os.chmod(item, 0o700)
+                    function(item)
+                shutil.rmtree(path, onexc=remove_readonly)
+
+    def repository_lock(self, repository_path: str):
+        repository = Path(self.validate_repository(repository_path))
+        common = Path(self._git(repository, 'rev-parse', '--git-common-dir').stdout.strip())
+        if not common.is_absolute():
+            common = repository / common
+        return exclusive_file_lock(common.resolve() / 'hoh-integration.lock')
 
     def qa_path(self, test_run_id: str) -> Path:
         path = (self.worktree_root / ".qa" / self._safe_segment(test_run_id, "test_run_id")).resolve()
@@ -405,24 +438,10 @@ class GitWorktreeManager:
         """Materialize the exact candidate on a disposable detached integration worktree."""
         repository = Path(self.validate_repository(repository_path))
         candidate = self._resolve_commit(repository, candidate_commit)
-        checkout_path = self._integration_path(project_id, ticket_id)
+        checkout_path = self._integration_path(project_id, ticket_id) / uuid4().hex
         checkout_path.parent.mkdir(parents=True, exist_ok=True)
-        # The happy path never needs a pre-emptive prune: the checkout path is
-        # deterministic per (project, ticket), and the finally block below always
-        # clears it after use. Only a prior crashed run leaves it behind, so pay for
-        # cleanup on that rarer path instead of spawning an extra git process here.
-        added = self._git(
-            repository, "worktree", "add", "--detach", str(checkout_path), candidate, check=False
-        )
-        if added.returncode != 0:
-            self._discard_integration_checkout(repository, checkout_path)
-            self._git(repository, "worktree", "add", "--detach", str(checkout_path), candidate)
-        try:
-            if self._resolve_commit(checkout_path, "HEAD") != candidate:
-                raise ValidationError("Integration worktree does not hold the candidate commit")
-            yield str(checkout_path)
-        finally:
-            self._discard_integration_checkout(repository, checkout_path)
+        with self._snapshot_checkout(repository, checkout_path, candidate) as snapshot:
+            yield snapshot
 
     def _integration_path(self, project_id: str, ticket_id: str) -> Path:
         segments = [self._safe_segment(value, field) for value, field in (
@@ -458,6 +477,8 @@ class GitWorktreeManager:
         active_branch = self._git(repository, "branch", "--show-current").stdout.strip()
         if active_branch != default_branch:
             raise ValidationError("Repository default branch is not checked out for integration")
+        if self._git(repository, 'status', '--porcelain').stdout.strip():
+            raise ValidationError('Repository must be clean before integration')
         current = self._resolve_commit(repository, f"refs/heads/{default_branch}")
         expected_base = self._resolve_commit(repository, expected_base_commit)
         candidate = self._resolve_commit(repository, candidate_commit)
