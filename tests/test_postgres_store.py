@@ -220,3 +220,78 @@ def test_sqlite_remains_the_default_and_needs_no_driver() -> None:
     required = " ".join(manifest["project"]["dependencies"]).lower()
 
     assert "psycopg" not in required, "the driver is optional, not required"
+
+
+# --- what was added after the port --------------------------------------------
+
+
+def test_experience_notes_survive_the_backend(pg_service, pg_seeded) -> None:
+    """Added after the port, so nothing proved it worked here until now."""
+    ticket = pg_seeded["ticket"]
+    pg_service.record_experience(
+        _developer(), f"ticket:{ticket['ticket_id']}", "The trap is real."
+    )
+
+    again = pg_service.record_experience(
+        _developer("2"), f"ticket:{ticket['ticket_id']}", "The trap is real."
+    )
+
+    assert again["times_seen"] == 2, "counting, not duplicating, works on this backend too"
+    assert again["file_scope"] == ["src/**"], "and JSON columns still round-trip"
+
+
+def test_a_lesson_reaches_an_overlapping_ticket_on_postgres(pg_service, pg_seeded) -> None:
+    planner = pg_seeded["planner"]
+    pg_service.record_experience(
+        _developer(), f"ticket:{pg_seeded['ticket']['ticket_id']}", "Read this first."
+    )
+    pg_service.create_ticket(
+        planner,
+        feature_id="f-pg",
+        ticket_id="PG-2",
+        title="Later work in the same scope",
+        objective="Prove the overlap query runs here",
+        required_role=Role.DEVELOPER,
+        acceptance_criteria=["It behaves"],
+        preservation_constraints=[],
+        file_scope=["src/deeper/**"],
+    )
+
+    context = pg_service.get_ticket_context(_developer(), "ticket:PG-2")
+
+    assert [note["lesson"] for note in context["experience"]] == ["Read this first."]
+
+
+def test_the_spec_index_runs_on_postgres(pg_service, pg_seeded) -> None:
+    planner = pg_seeded["planner"]
+    document = "# Doc\n\n## One\n\nFirst.\n\n## Two\n\nSecond.\n"
+
+    first = pg_service.sync_spec(planner, "project-pg", "SPEC.md", document)
+    quiet = pg_service.spec_digest(planner, "project-pg", first["revision"])
+    changed = pg_service.sync_spec(
+        planner, "project-pg", "SPEC.md", document.replace("Second.", "Second, revised.")
+    )
+
+    assert len(first["added"]) == 3
+    assert quiet["sections"] == [], "a cursor at the current revision sees nothing"
+    assert changed["changed"] == ["Doc > Two"]
+    assert [
+        section["heading"]
+        for section in pg_service.spec_digest(planner, "project-pg", first["revision"])[
+            "sections"
+        ]
+    ] == ["Doc > Two"]
+
+
+def test_the_outline_depth_filter_runs_on_postgres(pg_service, pg_seeded) -> None:
+    """The depth filter uses a nullable-parameter comparison, which differs by driver."""
+    planner = pg_seeded["planner"]
+    pg_service.sync_spec(
+        planner, "project-pg", "SPEC.md", "# Doc\n\n## One\n\n### Deep\n\nText.\n"
+    )
+
+    shallow = pg_service.spec_digest(planner, "project-pg", 0, max_depth=2)
+    everything = pg_service.spec_digest(planner, "project-pg", 0)
+
+    assert len(shallow["sections"]) == 2
+    assert len(everything["sections"]) == 3

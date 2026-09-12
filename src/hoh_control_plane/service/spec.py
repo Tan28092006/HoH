@@ -221,15 +221,24 @@ class SpecMixin:
                     "reset": True,
                     "has_more": False,
                 }
+            # The depth filter is appended rather than passed as a nullable
+            # parameter: PostgreSQL cannot infer the type of an untyped NULL and
+            # refuses the statement outright, where SQLite accepts it happily.
+            parameters: list[Any] = [project_id, after_revision]
+            depth_clause = ""
+            if max_depth is not None:
+                depth_clause = "AND depth <= ?"
+                parameters.append(max_depth)
+            parameters.append(limit + 1)
             rows = connection.execute(
-                """
+                f"""
                 SELECT * FROM spec_sections
                 WHERE project_id = ? AND changed_at_revision > ?
-                  AND (? IS NULL OR depth <= ?)
+                  {depth_clause}
                 ORDER BY document ASC, start_line ASC
                 LIMIT ?
                 """,
-                (project_id, after_revision, max_depth, max_depth, limit + 1),
+                tuple(parameters),
             ).fetchall()
             extents = (
                 self._subtree_extents(connection, project_id)
