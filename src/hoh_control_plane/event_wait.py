@@ -99,9 +99,16 @@ def _pending(service, actor, project, kind=None, identifier=None):
 
 def _deliver(service, actor, project, candidates):
     with service.store.connection(immediate=True) as db:
-        pending = db.execute("SELECT event_id,payload FROM agent_event_deliveries WHERE agent_id=? AND project_id=? AND state='pending' ORDER BY created_at LIMIT 1", (actor.agent_id, project)).fetchone()
-        if pending:
-            return {'status': 'event', 'event_id': pending['event_id'], 'event': json.loads(pending['payload']), 'replayed': True}
+        pending_rows = db.execute("SELECT event_id,event_key,payload FROM agent_event_deliveries WHERE agent_id=? AND project_id=? AND state='pending' ORDER BY created_at LIMIT 50", (actor.agent_id, project)).fetchall()
+        eligible = {key for key, _ in candidates}
+        for pending in pending_rows:
+            payload = json.loads(pending['payload'])
+            if pending['event_key'] in eligible:
+                return {'status': 'event', 'event_id': pending['event_id'], 'event': payload, 'replayed': True}
+            if payload['kind'] == 'work_available':
+                source = db.execute('SELECT status FROM work_queue WHERE queue_id=?', (payload['queue_id'],)).fetchone()
+                if source is None or source['status'] not in {'pending', 'offered'}:
+                    db.execute("UPDATE agent_event_deliveries SET state='obsolete' WHERE event_id=?", (pending['event_id'],))
         for key, payload in candidates:
             exists = db.execute('SELECT 1 FROM agent_event_deliveries WHERE agent_id=? AND project_id=? AND event_key=?', (actor.agent_id, project, key)).fetchone()
             if exists:

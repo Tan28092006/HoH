@@ -292,6 +292,7 @@ class DiscoveryMixin:
             "context:resolve",
             "agent:presence",
             "work:inbox",
+            "work:wait_for_event",
             "skill_compatibility:read",
         ]
         role_capabilities = {

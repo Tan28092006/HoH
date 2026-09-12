@@ -185,8 +185,8 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
         ),
         instructions=(
             "Discover work first, resolve typed context references, and only invoke "
-            "role-authorized write tools. Execution agents register presence, then poll "
-            "work.inbox before discovery; a ticket lease remains the exclusive claim. "
+            "role-authorized write tools. Register presence; call work.wait_for_event "
+            "to wait without model polling. A ticket lease remains the exclusive claim. "
             "Every MCP invocation is audit logged with redacted arguments."
         ),
     )
@@ -335,6 +335,37 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             arguments,
             lambda: service.heartbeat_agent(actor, **arguments),
         )
+
+    if actor.role in {Role.PLANNER, Role.DEVELOPER, Role.QA, Role.INTEGRATOR}:
+        @server.tool(name="work.wait_for_event", structured_output=True)
+        async def work_wait_for_event(project_id: str, timeout_seconds: int = 43200,
+                                      ack_event_id: str | None = None,
+                                      job_kind: str | None = None, job_id: str | None = None) -> dict[str, Any]:
+            """Keep this GUI chat waiting without model polling until work or a job result arrives.
+
+            Register first. Pass ack_event_id from the previous delivery when handled.
+            For a queued job pass kind provision/submission/qa/merge and its ID; the
+            server maintains its valid lease while this call is connected. On return,
+            resolve current context and claim/poll through the normal role tools.
+            Events are hints, never ownership. Stopping/closing the chat ends its wait.
+            Client MCP timeout must exceed timeout_seconds (kit config sets 86400).
+            """
+            from hoh_control_plane.event_wait import wait_for_event
+            arguments = dict(project_id=project_id, timeout_seconds=timeout_seconds,
+                             ack_event_id=ack_event_id, job_kind=job_kind, job_id=job_id)
+            outcome, error_code = 'cancelled', None
+            try:
+                with correlation_scope():
+                    result = await wait_for_event(service, actor, **arguments)
+                outcome = 'succeeded'
+                return result
+            except DomainError as error:
+                outcome, error_code = 'rejected', error.code
+                raise ToolError(f'[{error.code}] {error}') from error
+            finally:
+                service.record_tool_call(actor, tool_name='work.wait_for_event',
+                    project_id=project_id, input_summary=_safe_input_summary(arguments),
+                    outcome=outcome, error_code=error_code)
 
     @server.tool(name="work.discover", structured_output=True)
     def work_discover(
