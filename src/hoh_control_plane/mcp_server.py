@@ -31,7 +31,8 @@ from hoh_control_plane.domain import (
     ValidationError,
 )
 from hoh_control_plane.service import ControlPlaneService
-from hoh_control_plane.store import ContentionError, SQLiteStore
+from hoh_control_plane.store_factory import store_from_environment
+from hoh_control_plane.store import ContentionError
 
 
 Result = TypeVar("Result")
@@ -1395,9 +1396,7 @@ def create_mcp_http_app(
 
 
 def main() -> None:
-    database_path = Path(os.getenv("HOH_DATABASE_PATH", "data/control-plane.db"))
-    store = SQLiteStore(database_path)
-    store.initialize()
+    store = store_from_environment()
     service = ControlPlaneService(store)
     transport = requested_transport()
 

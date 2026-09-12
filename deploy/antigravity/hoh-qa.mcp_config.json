@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "hoh-qa": {
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "D:\\HoH\\scripts\\start-mcp.ps1"],
+      "cwd": "D:\\HoH",
+      "env": {
+        "HOH_DATABASE_PATH": "D:\\HoH\\data\\control-plane.db",
+        "HOH_AGENT_ID": "qa-antigravity-01",
+        "HOH_AGENT_ROLE": "qa",
+        "HOH_PROJECT_IDS": "hoh-control-plane"
+      }
+    }
+  }
+}

@@ -24,7 +24,7 @@ from hoh_control_plane.domain import (
 from hoh_control_plane.observability import WorkflowMetrics, correlation_scope
 from hoh_control_plane.seed import seed_demo as seed_demo_data
 from hoh_control_plane.service import ControlPlaneService
-from hoh_control_plane.store import SQLiteStore
+from hoh_control_plane.store_factory import store_from_environment
 
 
 class StrictModel(BaseModel):
@@ -132,8 +132,7 @@ def create_app(
     )
     admin_token = os.getenv("HOH_ADMIN_TOKEN")
     identities = token_identities or _token_identities_from_environment()
-    store = SQLiteStore(db_path)
-    store.initialize()
+    store = store_from_environment(db_path)
     service = ControlPlaneService(store)
     if seed_demo:
         seed_demo_data(service)

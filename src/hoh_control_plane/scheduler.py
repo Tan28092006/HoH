@@ -9,13 +9,12 @@ from hoh_control_plane.agent_wakeup import SECRET_VARIABLE, deliver_pending_offe
 from hoh_control_plane.domain import Actor, Role
 from hoh_control_plane.planner_wakeup import deliver_pending
 from hoh_control_plane.service import ControlPlaneService
-from hoh_control_plane.store import SQLiteStore
+from hoh_control_plane.store_factory import store_from_environment
 
 
 def sweep_once(database_path: str | Path) -> dict[str, object]:
     """Run one trusted-local maintenance pass and return its public summary."""
-    store = SQLiteStore(database_path)
-    store.initialize()
+    store = store_from_environment(database_path)
     service = ControlPlaneService(store)
     scheduler = Actor("hoh-scheduler", Role.ADMIN, frozenset({"*"}))
     recovered = service.sweep_expired_leases(scheduler)

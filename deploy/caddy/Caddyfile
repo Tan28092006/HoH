@@ -1,0 +1,51 @@
+# TLS in front of the MCP endpoint.
+#
+# Caddy obtains and renews the certificate itself, which is the reason to prefer
+# it here: a deployment whose TLS expires silently is worse than one that never
+# had it, because everyone has already stopped thinking about the connection.
+#
+# Replace the hostname, then:  caddy run --config Caddyfile
+
+hoh.example.com {
+	# Agents present a bearer token. It is the whole of the claim, so the point
+	# of this file is that the token never crosses a network in the clear.
+	reverse_proxy 127.0.0.1:8931 {
+		# The endpoint authenticates the request itself; this must arrive intact.
+		header_up Authorization {http.request.header.Authorization}
+
+		# Streamable HTTP and SSE both hold a response open. Buffering it would
+		# turn every event into one that arrives when the connection closes.
+		flush_interval -1
+	}
+
+	# The endpoint refuses an unauthenticated request before dispatch, so this
+	# is defence in depth rather than the control: a request with no credential
+	# should not reach application code at all.
+	@unauthenticated not header Authorization Bearer*
+	respond @unauthenticated 401 {
+		body `{"error":{"code":"unauthorized","message":"A bearer credential is required"}}`
+		close
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	log {
+		output file /var/log/caddy/hoh.log
+		# The Authorization header is a live credential. Logging it would put
+		# every agent's identity in a file with a different retention policy
+		# from the token store.
+		format json
+	}
+}
+
+# The operator UI, if it is exposed at all. It is a different audience from the
+# agents and does not have to share a hostname or a certificate.
+# hoh-ui.example.com {
+# 	reverse_proxy 127.0.0.1:8000 {
+# 		flush_interval -1
+# 	}
+# }

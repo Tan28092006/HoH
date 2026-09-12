@@ -25,7 +25,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from hoh_control_plane.service import ControlPlaneService
-from hoh_control_plane.store import SQLiteStore
+from hoh_control_plane.store_factory import store_from_environment
 
 
 ENDPOINT_VARIABLE = "HOH_PLANNER_WAKEUP_URL"
@@ -148,8 +148,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--database", required=True)
     parser.add_argument("--limit", type=int, default=20)
     arguments = parser.parse_args(argv)
-    store = SQLiteStore(Path(arguments.database))
-    store.initialize()
+    store = store_from_environment(arguments.database)
     result = deliver_pending(ControlPlaneService(store), limit=arguments.limit)
     print(
         f"Delivered {len(result['delivered'])} wakeup(s); {len(result['failed'])} still pending.",
