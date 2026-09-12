@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hmac
+from contextlib import closing
 import json
 from pathlib import Path
 import secrets
@@ -26,7 +27,7 @@ def shutdown_ready(root: Path):
         return False
     config = json.loads((root / 'config/settings.json').read_text(encoding='utf-8'))
     database = Path(config['database_path']).resolve()
-    with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as db:
+    with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as db:
         return db.execute("SELECT count(*) FROM worker_executions WHERE status='RUNNING'").fetchone()[0] == 0
 
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -30,7 +31,7 @@ def profile_actor(project, role, instance):
 def checked_project(root, project):
     config = json.loads((root / 'config/settings.json').read_text(encoding='utf-8'))
     database = Path(config['database_path']).resolve()
-    with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as db:
+    with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as db:
         row = db.execute('SELECT name FROM projects WHERE project_id = ?', (project,)).fetchone()
     if row is None:
         raise NotFoundError('Project does not exist on this HoH host')
