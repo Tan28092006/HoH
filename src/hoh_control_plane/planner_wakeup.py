@@ -29,48 +29,17 @@ from hoh_control_plane.store import SQLiteStore
 
 
 ENDPOINT_VARIABLE = "HOH_PLANNER_WAKEUP_URL"
+from hoh_control_plane import agent_wakeup as _shared
+
+DELIVERY_TIMEOUT_SECONDS = 5.0
 SECRET_VARIABLE = "HOH_PLANNER_WAKEUP_SECRET"
-ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
-DELIVERY_TIMEOUT_SECONDS = 5
-
-
-class EndpointNotAllowed(ValueError):
-    """The configured endpoint is not a loopback address this pilot may call."""
-
-
-class SigningSecretMissing(ValueError):
-    """A registered endpoint was configured without the secret that authenticates it."""
-
-
-class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
-    """Refuse any redirect rather than following it to an unvalidated host.
-
-    Validating the configured URL is not enough on its own: urllib follows a
-    redirect automatically, so an allowlisted loopback endpoint answering 302
-    could otherwise send the wakeup to any host. A wakeup receiver has no reason
-    to redirect, so the safe answer is to refuse instead of re-validating a hop.
-    """
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
-        raise EndpointNotAllowed(
-            f"Planner wakeup endpoint attempted a redirect to {newurl}"
-        )
-
-
-def _open_endpoint(request: urllib.request.Request):
-    """Single seam for endpoint delivery, so no caller can bypass the guard."""
-    return urllib.request.build_opener(_RefuseRedirects).open(
-        request, timeout=DELIVERY_TIMEOUT_SECONDS
-    )
-
-
-def validate_endpoint(endpoint: str) -> str:
-    parsed = urlparse(endpoint)
-    if parsed.scheme not in {"http", "https"} or parsed.hostname not in ALLOWED_HOSTS:
-        raise EndpointNotAllowed(
-            "Planner wakeup endpoint must be an http(s) loopback address"
-        )
-    return endpoint
+# The allowlist, the envelope and the redirect refusal live in agent_wakeup and
+# are imported rather than restated. Two copies of a security primitive drift,
+# and the copy that does not get the fix is the one still in the path.
+ALLOWED_HOSTS = _shared.ALLOWED_HOSTS
+EndpointNotAllowed = _shared.EndpointNotAllowed
+SigningSecretMissing = _shared.SigningSecretMissing
+validate_endpoint = _shared.validate_endpoint
 
 
 def build_envelope(
@@ -79,46 +48,28 @@ def build_envelope(
     secret: str | None,
     *,
     require_signature: bool = False,
+    kind: str = "planner.intervention",
 ) -> dict[str, Any]:
-    """Wrap a bounded payload so the receiver can reject replays and forgeries.
+    """The shared envelope, defaulted to this module's one kind.
 
-    Anything sent to a registered endpoint must be signed, so that path sets
-    require_signature and this refuses to build an unauthenticated envelope. The
-    invariant lives here rather than at the call site, so a later caller cannot
-    reintroduce an unsigned delivery by forgetting to check.
+    kind is required on the shared primitive because it no longer has one
+    caller; naming it here keeps that explicit without every planner call site
+    repeating the only value it could have.
     """
-    if require_signature and not secret:
-        raise SigningSecretMissing(
-            f"{SECRET_VARIABLE} must be set to deliver to a registered endpoint"
-        )
-    envelope: dict[str, Any] = {
-        "kind": "planner.intervention",
-        "nonce": nonce,
-        "issued_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        "payload": payload,
-    }
-    if secret:
-        material = json.dumps(
-            {key: envelope[key] for key in ("kind", "nonce", "issued_at", "payload")},
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        envelope["signature"] = hmac.new(
-            secret.encode("utf-8"), material.encode("utf-8"), hashlib.sha256
-        ).hexdigest()
-    return envelope
+    return _shared.build_envelope(
+        payload, nonce, secret,
+        require_signature=require_signature, kind=kind, secret_variable=SECRET_VARIABLE,
+    )
 
 
-def write_local_notification(root: Path, envelope: dict[str, Any]) -> Path:
-    """Fallback when no endpoint is registered: leave a bounded note on disk.
+write_local_notification = _shared.write_local_notification
 
-    Codex Desktop exposes no external wake API, so an operator or a polling
-    worker reads these instead. The file holds only the same bounded payload.
-    """
-    root.mkdir(parents=True, exist_ok=True)
-    destination = root / f"{envelope['payload']['intervention_id']}.json"
-    destination.write_text(json.dumps(envelope, indent=2, sort_keys=True), encoding="utf-8")
-    return destination
+
+def _open_endpoint(request: urllib.request.Request):
+    """Single seam for endpoint delivery, so no caller can bypass the guard."""
+    return urllib.request.build_opener(_shared._RefuseRedirects).open(
+        request, timeout=DELIVERY_TIMEOUT_SECONDS
+    )
 
 
 def deliver_once(

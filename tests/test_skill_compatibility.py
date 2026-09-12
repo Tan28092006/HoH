@@ -279,7 +279,10 @@ _CURRENT_AGENT_PRESENCE_COLUMNS = (
     "    updated_at TEXT NOT NULL,\n"
     "    skill_manifest TEXT NOT NULL DEFAULT '[]',\n"
     "    protocol_version TEXT,\n"
-    "    skill_compatibility TEXT NOT NULL DEFAULT '{}'\n"
+    "    skill_compatibility TEXT NOT NULL DEFAULT '{}',\n"
+    "    -- Where to knock. An agent that registers none is not broken: it polls,\n"
+    "    -- which stays a complete path on its own.\n"
+    "    endpoint TEXT\n"
     ");"
 )
 _LEGACY_AGENT_PRESENCE_COLUMNS = "    updated_at TEXT NOT NULL\n);"

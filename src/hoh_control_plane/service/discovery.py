@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from hoh_control_plane.agent_wakeup import (
+    MAX_DELIVERY_ATTEMPTS,
+    EndpointNotAllowed,
+    validate_endpoint,
+)
 from hoh_control_plane.service._common import (
     Actor,
     Any,
@@ -323,8 +328,14 @@ class DiscoveryMixin:
         presence_seconds: int = 120,
         skill_manifest: list[dict[str, Any]] | None = None,
         protocol_version: str | None = None,
+        endpoint: str | None = None,
     ) -> dict[str, Any]:
         """Publish a short-lived, authenticated availability record for dispatch.
+
+        An endpoint is optional. Registering none is not a degraded mode: the
+        agent polls, which remains a complete path. Registering one that is not
+        allowed is refused outright, because an endpoint that looks deliverable
+        and is not would silently swallow every wakeup sent to it.
 
         skill_manifest/protocol_version are recorded for project skill-policy
         compatibility only; they never grant or widen role permission, which
@@ -337,6 +348,13 @@ class DiscoveryMixin:
             self._bounded_text(machine_id, "machine_id", 120)
         if protocol_version is not None:
             self._bounded_text(protocol_version, "protocol_version", 50)
+        validated_endpoint: str | None = None
+        if endpoint is not None and endpoint.strip():
+            self._bounded_text(endpoint, "endpoint", 1000)
+            try:
+                validated_endpoint = validate_endpoint(endpoint)
+            except EndpointNotAllowed as error:
+                raise ValidationError(str(error), {"reason": "endpoint_not_allowed"}) from error
         normalized_manifest = self._validate_skill_manifest(skill_manifest or [])
         timestamp = _now()
         with self.store.connection(immediate=True) as connection:
@@ -367,8 +385,8 @@ class DiscoveryMixin:
                 INSERT INTO agent_presence
                     (agent_id, role, project_ids, skills, capacity, machine_id,
                      last_seen_at, expires_at, created_at, updated_at,
-                     skill_manifest, protocol_version, skill_compatibility)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     skill_manifest, protocol_version, skill_compatibility, endpoint)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_id) DO UPDATE SET
                     project_ids = excluded.project_ids,
                     skills = excluded.skills,
@@ -379,7 +397,8 @@ class DiscoveryMixin:
                     updated_at = excluded.updated_at,
                     skill_manifest = excluded.skill_manifest,
                     protocol_version = excluded.protocol_version,
-                    skill_compatibility = excluded.skill_compatibility
+                    skill_compatibility = excluded.skill_compatibility,
+                    endpoint = excluded.endpoint
                 """,
                 (
                     actor.agent_id,
@@ -395,6 +414,7 @@ class DiscoveryMixin:
                     json.dumps(normalized_manifest),
                     protocol_version,
                     json.dumps(compatibility),
+                    validated_endpoint,
                 ),
             )
             return self._presence(connection, actor.agent_id)
@@ -558,6 +578,55 @@ class DiscoveryMixin:
             "offered_now": len(created_offers),
             "next_poll_after_seconds": 20,
         }
+
+    def pending_wakeups(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Offers that are live, undelivered, and still worth knocking about."""
+        limit = min(max(limit, 1), 200)
+        with self.store.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT o.offer_id, o.expires_at, o.delivery_attempts,
+                       q.project_id, q.ticket_id, q.target_role, q.context_version,
+                       p.endpoint
+                FROM work_offers o
+                JOIN work_queue q ON q.queue_id = o.queue_id
+                LEFT JOIN agent_presence p ON p.agent_id = o.agent_id
+                WHERE o.status = 'offered'
+                  AND o.delivery_status IN ('pending', 'failed')
+                  AND o.delivery_attempts < ?
+                  AND o.expires_at > ?
+                ORDER BY o.offered_at ASC
+                LIMIT ?
+                """,
+                (MAX_DELIVERY_ATTEMPTS, _iso(), limit),
+            ).fetchall()
+        return [_row(row) for row in rows]
+
+    def record_wakeup(self, offer_id: str, *, status: str) -> dict[str, Any]:
+        """Record what happened to one knock, and nothing else.
+
+        Never touches the offer's own status, the ticket, or any lease: a
+        notification that failed has lost a notification, and the work it was
+        about is exactly where it was.
+        """
+        if status not in {"delivered", "failed", "skipped"}:
+            raise ValidationError("Unknown wakeup delivery status")
+        with self.store.connection(immediate=True) as connection:
+            connection.execute(
+                """
+                UPDATE work_offers
+                SET delivery_status = ?,
+                    delivery_attempts = delivery_attempts + 1,
+                    delivered_at = CASE WHEN ? = 'delivered' THEN ? ELSE delivered_at END
+                WHERE offer_id = ?
+                """,
+                (status, status, _iso(), offer_id),
+            )
+            return _row(
+                connection.execute(
+                    "SELECT * FROM work_offers WHERE offer_id = ?", (offer_id,)
+                ).fetchone()
+            )
 
     def dispatch_pending_work(
         self, actor: Actor, *, offer_seconds: int = 90, fanout: int = 3

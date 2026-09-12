@@ -503,7 +503,10 @@ CREATE TABLE IF NOT EXISTS agent_presence (
     updated_at TEXT NOT NULL,
     skill_manifest TEXT NOT NULL DEFAULT '[]',
     protocol_version TEXT,
-    skill_compatibility TEXT NOT NULL DEFAULT '{}'
+    skill_compatibility TEXT NOT NULL DEFAULT '{}',
+    -- Where to knock. An agent that registers none is not broken: it polls,
+    -- which stays a complete path on its own.
+    endpoint TEXT
 );
 CREATE INDEX IF NOT EXISTS agent_presence_role_expiry
     ON agent_presence(role, expires_at);
@@ -564,7 +567,11 @@ CREATE TABLE IF NOT EXISTS work_offers (
     status TEXT NOT NULL CHECK (status IN ('offered', 'claimed', 'expired', 'cancelled')),
     offered_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
-    closed_at TEXT
+    closed_at TEXT,
+    delivery_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (delivery_status IN ('pending', 'delivered', 'failed', 'skipped')),
+    delivery_attempts INTEGER NOT NULL DEFAULT 0,
+    delivered_at TEXT
 );
 CREATE INDEX IF NOT EXISTS work_offers_agent_status
     ON work_offers(agent_id, status, expires_at);
@@ -798,6 +805,7 @@ class SQLiteStore:
             self._migrate_evidence_provenance(connection)
             self._migrate_workspace_model(connection)
             self._migrate_event_correlation(connection)
+            self._migrate_agent_wakeup(connection)
             repaired = self._migrate_stale_migration_table_references(connection)
             self._require_clean_foreign_keys(connection, repaired)
 
@@ -949,6 +957,36 @@ class SQLiteStore:
                     f"Upgraded table {table} has {len(violations)} unresolved "
                     "foreign key references"
                 )
+
+    @staticmethod
+    def _migrate_agent_wakeup(connection: sqlite3.Connection) -> None:
+        """Add delivery columns to a database written before wakeups existed.
+
+        Additive, and every default is the behaviour that database already had:
+        no endpoint means polling, and a pending delivery on an existing offer is
+        simply one that was never attempted.
+        """
+        for table, columns in (
+            ("agent_presence", (("endpoint", "TEXT"),)),
+            (
+                "work_offers",
+                (
+                    ("delivery_status", "TEXT NOT NULL DEFAULT 'pending'"),
+                    ("delivery_attempts", "INTEGER NOT NULL DEFAULT 0"),
+                    ("delivered_at", "TEXT"),
+                ),
+            ),
+        ):
+            existing = {
+                row["name"] for row in connection.execute(f'PRAGMA table_info("{table}")')
+            }
+            if not existing:
+                continue
+            for column, declaration in columns:
+                if column not in existing:
+                    connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"
+                    )
 
     @staticmethod
     def _migrate_event_correlation(connection: sqlite3.Connection) -> None:

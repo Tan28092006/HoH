@@ -5,6 +5,7 @@ import os
 import time
 from pathlib import Path
 
+from hoh_control_plane.agent_wakeup import SECRET_VARIABLE, deliver_pending_offers
 from hoh_control_plane.domain import Actor, Role
 from hoh_control_plane.planner_wakeup import deliver_pending
 from hoh_control_plane.service import ControlPlaneService
@@ -22,7 +23,15 @@ def sweep_once(database_path: str | Path) -> dict[str, object]:
     # An urgent Planner problem should not wait for the next backlog scan; a
     # failed attempt simply leaves the request pending for the following sweep.
     wakeups = deliver_pending(service)
-    return {**recovered, "dispatch": dispatch, "planner_wakeups": wakeups}
+    # After dispatch, not before: dispatch is what creates the offers this knocks
+    # about, so the same tick that queues work is the one that announces it.
+    agent_wakeups = deliver_pending_offers(service, secret=os.getenv(SECRET_VARIABLE))
+    return {
+        **recovered,
+        "dispatch": dispatch,
+        "planner_wakeups": wakeups,
+        "agent_wakeups": agent_wakeups,
+    }
 
 
 def main() -> None:
@@ -45,6 +54,9 @@ def main() -> None:
             print(f"Requeued {result['count']} expired lease(s).", flush=True)
         if result["dispatch"]["offered_count"]:
             print(f"Offered {result['dispatch']['offered_count']} queued hand-off(s).", flush=True)
+        if result["agent_wakeups"]["delivered"]:
+            woken = len(result["agent_wakeups"]["delivered"])
+            print(f"Woke {woken} agent(s) about offered work.", flush=True)
         if arguments.once:
             return
         time.sleep(arguments.interval_seconds)
