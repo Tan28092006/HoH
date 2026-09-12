@@ -462,7 +462,7 @@ Tên dưới đây là tên server thực sự đăng ký. Bảy công cụ này
 Chưa hiện thực:
 
 - `workspace.list_projects` — chưa có. Project scope hiện lấy từ `identity.get_capabilities`.
-- `events.list` — chưa có dưới dạng MCP tool. Event đọc được qua REST, cả theo cursor lẫn qua SSE stream (HOH-221); chỉ còn thiếu mặt MCP.
+- `events.list` — trả digest của thay đổi sau một cursor, gộp theo đối tượng bị đổi, không mang payload. Dùng khi thức dậy để hỏi "có gì đổi" thay vì đọc lại trạng thái; một khoảng lặng tốn khoảng 34 token. Bản đầy đủ theo từng event vẫn đọc được qua REST.
 - `context.resolve` — chưa có dưới dạng MCP tool, dù `context:resolve` vẫn là capability string; hiện typed reference được resolve qua `feature.get_context` và `ticket.get_context`. Giữ lại như yêu cầu cho tới khi có nhiều loại reference hơn hai loại đó.
 
 ### 6.2. Planner tools

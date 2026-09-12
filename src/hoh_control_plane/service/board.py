@@ -185,6 +185,89 @@ class BoardMixin:
             "reset": reset,
         }
 
+    def list_event_digest(
+        self, actor: Actor, project_id: str, after: int = 0, limit: int = 200
+    ) -> dict[str, Any]:
+        """What changed since a cursor, collapsed by the thing it changed.
+
+        An agent waking up asks "what moved", not "replay everything". Twenty
+        events across three tickets read as three entries, each saying where that
+        thing ended up, so the answer stays small however busy the project was.
+        Nothing here carries payload text: this surface exists to be cheap and
+        polled often, and the typed references are how a caller gets detail.
+        """
+        require_project(actor, project_id)
+        limit = min(max(limit, 1), 500)
+        if after < 0:
+            raise ValidationError("Event cursor cannot be negative")
+        with self.store.connection() as connection:
+            highest = connection.execute(
+                "SELECT MAX(sequence) AS top FROM audit_events WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()["top"]
+            if highest is not None and after > highest:
+                # A cursor this history cannot contain will never advance, so say
+                # so rather than reporting "nothing new" forever.
+                return {
+                    "project_id": project_id,
+                    "cursor": after,
+                    "next_cursor": 0,
+                    "changed": [],
+                    "event_count": 0,
+                    "has_more": False,
+                    "reset": True,
+                }
+            rows = connection.execute(
+                """
+                SELECT sequence, event_type, aggregate_type, aggregate_id, occurred_at
+                FROM audit_events
+                WHERE project_id = ? AND sequence > ?
+                ORDER BY sequence ASC LIMIT ?
+                """,
+                (project_id, after, limit + 1),
+            ).fetchall()
+            has_more = len(rows) > limit
+            rows = [_row(row) for row in rows[:limit]]
+
+            collapsed: dict[tuple[str, str], dict[str, Any]] = {}
+            for row in rows:
+                key = (row["aggregate_type"], row["aggregate_id"])
+                entry = collapsed.get(key)
+                if entry is None:
+                    collapsed[key] = entry = {
+                        "type": row["aggregate_type"],
+                        "id": row["aggregate_id"],
+                        "ref": f"{row['aggregate_type']}:{row['aggregate_id']}",
+                        "events": 0,
+                        "last_event": row["event_type"],
+                        "at": row["occurred_at"],
+                    }
+                entry["events"] += 1
+                # The newest wins: where it ended up is what a caller acts on.
+                entry["last_event"] = row["event_type"]
+                entry["at"] = row["occurred_at"]
+
+            # Where each ticket actually landed, so a caller need not resolve one
+            # context packet per entry just to learn the resulting state.
+            ticket_ids = [key[1] for key in collapsed if key[0] == "ticket"]
+            if ticket_ids:
+                placeholders = ",".join("?" for _ in ticket_ids)
+                for row in connection.execute(
+                    f"SELECT ticket_id, status FROM tickets WHERE ticket_id IN ({placeholders})",
+                    ticket_ids,
+                ).fetchall():
+                    collapsed[("ticket", row["ticket_id"])]["status"] = row["status"]
+
+        return {
+            "project_id": project_id,
+            "cursor": after,
+            "next_cursor": rows[-1]["sequence"] if rows else after,
+            "changed": list(collapsed.values()),
+            "event_count": len(rows),
+            "has_more": has_more,
+            "reset": False,
+        }
+
     def list_agent_activity(
         self, actor: Actor, project_id: str, after: int = 0, limit: int = 100
     ) -> dict[str, Any]:

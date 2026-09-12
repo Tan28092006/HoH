@@ -318,6 +318,23 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
             lambda: service.discover_work(actor, **arguments),
         )
 
+    @server.tool(name="events.list", structured_output=True)
+    def events_list(
+        project_id: str, after: int = 0, limit: int = 200
+    ) -> dict[str, Any]:
+        """Read what changed since a cursor, collapsed by what it changed.
+
+        Ask this on waking instead of re-reading the board: it answers "what
+        moved" rather than "what is", so a quiet interval costs almost nothing.
+        Entries carry typed references; resolve those only for what you act on.
+        """
+        arguments = {"project_id": project_id, "after": after, "limit": limit}
+        return invoke(
+            "events.list",
+            arguments,
+            lambda: service.list_event_digest(actor, **arguments),
+        )
+
     @server.tool(name="feature.get_context", structured_output=True)
     def feature_get_context(
         feature_ref: str, token_budget: int | None = None
