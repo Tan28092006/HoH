@@ -115,3 +115,51 @@ def test_rolled_back_event_never_signals_or_delivers(service, actors, seeded):
                 raise RuntimeError('rollback')
         assert (await waiting)['status'] == 'timeout'
     asyncio.run(scenario())
+
+
+def test_mcp_surface_exposes_async_wait_for_all_four_roles(service, actors):
+    from hoh_control_plane.mcp_server import create_mcp_server
+    async def check():
+        for name in ('planner', 'developer', 'qa', 'integrator'):
+            server = create_mcp_server(service, actors[name])
+            tools = {tool.name: tool for tool in await server.list_tools()}
+            assert 'work.wait_for_event' in tools
+            assert tools['work.wait_for_event'].inputSchema['properties']['timeout_seconds']['default'] == 43200
+    asyncio.run(check())
+
+
+def test_completed_job_wakes_only_its_owner(service, actors, seeded):
+    from hoh_control_plane.event_wait import wait_for_event
+    from datetime import UTC, datetime, timedelta
+    register(service, actors['developer'])
+    now = datetime.now(UTC)
+    with service.store.connection(immediate=True) as db:
+        db.execute("INSERT INTO leases VALUES ('owned','DEV-142',?,'developer',?,?,?)",
+                   (actors['developer'].agent_id, now.isoformat(), now.isoformat(), (now + timedelta(minutes=5)).isoformat()))
+        db.execute("INSERT INTO worktree_provision_jobs (provision_id,project_id,ticket_id,lease_id,expected_version,requested_by,status,created_at) VALUES ('provision_test','project-1','DEV-142','owned',1,?,'QUEUED',?)",
+                   (actors['developer'].agent_id, now.isoformat()))
+    async def check():
+        with pytest.raises(AuthorizationError):
+            await wait_for_event(service, actors['developer_2'], 'project-1', job_kind='provision', job_id='provision_test', timeout_seconds=1)
+        waiting = asyncio.create_task(wait_for_event(service, actors['developer'], 'project-1', job_kind='provision', job_id='provision_test', timeout_seconds=3))
+        await asyncio.sleep(.05)
+        assert not waiting.done()
+        with service.store.connection(immediate=True) as db:
+            db.execute("UPDATE worktree_provision_jobs SET status='COMPLETED' WHERE provision_id='provision_test'")
+        result = await waiting
+        assert result['event']['kind'] == 'job_completed'
+        assert result['event']['poll_tool'] == 'dev.get_worktree_provision'
+    asyncio.run(check())
+
+
+def test_consumed_offer_does_not_replay_stale_work_to_another_session(service, actors, seeded):
+    from hoh_control_plane.event_wait import wait_for_event
+    for name in ('developer', 'developer_2'):
+        register(service, actors[name])
+    release(service, actors)
+    async def check():
+        await wait_for_event(service, actors['developer'], 'project-1', timeout_seconds=1)
+        service.claim_ticket(actors['developer_2'], ticket_id='DEV-142', expected_version=2, lease_seconds=900)
+        result = await wait_for_event(service, actors['developer'], 'project-1', timeout_seconds=.1)
+        assert result['status'] == 'timeout'
+    asyncio.run(check())
