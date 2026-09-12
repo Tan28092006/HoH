@@ -493,6 +493,29 @@ CREATE INDEX IF NOT EXISTS merge_jobs_ticket_created
 CREATE UNIQUE INDEX IF NOT EXISTS merge_jobs_one_active_ticket
     ON merge_jobs(ticket_id) WHERE status IN ('QUEUED', 'RUNNING');
 
+CREATE TABLE IF NOT EXISTS runtime_state (
+    state_key TEXT PRIMARY KEY,
+    state_value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS worker_executions (
+    execution_id TEXT PRIMARY KEY,
+    runner_id TEXT NOT NULL,
+    job_kind TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('RUNNING', 'FINISHED', 'INTERRUPTED')),
+    started_at TEXT NOT NULL,
+    heartbeat_at TEXT NOT NULL,
+    completed_at TEXT,
+    outcome TEXT
+);
+CREATE INDEX IF NOT EXISTS worker_executions_runner_status ON worker_executions(runner_id, status);
+CREATE TABLE IF NOT EXISTS runtime_actions (
+    action_id TEXT PRIMARY KEY,
+    action TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS worktree_ownership (
     ticket_id TEXT PRIMARY KEY REFERENCES tickets(ticket_id),
     lease_id TEXT NOT NULL,

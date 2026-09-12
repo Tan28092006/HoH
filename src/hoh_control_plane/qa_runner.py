@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from hoh_control_plane.domain import ValidationError
+from hoh_control_plane.managed_process import run_managed
 
 
 _MAX_OUTPUT_CHARS = 200_000
@@ -84,19 +85,18 @@ class ProjectTestRunner:
                 environment_digest=self.environment_digest(command, resolved_source),
             )
         try:
-            completed = subprocess.run(
+            completed = run_managed(
                 command,
                 cwd=worktree_path,
-                check=False,
-                capture_output=True,
-                text=True,
-                errors="replace",
                 env=environment,
-                shell=False,
                 timeout=timeout_seconds,
             )
+            if completed.returncode == 127 and '[hoh:exec-error]' in completed.stderr:
+                raise ValidationError('Registered project test command cannot be executed')
             exit_code = completed.returncode
-            timed_out = False
+            timed_out = completed.timed_out
+            if timed_out:
+                exit_code = None
             stdout = completed.stdout
             stderr = completed.stderr
         except subprocess.TimeoutExpired as error:
@@ -211,15 +211,10 @@ class ProjectTestRunner:
         if not package_root.is_file():
             return None
         try:
-            probe = subprocess.run(
+            probe = run_managed(
                 [command[0], "-c", _SOURCE_IDENTITY_PROBE],
                 cwd=worktree_path,
-                check=False,
-                capture_output=True,
-                text=True,
-                errors="replace",
                 env=environment,
-                shell=False,
                 timeout=_SOURCE_IDENTITY_PROBE_TIMEOUT_SECONDS,
             )
         except (subprocess.TimeoutExpired, OSError):
