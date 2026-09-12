@@ -5,7 +5,7 @@ project scope and bearer identity. Install the wheel on the **service host**;
 HTTP clients install only the skills and MCP configuration.
 
 ```sh
-python -m pip install hoh_control_plane-0.2.0-py3-none-any.whl
+python -m pip install hoh_control_plane-0.3.0-py3-none-any.whl
 hoh-agent-kit --role developer --server-url https://hoh.example.com/mcp --output ./developer-kit
 ```
 

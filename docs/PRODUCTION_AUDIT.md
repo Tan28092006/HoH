@@ -1,5 +1,10 @@
 # Rà soát production và vận hành HoH — 2026-09-12
 
+> Đây là audit gốc của bản 0.2. Các mô tả thiếu supervisor, QA dùng worktree
+> Developer và chưa chạy PostgreSQL phản ánh thời điểm audit ban đầu. Bản kế tiếp
+> đã bổ sung các cơ chế trong [RUNTIME_OPERATIONS.md](RUNTIME_OPERATIONS.md);
+> xem [OPERATIONAL_VALIDATION.md](OPERATIONAL_VALIDATION.md) cho kết quả mới.
+
 ## Kết luận
 
 HoH đã có nền tảng điều phối công việc phần mềm tương đối rõ: phân vai, context

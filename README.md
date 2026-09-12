@@ -1,5 +1,9 @@
 # Harness Control Plane
 
+Native worker supervision and crash recovery are documented in
+[RUNTIME_OPERATIONS.md](docs/RUNTIME_OPERATIONS.md). The supervisor runs on
+Windows without Docker/WSL; PostgreSQL may be native or remote.
+
 A runnable MVP for coordinating independent Planner, Developer, QA and Integrator agents through a shared MCP control plane.
 
 The implementation includes:

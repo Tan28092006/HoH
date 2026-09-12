@@ -1,5 +1,9 @@
 # Candidate UI verification
 
+On supervised HoH deployments, service QA uses a private Git snapshot of the
+frozen SHA. Keep evidence outside that disposable snapshot and retain the same
+job ID while polling. A Developer's dirty checkout is not the QA input.
+
 Use for rendered UI or interaction changes. Source inspection, HTTP 200 and passing
 API tests do not establish a user journey.
 

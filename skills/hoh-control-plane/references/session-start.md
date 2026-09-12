@@ -11,6 +11,11 @@ only after the earlier session has stopped. Two concurrent workers need differen
 credentials/identities; HoH leases are keyed by identity, not chat/session ID.
 
 For an active assignment, resolve current ticket context and its required fields.
+In supervised deployments, a queued job waits for the service-host worker pool.
+Keep its ID and poll it; do not launch a duplicate local worker. Report a stale
+supervisor or reconciliation-required merge to the operator. A new lease for
+the same identity has a new assignment; never infer ownership from an agent
+name or an old filesystem path.
 Renew the existing lease or poll its recorded job; do not duplicate a claim,
 submission, QA run or merge. Missing chat history does not mean the job failed.
 An expired lease must be recovered through the role workflow, never by SQL.

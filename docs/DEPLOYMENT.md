@@ -7,7 +7,9 @@ the architecture specification also includes future requirements.
 ## Pilot topology
 
 One trusted execution host runs API/dashboard, HTTP MCP, scheduler, Git repositories
-and detached QA/integration/provisioning workers. Keep SQLite on local disk. Back
+and native supervised workers. Set `HOH_WORKER_MODE=supervised` and run
+`hoh-supervisor`; see [RUNTIME_OPERATIONS.md](RUNTIME_OPERATIONS.md). Docker/WSL
+is optional. Keep SQLite on local disk. Back
 up using SQLite's backup API and retain corresponding Git objects/evidence.
 A copied live WAL database file alone is not a backup plan.
 
@@ -21,8 +23,8 @@ the configured REST identity. Never embed bearer tokens in JavaScript.
 
 | Model | Developer | QA |
 |---|---|---|
-| colocated | Ticket/identity/generation worktree; client needs access to the service path | Frozen candidate in the assigned worktree |
-| agent_workspace | Isolated local clone/worktree; deliver the commit to the service repo | Detached checkout of the frozen SHA on the service host |
+| colocated | Ticket/identity/lease/generation worktree; client needs access to the service path | Private Git snapshot of the frozen SHA |
+| agent_workspace | Isolated local clone/worktree; deliver the commit to the service repo | Private Git snapshot of the frozen SHA on the service host |
 
 Pushing to a Git provider does not automatically fetch into the service clone.
 Configure delivery/fetch and grant Git access separately. Do not push over the
@@ -60,11 +62,13 @@ PostgreSQL uses a transaction advisory lock per schema for write transactions.
 `BEGIN` alone does not preserve read/check/write invariants. This is a correctness
 boundary and serializes writers; row/predicate locking is separate work requiring
 concurrent tests. Set `HOH_TEST_POSTGRES_DSN` to a throwaway DB for conformance.
-This audit environment had no running PostgreSQL server.
+The PostgreSQL 17.10 conformance suite has now run successfully; see the latest
+operational validation report. HA and backup/restore tests remain separate gates.
 
-A DB server does not make Git/artifact paths portable. Keep execution on one host
-until host affinity, Git delivery, durable artifacts and crash reconciliation are
-implemented and tested. Remote agent_workspace development remains possible.
+A DB server does not make Git/artifact paths portable. The supervisor binds its
+database to one execution host. Multi-host routing, Git delivery, durable shared
+artifacts and failover need separate implementation. Remote agent_workspace
+development remains possible.
 
 ## Recovery
 
@@ -72,16 +76,18 @@ Run the scheduler under an OS service supervisor. Inbox polling also recovers
 expired leases. Old provision/submission/QA jobs are fenced and retained as FAILED.
 Poll a current job by ID instead of submitting duplicates.
 
-A running merge whose worker disappears needs Git/DB reconciliation before retry:
-the fast-forward may already have happened. Failed worktree publication can leave
+A queued merge records its durable intent and uses an OS repository lock. The
+supervisor reconciles interrupted merges; ambiguous/changed state remains for
+operator review. See `hoh-ops status` and `hoh-ops reconcile`. Failed worktree publication can leave
 an unassigned checkout; retain and inspect it before cleanup. Automatic recursive
 cleanup is not implemented.
 
 Candidate commands run as the worker OS user. For code outside a trusted team,
 isolate workers with a sandbox/container/VM and minimal secrets. Removing HoH env
-vars does not prevent access to home credentials, Git metadata, network or child
-processes. Worker pooling, quotas and process-tree timeout remain hardening work.
+vars does not prevent access to home credentials or network. The native supervisor
+bounds worker concurrency and owns process-tree lifetime/timeout. It provides no
+per-worker privilege isolation or CPU/RAM/disk/network quotas.
 
 Measure queue age, blocked duration, rework, integrated throughput, evidence
 coverage, contention and artifact growth. Ticket counts are not delivery forecasts.
-See [validation](VALIDATION.md) for actual checks performed on this release.
+See [operational validation](OPERATIONAL_VALIDATION.md) for checks on this release.
