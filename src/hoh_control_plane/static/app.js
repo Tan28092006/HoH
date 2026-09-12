@@ -188,6 +188,8 @@ function matchesFeatureFilter(ticket) {
 }
 
 function renderBoard() {
+  const focusedTicketId = boardElement.contains(document.activeElement)
+    ? document.activeElement.closest("[data-ticket-id]")?.dataset.ticketId : null;
   const alwaysVisible = ["READY", "DEV_IN_PROGRESS", "QA_READY", "REWORK"];
   const visibleColumns = statusColumns.filter(([status]) => {
     if (state.statusFilter !== "all") return status === state.statusFilter;
@@ -203,6 +205,11 @@ function renderBoard() {
   boardElement.querySelectorAll(".ticket").forEach(button => {
     button.addEventListener("click", () => selectTicket(button.dataset.ticketId));
   });
+  if (focusedTicketId) {
+    const replacement = [...boardElement.querySelectorAll(".ticket")]
+      .find(button => button.dataset.ticketId === focusedTicketId);
+    (replacement || statusFilterElement).focus({ preventScroll: true });
+  }
   if (state.selectedTicketId) selectTicket(state.selectedTicketId);
 }
 

@@ -35,7 +35,10 @@ không suy diễn lượt dở dang thành pass toàn bộ. Log của cả hai l
 release. Docker PostgreSQL thử nghiệm đã dừng theo yêu cầu của người dùng.
 Không cài PostgreSQL native hoặc bật lại WSL để đo tiếp.
 
-Kết quả gate native cuối cùng và QA UI được ghi trong release manifest và log
+Gate native tại commit `54d1c8ee7abff46df66f89a45aa015c2ec496367`: **684 passed,
+25 skipped, 3 warnings; coverage 84,89%; 495,48 giây; exit 0**. Các commit sau
+chỉ sửa focus dashboard, thêm browser regression và cập nhật tài liệu; backend
+Python giữ nguyên. Kết quả native và QA UI được ghi trong release manifest và log
 `evidence/native-tests.log`, `evidence/ui-tests.log`. Command tái lập:
 
 ```powershell
@@ -53,8 +56,13 @@ scenario supervisor trên PG.
 ## UI, kit và artifact identity
 
 QA UI dùng Chrome đã cài trên máy, fixture DB và server loopback riêng; xác nhận
-import đúng checkout. Năm case gồm các viewport 1440/768/375, filter/context,
-keyboard cơ bản, empty/error và stale response. Mỗi case giữ screenshot, trace,
+import đúng checkout. Lượt đầu trên commit 54d1c8e có 1 fail/4 pass: background
+refresh thay DOM của ticket làm mất focus bàn phím. Browser regression tái hiện
+lỗi trước sửa; dashboard hiện giữ focus trên cùng ticket, hoặc chuyển về bộ lọc
+status khi ticket không còn trong view. Không bỏ qua assertion bàn phím.
+
+Sáu case cuối gồm các viewport 1440/768/375, filter/context, keyboard qua refresh,
+empty/error và stale response. Mỗi case giữ screenshot, trace,
 SHA, trạng thái Git sạch, request/errors và checksum. Đây chưa phải kiểm thử
 visual baseline hoặc accessibility đầy đủ. Các project khác cần browser suite
 của chính project đó; bộ fixture này chỉ kiểm chứng dashboard HoH.
