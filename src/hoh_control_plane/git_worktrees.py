@@ -72,9 +72,12 @@ class GitWorktreeManager:
         ticket_id: str,
         agent_id: str,
         start_commit: str | None = None,
+        generation: str | None = None,
     ) -> PreparedWorktree:
         repository = Path(self.validate_repository(repository_path))
         branch_ref = self._branch_ref(project_id, ticket_id, agent_id)
+        if generation is not None:
+            branch_ref += "/" + self._safe_segment(generation, "generation")
         base_commit = self._resolve_commit(repository, f"refs/heads/{default_branch}")
         initial_commit = (
             self._resolve_commit(repository, start_commit) if start_commit else base_commit
@@ -90,6 +93,10 @@ class GitWorktreeManager:
         if ancestry.returncode != 0:
             raise ValidationError("Worktree start commit does not descend from the default branch")
         worktree_path = self._worktree_path(project_id, ticket_id, agent_id)
+        if generation is not None:
+            worktree_path = (worktree_path / generation).resolve()
+            if not worktree_path.is_relative_to(self.worktree_root):
+                raise ValidationError("Worktree path is invalid")
         if worktree_path.exists():
             raise ValidationError("Assigned worktree path already exists")
         branch_exists = self._git(
@@ -364,6 +371,27 @@ class GitWorktreeManager:
             candidate,
         )
         return sorted({line.strip().replace("\\", "/") for line in result.stdout.splitlines() if line.strip()})
+
+    @contextmanager
+    def qa_checkout(self, *, repository_path: str, test_run_id: str, candidate_commit: str) -> Iterator[str]:
+        """Execute a remote Developer's frozen SHA in a separate service checkout."""
+        repository = Path(self.validate_repository(repository_path))
+        candidate = self._resolve_commit(repository, candidate_commit)
+        path = self.qa_path(test_run_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # A previous run is never force-removed on entry. A crash needs explicit
+        # recovery, and a second worker must not delete a live browser/test tree.
+        self._git(repository, "worktree", "add", "--detach", str(path), candidate)
+        try:
+            yield self.verify_frozen_candidate(str(path), candidate)
+        finally:
+            self._discard_integration_checkout(repository, path)
+
+    def qa_path(self, test_run_id: str) -> Path:
+        path = (self.worktree_root / ".qa" / self._safe_segment(test_run_id, "test_run_id")).resolve()
+        if not path.is_relative_to(self.worktree_root):
+            raise ValidationError("QA worktree path is invalid")
+        return path
 
     @contextmanager
     def integration_checkout(

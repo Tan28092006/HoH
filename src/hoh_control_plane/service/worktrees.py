@@ -197,13 +197,35 @@ class WorktreeMixin:
         snapshot: dict[str, Any],
         takeover: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """Create the new worktree and record the assignment under one write lock."""
+        """Provision outside the database lock, then publish after reauthorization.
+
+        A unique attempt path also lets an A -> B -> A takeover preserve A's old
+        directory. If authorization expires during Git, the unpublished checkout
+        is retained for operator recovery; it is never handed to an agent.
+        """
+        prepared = self.git_worktrees.prepare(
+            repository_path=snapshot["repository"]["repository_path"],
+            default_branch=snapshot["project"]["default_branch"],
+            project_id=snapshot["project_id"],
+            ticket_id=ticket_id,
+            agent_id=actor.agent_id,
+            start_commit=None if takeover is None else takeover["start_commit"],
+            generation=_id("attempt"),
+        )
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             self._expect_version(ticket, expected_version)
             if ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:
                 raise ConflictError("Worktrees can only be prepared for active development work")
             self._require_active_lease(connection, actor, ticket_id, lease_id)
+            repository_now = _row(connection.execute(
+                "SELECT * FROM project_repositories WHERE project_id = ?", (project_id,)
+            ).fetchone())
+            if repository_now is None or any(
+                repository_now[field] != snapshot["repository"][field]
+                for field in ("repository_path", "workspace_model")
+            ):
+                raise ConflictError("Repository configuration changed while the worktree was being prepared")
             existing = _row(
                 connection.execute(
                     "SELECT * FROM worktrees WHERE ticket_id = ?", (ticket_id,)
@@ -218,14 +240,6 @@ class WorktreeMixin:
                     "Ticket worktree assignment changed while it was being prepared"
                 )
 
-            prepared = self.git_worktrees.prepare(
-                repository_path=snapshot["repository"]["repository_path"],
-                default_branch=snapshot["project"]["default_branch"],
-                project_id=project_id,
-                ticket_id=ticket_id,
-                agent_id=actor.agent_id,
-                start_commit=None if takeover is None else takeover["start_commit"],
-            )
             timestamp = _iso()
             if existing is None:
                 connection.execute(

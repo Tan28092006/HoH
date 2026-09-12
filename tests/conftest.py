@@ -4,6 +4,19 @@ from pathlib import Path
 
 import pytest
 
+
+def pytest_addoption(parser):
+    parser.addoption("--run-ui", action="store_true", help="Run real browser acceptance tests")
+    parser.addoption("--ui-artifacts", default=None, help="Directory outside the candidate for browser evidence")
+    parser.addoption("--ui-channel", default=None, help="Installed browser channel, e.g. chrome; default is Playwright Chromium")
+
+
+def pytest_collection_modifyitems(config, items):
+    if not config.getoption("--run-ui"):
+        for item in items:
+            if "ui" in item.keywords:
+                item.add_marker(pytest.mark.skip(reason="Enable browser acceptance with --run-ui"))
+
 from hoh_control_plane.domain import Actor, Role
 from hoh_control_plane.service import ControlPlaneService
 from hoh_control_plane.store import SQLiteStore

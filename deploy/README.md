@@ -1,5 +1,8 @@
 # Deploying the control plane across machines
 
+Start with [current deployment boundaries](../docs/DEPLOYMENT.md). A shared
+database alone does not make local worktrees, evidence or worker processes portable.
+
 The control plane assumes one thing about its network: that it is not on one.
 Every process binds loopback, every credential is a bearer token, and nothing
 here terminates TLS. That is deliberate — a reverse proxy does TLS better than
@@ -66,9 +69,10 @@ writes a report there and records it as `evidence://local/<candidate>/<run>.json
 the Integrator later resolves that same reference against its own artifact root.
 **If the two machines do not see the same storage, that resolution finds nothing.**
 
-Point `HOH_ARTIFACT_ROOT` at a mount every machine shares. Worktrees are the
-exception and are meant to be local — a Developer works in its own checkout and
-what travels to the next role is the commit, not the tree.
+The code puts worktrees and evidence below the same artifact root. Use one
+execution host until storage and host-affinity adapters separate those concerns.
+Sharing the whole root is not a supported way to scale Git worktrees.
+A remote Developer can instead use agent_workspace.
 
 Failing this does not raise. When the artifact is absent, the digest falls back
 to covering the retained record, which is the QA agent's claim about a file it

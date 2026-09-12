@@ -16,6 +16,20 @@ def _expire_lease(store, lease_id: str) -> None:
         )
 
 
+def test_small_inbox_does_not_materialize_offers_for_the_whole_backlog(service, actors, seeded):
+    for index in range(12):
+        service.create_ticket(actors["planner"], "payment-retry", f"BOUND-{index}", "Bounded", "Backlog",
+                              Role.DEVELOPER, ["Visible"], [], [f"part-{index}/**"], ready=True)
+    service.register_agent(actors["developer"], skills=["hoh-developer"])
+    first = service.get_agent_inbox(actors["developer"], "project-1", limit=3)
+    second = service.get_agent_inbox(actors["developer"], "project-1", limit=3)
+    assert first["offered_now"] == 3
+    assert second["offered_now"] == 0
+    with service.store.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM work_offers WHERE agent_id = ? AND status = 'offered'",
+                                  (actors["developer"].agent_id,)).fetchone()[0] == 3
+
+
 def _submit_candidate(
     service: ControlPlaneService, actors: dict[str, Actor], seeded: dict[str, object]
 ) -> dict[str, object]:

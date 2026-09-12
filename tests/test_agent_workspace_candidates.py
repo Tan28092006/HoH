@@ -126,6 +126,25 @@ def test_a_commit_the_service_cannot_resolve_is_refused(service, actors, remote)
     assert "cannot resolve" in str(error.value).lower()
 
 
+def test_remote_candidate_can_run_qa_on_the_service_without_a_developer_worktree(service, actors, remote):
+    import json
+    import sys
+    service.configure_test_command(actors["planner"], "project-1", [sys.executable, "-c",
+        "from pathlib import Path; assert Path('src/checkout/retry.py').read_text() == 'verified\\n'"], 30)
+    _git(remote["clone"], "checkout", "-b", remote["branch"])
+    commit = _commit_in_agent_clone(remote["clone"], "src/checkout/retry.py", "verified\n", "Candidate")
+    _git(remote["clone"], "push", "origin", remote["branch"])
+    candidate = _submit(service, actors, remote, commit)
+    claim = service.claim_qa(actors["qa"], remote["ticket"]["ticket_id"], candidate["ticket"]["version"], 900)
+    queued = service.queue_project_tests(actors["qa"], remote["ticket"]["ticket_id"], claim["lease"]["lease_id"])
+    result = service.execute_queued_project_test(queued["test_run"]["test_run_id"])
+    assert result["status"] == "COMPLETED", result
+    context = service.get_ticket_context(actors["qa"], remote["ticket"]["ticket_id"])
+    assert context["test_runs"][0]["exit_code"] == 0
+    assert not Path(queued["test_run"]["worktree_path"]).exists()
+    assert context["worktree"] is None
+
+
 def test_a_candidate_that_does_not_descend_from_its_claimed_base_is_refused(
     service, actors, remote
 ) -> None:

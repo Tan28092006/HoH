@@ -68,6 +68,12 @@ def test_the_stream_emits_change_signals_after_a_cursor(tmp_path: Path) -> None:
     assert sequences == sorted(sequences)
 
 
+def test_native_eventsource_can_read_the_explicit_local_demo(tmp_path):
+    with TestClient(_app(tmp_path)) as client:
+        frames = _read(client, STREAM)
+        assert any(frame.get("event") == "change" for frame in frames)
+
+
 def test_a_signal_carries_identity_not_content(tmp_path: Path) -> None:
     """payload is free-form text written by whichever call emitted the event."""
     with TestClient(_app(tmp_path)) as client:

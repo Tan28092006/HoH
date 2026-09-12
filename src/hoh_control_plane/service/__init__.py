@@ -64,6 +64,7 @@ from hoh_control_plane.service._common import (
     uuid4,
 )
 from hoh_control_plane.service.planning import PlanningMixin
+from hoh_control_plane.service.session import SessionMixin
 from hoh_control_plane.service.discovery import DiscoveryMixin
 from hoh_control_plane.service.context import ContextMixin
 from hoh_control_plane.service.experience import ExperienceMixin
@@ -81,6 +82,7 @@ from hoh_control_plane.service.validation import ValidationMixin
 
 
 class ControlPlaneService(
+    SessionMixin,
     PlanningMixin,
     DiscoveryMixin,
     ContextMixin,

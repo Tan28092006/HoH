@@ -17,7 +17,7 @@ For each work item:
    - Verify assigned path/branch/base and changed paths. Dirty files may be this session's unfinished work: inspect and preserve them, never reset them to satisfy a cleanliness check. If no assignment exists yet, resume the recorded provision job or request provisioning once.
    - Only fall through to steps 4-5 when there is no existing lease for this agent on this ticket, or that lease has genuinely expired (not merely slow to respond).
 4. Otherwise, claim with the current ticket version and retain the returned lease ID.
-5. If the project has a configured repository and step 3 did not apply, call `dev.prepare_worktree` and work only in its returned path and branch.
+5. Follow `session.bootstrap`'s workspace model (see the base skill's session-start reference). For `colocated`, call `dev.prepare_worktree` and edit only its returned path/branch after the provision completes. For `agent_workspace`, create a ticket worktree in your own clone and deliver the committed branch to the service repository before submission; service provisioning is unavailable for this model.
 6. Establish a baseline for the target behavior when possible.
 7. Implement only within the ticket outcome and write scope.
 8. Run focused tests for changed behavior and adjacent regressions. Reproduce bugs before fixing them when feasible. Target build/type/lint checks to affected components. Expand for shared contracts, migrations, concurrency or concrete failures. Honor mandatory project gates; do not repeatedly run a full suite just to increase coverage. Independent end-to-end acceptance belongs to QA.

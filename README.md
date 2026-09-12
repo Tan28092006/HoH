@@ -18,6 +18,12 @@ The implementation includes:
 - Read-only Jira-style Kanban UI with ticket progress, dispatch queue and Agent activity.
 - Official MCP Python SDK server over stdio.
 - Local role skills under `skills/`.
+- Authenticated HTTP MCP, portable per-role kits and `session.bootstrap` for fresh chats.
+- Optional browser QA with candidate-specific fixtures, screenshots and traces.
+
+See the [production audit](docs/PRODUCTION_AUDIT.md) for measured improvements and
+remaining scale limits, [agent kit setup](docs/AGENT_KIT.md) to onboard a new chat,
+and [browser QA](docs/UI_QA.md) for candidate UI acceptance.
 
 The full architecture is in [HOH_MULTI_AGENT_CONTROL_PLANE.md](./HOH_MULTI_AGENT_CONTROL_PLANE.md).
 
@@ -84,7 +90,9 @@ All roles receive `identity.get_capabilities`, `work.discover`, `feature.get_con
 
 The browser UI is observation-only: it shows the Kanban ticket state and the redacted MCP activity feed. Ticket creation, state changes and evidence submission happen only through an authenticated role MCP server. In local mode the UI uses a local read identity; a production dashboard must be placed behind an authenticated reverse proxy or session layer rather than embedding bearer tokens in browser JavaScript.
 
-The server follows the official Python SDK's stdio transport for local hosts. A future deployment adapter can mount Streamable HTTP with production token validation.
+The server supports stdio and authenticated Streamable HTTP/SSE. Network clients
+require configured bearer identities, TLS and a public-host allowlist.
+See [deployment](docs/DEPLOYMENT.md).
 
 ## REST API
 
@@ -96,4 +104,11 @@ Production mode is the default when `HOH_LOCAL_MODE` is unset. It ignores claime
 
 ## Current scope
 
-This MVP deliberately uses a modular monolith and SQLite so the core workflow is easy to inspect and test. Its local Integrator accepts only a fast-forward candidate whose recorded base still matches the checked-out default branch; it does not yet run post-merge mainline tests, create provider PRs, or resolve textual conflicts automatically. It has a durable outbox but no adapter that can wake a stopped/idle Claude or Codex chat: that requires a platform-specific webhook, automation or desktop notification adapter. PostgreSQL, object storage, Jira synchronization, server-side event streaming and managed OAuth are subsequent phases. The schema and service boundaries are structured so those adapters can be added without changing the agent workflow contract.
+The modular monolith supports SQLite and an optional PostgreSQL store, SSE board
+updates, durable outbox notifications and release gates. PostgreSQL currently
+serializes write transactions to preserve service invariants; multi-host execution
+still needs artifact storage and worker routing. The Integrator uses a guarded
+fast-forward; automatic textual conflict resolution and provider PR creation are
+outside this implementation. Notification delivery requires a receiver/host adapter
+to wake a stopped chat. Managed OAuth, sandboxed worker supervision, quotas,
+artifact lifecycle and large-board pagination remain production work.

@@ -68,6 +68,7 @@ class LeaseMixin:
                     else TicketStatus.READY
                 )
                 next_version = ticket["version"] + 1
+                self._retire_expired_jobs(connection, lease)
                 connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease["lease_id"],))
                 connection.execute(
                     """
@@ -98,6 +99,25 @@ class LeaseMixin:
                     }
                 )
         return {"count": len(requeued), "requeued": requeued}
+
+    @staticmethod
+    def _retire_expired_jobs(connection: Connection, lease: dict[str, Any]) -> None:
+        # These workers reauthorize before publishing. Fence their old DB jobs
+        # as the lease is retired, otherwise the partial unique indexes prevent
+        # every replacement from queueing work indefinitely after a crash.
+        for table in ("worktree_provision_jobs", "candidate_submission_jobs", "qa_test_jobs"):
+            connection.execute(
+                f"UPDATE {table} SET status = 'FAILED', completed_at = ?, error_message = ? "
+                "WHERE lease_id = ? AND status IN ('QUEUED', 'RUNNING')",
+                (_iso(), "Owning lease expired; replacement work requires a new authorized job.", lease["lease_id"]),
+            )
+        # A running merge may already have changed Git. Keep that record for
+        # reconciliation; blindly retrying it could duplicate an external effect.
+        connection.execute(
+            "UPDATE merge_jobs SET status = 'FAILED', completed_at = ?, error_message = ? "
+            "WHERE lease_id = ? AND status = 'QUEUED'",
+            (_iso(), "Owning lease expired before merge execution.", lease["lease_id"]),
+        )
 
     def record_tool_call(
         self,
@@ -252,6 +272,7 @@ class LeaseMixin:
             "SELECT * FROM leases WHERE ticket_id = ?", (ticket_id,)
         ).fetchone()
         if lease and datetime.fromisoformat(lease["expires_at"].replace("Z", "+00:00")) <= _now():
+            self._retire_expired_jobs(connection, dict(lease))
             connection.execute("DELETE FROM leases WHERE ticket_id = ?", (ticket_id,))
             current = self._ticket(connection, ticket_id)
             fallback = (

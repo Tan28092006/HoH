@@ -167,6 +167,12 @@ class ProjectTestRunner:
 
     def _build_environment(self, worktree_path: str) -> dict[str, str]:
         environment = os.environ.copy()
+        # A candidate test must not inherit the control-plane's bearer token map,
+        # database DSN or agent identity. OS-level sandboxing is still required
+        # for hostile code: removing env vars is not a filesystem boundary.
+        for key in list(environment):
+            if key.upper().startswith("HOH_"):
+                environment.pop(key)
         for key in (
             "COVERAGE_PROCESS_START",
             "COV_CORE_SOURCE",

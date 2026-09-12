@@ -11,6 +11,16 @@ from pathlib import Path
 
 import pytest
 
+
+def test_candidate_tests_do_not_inherit_control_plane_credentials(tmp_path, monkeypatch):
+    from hoh_control_plane.qa_runner import ProjectTestRunner
+    monkeypatch.setenv("HOH_MCP_TOKENS_JSON", "private-token-map")
+    monkeypatch.setenv("HOH_POSTGRES_DSN", "private-database-credential")
+    runner = ProjectTestRunner(tmp_path / "evidence")
+    execution = runner.execute([sys.executable, "-c",
+        "import os; assert not any(k.startswith('HOH_') for k in os.environ)"], str(tmp_path), 30)
+    assert execution.exit_code == 0, execution.stderr
+
 from hoh_control_plane import qa_worker
 from hoh_control_plane.domain import Actor, ConflictError, Role, ValidationError
 from hoh_control_plane.qa_runner import ProjectTestRunner
@@ -203,7 +213,11 @@ def test_expiring_a_qa_lease_keeps_its_durable_test_job_but_requeues_the_ticket(
         ).fetchone()
     assert retained_job is not None
     assert retained_job["lease_id"] == qa_claim["lease"]["lease_id"]
-    assert retained_job["status"] == "QUEUED"
+    assert retained_job["status"] == "FAILED"
+    replacement = service.claim_qa(actors["qa"], ticket["ticket_id"], swept["requeued"][0]["version"], 900)
+    new_run = service.queue_project_tests(actors["qa"], ticket["ticket_id"], replacement["lease"]["lease_id"])
+    assert new_run["test_run"]["test_run_id"] != queued["test_run"]["test_run_id"]
+    assert new_run["test_run"]["status"] == "QUEUED"
 
 
 def test_store_migrates_legacy_qa_test_job_lease_foreign_key_without_losing_job(

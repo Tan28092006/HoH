@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+
+def test_production_board_requires_auth_and_project_scope(tmp_path):
+    from fastapi.testclient import TestClient
+    from hoh_control_plane.api import create_app
+    from hoh_control_plane.domain import Actor, Role
+    app = create_app(tmp_path / "private-board.db", local_mode=False, seed_demo=True,
+                     token_identities={"scoped-test-token": Actor("observer", Role.PLANNER, frozenset({"other"}))})
+    with TestClient(app) as client:
+        assert client.get("/api/v1/projects/demo/board").status_code == 401
+        assert client.get("/api/v1/projects/demo/board", headers={"Authorization": "Bearer scoped-test-token"}).status_code == 403
+
 from pathlib import Path
 
 from fastapi.testclient import TestClient

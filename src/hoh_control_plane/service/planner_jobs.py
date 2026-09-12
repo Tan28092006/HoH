@@ -352,7 +352,7 @@ class PlannerJobMixin:
     ) -> list[dict[str, Any]]:
         """List planning work separately from the executable Developer/QA queue."""
         require_project(actor, project_id)
-        with self.store.connection() as connection:
+        with self.store.connection(immediate=True) as connection:
             self._expire_planner_job_leases(connection)
             statuses = (
                 ("READY", "IN_PROGRESS", "RESOLVED")

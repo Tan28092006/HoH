@@ -215,3 +215,63 @@ def test_a_client_supplied_role_cannot_override_the_credential(service) -> None:
 
     assert actor.role is Role.DEVELOPER
     assert actor.agent_id == "dev-01"
+
+
+@pytest.mark.parametrize("launcher", ["_start_qa_test_worker", "_start_worktree_provision_worker", "_start_candidate_submission_worker", "_start_merge_worker"])
+def test_postgres_worker_credentials_are_not_in_process_arguments(launcher):
+    from unittest.mock import patch
+    from hoh_control_plane import mcp_server
+    dsn = "postgresql://fixture-user:fixture-password@db.invalid/hoh"
+    with patch.object(mcp_server.subprocess, "Popen") as popen:
+        getattr(mcp_server, launcher)(dsn, "fixture-job")
+    assert all("fixture-password" not in arg for arg in popen.call_args.args[0])
+    assert popen.call_args.kwargs["env"]["HOH_DATABASE_URL"] == dsn
+
+
+@pytest.mark.parametrize("header", ["Bearer café", "Bearer 🔑"])
+def test_non_ascii_credentials_are_rejected_without_a_server_error(header) -> None:
+    with pytest.raises(AuthorizationError):
+        resolve_actor(_credentials(), header)
+
+
+def test_http_client_can_initialize_list_and_call_tools(service) -> None:
+    """Exercise the real SDK transport and its lifespan, not only the auth wrapper."""
+    from starlette.testclient import TestClient
+
+    app = create_mcp_http_app(service, _credentials())
+    headers = {
+        "Authorization": f"Bearer {DEV_TOKEN}",
+        "Accept": "application/json, text/event-stream",
+    }
+
+    def result(response):
+        assert response.status_code == 200, response.text
+        if response.headers["content-type"].startswith("text/event-stream"):
+            return json.loads(next(line[6:] for line in response.text.splitlines()
+                                   if line.startswith("data: ")))
+        return response.json()
+
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        initialized = client.post("/mcp", headers=headers, json={
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+                       "clientInfo": {"name": "fresh-session", "version": "1"}},
+        })
+        assert "serverInfo" in result(initialized)["result"]
+        if "mcp-session-id" in initialized.headers:
+            headers["Mcp-Session-Id"] = initialized.headers["mcp-session-id"]
+        client.post("/mcp", headers=headers, json={
+            "jsonrpc": "2.0", "method": "notifications/initialized",
+        })
+        listed = result(client.post("/mcp", headers=headers, json={
+            "jsonrpc": "2.0", "id": 2, "method": "tools/list",
+        }))
+        names = {tool["name"] for tool in listed["result"]["tools"]}
+        assert "dev.submit_candidate" in names
+        assert "integrator.merge_candidate" not in names
+        called = result(client.post("/mcp", headers=headers, json={
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "identity.get_capabilities", "arguments": {}},
+        }))
+        assert called["result"]["structuredContent"]["agent_id"] == "dev-01"
+        assert "mcp-session-id" not in initialized.headers, "HTTP sessions must not accumulate between chats"

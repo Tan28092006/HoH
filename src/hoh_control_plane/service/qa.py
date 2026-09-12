@@ -10,6 +10,7 @@ from hoh_control_plane.service._common import (
     DomainError,
     InterventionSeverity,
     PlannerJobType,
+    Path,
     Role,
     TestExecution,
     TicketStatus,
@@ -227,7 +228,11 @@ class QaMixin:
             worktree = _row(
                 connection.execute("SELECT * FROM worktrees WHERE ticket_id = ?", (ticket_id,)).fetchone()
             )
-            if worktree is None:
+            repository = _row(connection.execute(
+                "SELECT * FROM project_repositories WHERE project_id = ?", (project_id,)
+            ).fetchone())
+            remote_workspace = repository is not None and repository.get("workspace_model") == "agent_workspace"
+            if worktree is None and not remote_workspace:
                 raise ValidationError("Candidate has no assigned Git worktree")
             command = test_profile["test_command"]
             self._test_command(command)
@@ -237,8 +242,9 @@ class QaMixin:
             candidate_commit = candidate["commit_sha"]
             # Queueing must return promptly. The detached worker re-verifies this
             # immutable path and commit before it executes the test command.
-            worktree_path = worktree["worktree_path"]
             test_run_id = _id("testrun")
+            worktree_path = (str(self.git_worktrees.qa_path(test_run_id)) if remote_workspace
+                             else worktree["worktree_path"])
             timestamp = _iso()
             connection.execute(
                 """
@@ -343,6 +349,16 @@ class QaMixin:
             return self.fail_queued_project_test(test_run_id, preflight_error)
 
         try:
+            if Path(job["worktree_path"]).resolve() == self.git_worktrees.qa_path(test_run_id):
+                with self.store.connection() as connection:
+                    repository = self._one(connection,
+                        "SELECT * FROM project_repositories WHERE project_id = ?", (job["project_id"],))
+                with self.git_worktrees.qa_checkout(repository_path=repository["repository_path"],
+                        test_run_id=test_run_id, candidate_commit=job["candidate_commit"]) as path:
+                    execution = self.project_tests.execute(job["test_command"], path, job["timeout_seconds"])
+                    if execution.artifact_mismatch:
+                        return self._fail_with_artifact_mismatch(test_run_id, job, execution)
+                    return self._complete_queued_project_test(test_run_id, execution)
             worktree_path = self.git_worktrees.verify_frozen_candidate(
                 job["worktree_path"], job["candidate_commit"]
             )

@@ -9,7 +9,14 @@ Protocol revision: 2026-09-10. Load this base and only the assigned role skill.
 Read conditional references only when applicable. Server capabilities and gates
 remain authoritative; skill guidance does not create runtime enforcement.
 
-Start every control-plane task by calling `identity.get_capabilities`. Treat the returned identity, role, project scope and capabilities as authoritative.
+Start with `session.bootstrap` when available; it returns authenticated identity,
+available projects, workspace model, this identity's live leases and durable job IDs.
+Choose a project explicitly when several are returned. It is read-only: it does
+not register presence, claim work, renew leases or provision files. On an older
+server use `identity.get_capabilities` and the role's inbox/discovery tools.
+Treat returned identity, role, project scope and capabilities as authoritative.
+For a new installation or a changed machine read
+[`references/session-start.md`](references/session-start.md).
 
 For an execution role, call `agent.register` once per session and `work.inbox`
 before discovery. When a task resumes after waiting, call `work.inbox` again:

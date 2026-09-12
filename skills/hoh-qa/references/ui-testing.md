@@ -3,6 +3,13 @@
 Use for rendered UI or interaction changes. Source inspection, HTTP 200 and passing
 API tests do not establish a user journey.
 
+If the project provides a Planner-frozen browser command, run it through
+`qa.run_project_tests` and poll the same test-run ID. Verify the report names the
+candidate SHA, fixture/environment and actual browser scenarios; a backend-only
+run or a skipped browser suite cannot verify UI criteria. The HoH repository's
+`docs/UI_QA.md` documents its optional runner; that repository document is not
+part of the installed skill. Other projects supply their own browser suite.
+
 1. Use the approved launch interface for a candidate-specific instance. Verify
    build/source SHA, URL/port and isolated fixture DB. The existing operator tab
    on main is not candidate evidence. If identity cannot be proven, record

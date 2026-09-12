@@ -580,6 +580,51 @@ def _context_entries(service, actor, ticket_id: str, entry_type: str) -> list[di
     return [entry for entry in entries if entry["entry_type"] == entry_type]
 
 
+def test_git_provision_does_not_hold_the_database_write_lock(service, actors, seeded, tmp_path):
+    repository = _repository(tmp_path)
+    service.configure_repository(actors["planner"], "project-1", str(repository))
+    ticket = seeded["ticket"]
+    claim = service.claim_ticket(actors["developer"], ticket["ticket_id"], ticket["version"], 900)
+    original = service.git_worktrees.prepare
+
+    def prepare(**kwargs):
+        import sqlite3
+        with sqlite3.connect(service.store.path, timeout=0.1) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+        return original(**kwargs)
+
+    with patch.object(service.git_worktrees, "prepare", side_effect=prepare):
+        prepared = service.prepare_worktree(actors["developer"], ticket["ticket_id"],
+                                           claim["lease"]["lease_id"], claim["ticket"]["version"])
+    assert Path(prepared["worktree"]["worktree_path"]).is_dir()
+
+
+def test_expired_provision_job_does_not_block_a_replacement(service, actors, seeded, tmp_path):
+    service.configure_repository(actors["planner"], "project-1", str(_repository(tmp_path)))
+    claim = service.claim_ticket(actors["developer"], "DEV-142", seeded["ticket"]["version"], 900)
+    old = service.queue_worktree_provision(actors["developer"], "DEV-142", claim["lease"]["lease_id"], claim["ticket"]["version"])
+    _expire_lease(service, claim["lease"]["lease_id"])
+    sweep = service.sweep_expired_leases(_SCHEDULER)
+    replacement = service.claim_ticket(actors["developer_2"], "DEV-142", sweep["requeued"][0]["version"], 900)
+    queued = service.queue_worktree_provision(actors["developer_2"], "DEV-142", replacement["lease"]["lease_id"], replacement["ticket"]["version"])
+    assert queued["provision"]["status"] == "QUEUED"
+    assert service.execute_queued_worktree_provision(old["provision"]["provision_id"])["status"] == "FAILED"
+
+
+def test_a_returning_developer_gets_a_new_assignment_without_deleting_old_work(
+    service, actors, seeded, tmp_path
+):
+    _, ticket, first, old = _abandoned_first_developer(service, actors, seeded, tmp_path)
+    old_path = Path(old["worktree_path"])
+    (old_path / "unfinished.txt").write_text("preserve me", encoding="utf-8")
+    _expire_lease(service, first["lease"]["lease_id"])
+    second, _ = _take_over(service, actors, ticket["ticket_id"])
+    _expire_lease(service, second["lease"]["lease_id"])
+    _, returned = _take_over(service, actors, ticket["ticket_id"], "developer")
+    assert returned["worktree"]["worktree_path"] != old["worktree_path"]
+    assert (old_path / "unfinished.txt").read_text(encoding="utf-8") == "preserve me"
+
+
 def test_expired_lease_takeover_seeds_the_replacement_from_a_clean_checkpoint(
     service, actors, seeded, tmp_path: Path
 ) -> None:

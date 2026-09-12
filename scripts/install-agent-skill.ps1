@@ -46,7 +46,7 @@ foreach ($skillName in $skillNames) {
 # Only skill directories are installed. The wakeup reference also names
 # deploy/ and docs/ paths, but every one of those files hardcodes this host's
 # absolute paths, so shipping them would put local workspace topology inside an
-# installed artifact. See the blocker on HOH-235: closing that gap needs an edit
-# to the reference text, which this ticket's write scope does not cover.
+# installed artifact. For portable HTTP MCP configuration alongside skills,
+# build a role kit with hoh-agent-kit; see docs/AGENT_KIT.md in this repository.
 Write-Host "Installed $($skillNames -join ', ') for $Target at $targetRoot"
 Write-Host "Restart the agent client so it discovers the copied skills."

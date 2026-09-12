@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hoh-control-plane"
-version = "0.1.0"
+version = "0.2.0"
 description = "Shared MCP control plane for role-separated AI software teams"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -26,17 +26,29 @@ dev = [
 postgres = [
   "psycopg[binary]>=3.2,<4",
 ]
+ui = ["pytest-playwright>=0.7,<1"]
 
 [project.scripts]
 hoh-api = "hoh_control_plane.__main__:main"
 hoh-mcp = "hoh_control_plane.mcp_server:main"
 hoh-scheduler = "hoh_control_plane.scheduler:main"
+hoh-agent-kit = "hoh_control_plane.agent_kit:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hoh_control_plane"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "hoh_control_plane/agent_assets/skills"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/", "skills/", "tests/", "scripts/", "docs/", "deploy/",
+  "README.md", "HOH_MULTI_AGENT_CONTROL_PLANE.md", "pyproject.toml", ".env.example",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["ui: browser acceptance tests (enable with --run-ui)"]
 addopts = [
   "--strict-markers",
   "--cov=hoh_control_plane",

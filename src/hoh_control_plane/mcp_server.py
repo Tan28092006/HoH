@@ -7,11 +7,13 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Any, TypeVar
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.transport_security import TransportSecuritySettings
 
 from hoh_control_plane.auth import (
     STDIO_TRANSPORT,
@@ -59,15 +61,27 @@ def _run_with_contention_retry(operation: Callable[[], Result]) -> Result:
 _TARGET_KEYS = ("project_id", "feature_id", "ticket_id", "feature_ref", "ticket_ref")
 
 
+def _worker_location(database_path: Path | str) -> tuple[str, dict[str, str] | None]:
+    location = str(database_path)
+    if location.startswith(("postgresql://", "postgres://")):
+        environment = os.environ.copy()
+        environment["HOH_DATABASE_URL"] = location
+        # The store factory selects the server URL from env. Never expose its
+        # password in command-line arguments / process listings.
+        return "data/control-plane.db", environment
+    return location, None
+
+
 def _start_qa_test_worker(database_path: Path, test_run_id: str) -> None:
     """Launch one isolated runner so stdio MCP calls stay available for polling."""
+    database_argument, environment = _worker_location(database_path)
     subprocess.Popen(
         [
             sys.executable,
             "-m",
             "hoh_control_plane.qa_worker",
             "--database",
-            str(database_path),
+            database_argument,
             "--test-run-id",
             test_run_id,
         ],
@@ -75,18 +89,20 @@ def _start_qa_test_worker(database_path: Path, test_run_id: str) -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         close_fds=True,
+        env=environment,
     )
 
 
 def _start_worktree_provision_worker(database_path: Path, provision_id: str) -> None:
     """Launch Git worktree setup away from the synchronous MCP stdio request."""
+    database_argument, environment = _worker_location(database_path)
     subprocess.Popen(
         [
             sys.executable,
             "-m",
             "hoh_control_plane.worktree_worker",
             "--database",
-            str(database_path),
+            database_argument,
             "--provision-id",
             provision_id,
         ],
@@ -94,18 +110,20 @@ def _start_worktree_provision_worker(database_path: Path, provision_id: str) -> 
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         close_fds=True,
+        env=environment,
     )
 
 
 def _start_candidate_submission_worker(database_path: Path, submission_id: str) -> None:
     """Validate candidate Git identity away from the MCP request."""
+    database_argument, environment = _worker_location(database_path)
     subprocess.Popen(
         [
             sys.executable,
             "-m",
             "hoh_control_plane.candidate_submission_worker",
             "--database",
-            str(database_path),
+            database_argument,
             "--submission-id",
             submission_id,
         ],
@@ -113,18 +131,20 @@ def _start_candidate_submission_worker(database_path: Path, submission_id: str) 
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         close_fds=True,
+        env=environment,
     )
 
 
 def _start_merge_worker(database_path: Path, merge_job_id: str) -> None:
     """Fast-forward the protected default branch away from the MCP stdio request."""
+    database_argument, environment = _worker_location(database_path)
     subprocess.Popen(
         [
             sys.executable,
             "-m",
             "hoh_control_plane.integration_worker",
             "--database",
-            str(database_path),
+            database_argument,
             "--merge-job-id",
             merge_job_id,
         ],
@@ -132,13 +152,22 @@ def _start_merge_worker(database_path: Path, merge_job_id: str) -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         close_fds=True,
+        env=environment,
     )
 
 
-def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
+def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_http: bool = False) -> FastMCP:
     """Create the smallest MCP tool surface permitted for one authenticated role."""
     server = FastMCP(
         "Harness Control Plane",
+        stateless_http=stateless_http,
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=["127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*", "[::1]", "[::1]:*"]
+            + [value.strip() for value in os.getenv("HOH_MCP_ALLOWED_HOSTS", "").split(",") if value.strip()],
+            allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+            + [value.strip() for value in os.getenv("HOH_MCP_ALLOWED_ORIGINS", "").split(",") if value.strip()],
+        ),
         instructions=(
             "Discover work first, resolve typed context references, and only invoke "
             "role-authorized write tools. Execution agents register presence, then poll "
@@ -231,6 +260,15 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor) -> FastMCP:
                 "protocol_version": "0.3.0",
             },
         )
+
+    @server.tool(name="session.bootstrap", structured_output=True)
+    def session_bootstrap(project_id: str | None = None) -> dict[str, Any]:
+        """Start/resume without chat history: identity, projects, workspace, own leases and job IDs.
+
+        Read-only. Does not claim work, create a checkout or renew a lease.
+        """
+        return invoke("session.bootstrap", {"project_id": project_id},
+                      lambda: service.session_bootstrap(actor, project_id))
 
     @server.tool(name="agent.register", structured_output=True)
     def agent_register(
@@ -1355,10 +1393,23 @@ def create_mcp_http_app(
         )
     per_actor = {}
     for credential in credentials:
-        server = create_mcp_server(service, credential.actor)
+        server = create_mcp_server(service, credential.actor, stateless_http=transport == "streamable-http")
         per_actor[credential.token] = (
             server.sse_app() if transport == "sse" else server.streamable_http_app()
         )
+
+    @asynccontextmanager
+    async def lifespan(_app: Any):
+        # Delegating requests alone does not start the SDK's session managers.
+        # Enter each child lifespan and shut them down in reverse order.
+        async with AsyncExitStack() as stack:
+            for child in per_actor.values():
+                await stack.enter_async_context(child.router.lifespan_context(child))
+            yield
+
+    from starlette.applications import Starlette
+
+    lifecycle = Starlette(lifespan=lifespan)
 
     async def refuse(scope: Any, receive: Any, send: Any, detail: str) -> None:
         body = json.dumps({"error": {"code": "unauthorized", "message": detail}})
@@ -1375,6 +1426,9 @@ def create_mcp_http_app(
         await send({"type": "http.response.body", "body": body.encode("utf-8")})
 
     async def app(scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "lifespan":
+            await lifecycle(scope, receive, send)
+            return
         if scope["type"] != "http":
             raise ValueError("Only HTTP scopes are served by this endpoint")
         headers = {key.lower(): value for key, value in scope.get("headers", [])}

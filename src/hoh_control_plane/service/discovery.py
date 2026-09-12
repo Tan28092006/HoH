@@ -520,13 +520,26 @@ class DiscoveryMixin:
         with self.store.connection(immediate=True) as connection:
             presence = self._refresh_presence(connection, actor, 120, now=now)
             self._expire_offers(connection, now)
+            offered_count = connection.execute(
+                "SELECT COUNT(*) FROM work_offers o JOIN work_queue q ON q.queue_id = o.queue_id "
+                "WHERE o.agent_id = ? AND q.project_id = ? AND o.status = 'offered'",
+                (actor.agent_id, project_id),
+            ).fetchone()[0]
+            active_count = connection.execute(
+                "SELECT COUNT(*) FROM leases WHERE agent_id = ? AND expires_at > ?",
+                (actor.agent_id, _iso(now)),
+            ).fetchone()[0]
+            offer_limit = max(0, limit - offered_count) if active_count < presence["capacity"] else 0
             pending = connection.execute(
                 """
                 SELECT * FROM work_queue
                 WHERE project_id = ? AND target_role = ? AND status IN ('pending', 'offered')
+                  AND NOT EXISTS (SELECT 1 FROM work_offers o WHERE o.queue_id = work_queue.queue_id
+                                  AND o.agent_id = ? AND o.status = 'offered')
                 ORDER BY priority DESC, created_at ASC
+                LIMIT ?
                 """,
-                (project_id, actor.role.value),
+                (project_id, actor.role.value, actor.agent_id, offer_limit),
             ).fetchall()
             created_offers: list[dict[str, Any]] = []
             for pending_row in pending:
@@ -827,10 +840,16 @@ class DiscoveryMixin:
         available_slots = 1 if only_agent_id is not None else max(0, fanout - existing_offer_count)
         if available_slots == 0:
             return []
-        candidate_rows = connection.execute(
-            "SELECT * FROM agent_presence WHERE role = ? AND expires_at > ? ORDER BY last_seen_at DESC, agent_id ASC",
-            (queue["target_role"], _iso(now)),
-        ).fetchall()
+        if only_agent_id is not None:
+            candidate_rows = connection.execute(
+                "SELECT * FROM agent_presence WHERE agent_id = ? AND role = ? AND expires_at > ?",
+                (only_agent_id, queue["target_role"], _iso(now)),
+            ).fetchall()
+        else:
+            candidate_rows = connection.execute(
+                "SELECT * FROM agent_presence WHERE role = ? AND expires_at > ? ORDER BY last_seen_at DESC, agent_id ASC",
+                (queue["target_role"], _iso(now)),
+            ).fetchall()
         offers: list[dict[str, Any]] = []
         for candidate_row in candidate_rows:
             presence = _row(candidate_row)

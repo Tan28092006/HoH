@@ -32,6 +32,8 @@ const projectPicker = document.querySelector("#project-picker");
 const featureFilterElement = document.querySelector("#feature-filter");
 const statusFilterElement = document.querySelector("#status-filter");
 const activityHeaders = { "X-HOH-Agent-Id": "ui-observer", "X-HOH-Role": "planner" };
+let dashboardRequestVersion = 0;
+let detailRequestVersion = 0;
 
 statusFilterElement.innerHTML = [
   '<option value="all">All statuses</option>',
@@ -128,6 +130,8 @@ function updateFilterQueryParams() {
 }
 
 async function loadDashboard() {
+  const requestVersion = ++dashboardRequestVersion;
+  const projectId = state.projectId;
   clearError();
   const boardRequest = fetch(`/api/v1/projects/${encodeURIComponent(state.projectId)}/board`);
   const activityRequest = fetch(
@@ -139,18 +143,22 @@ async function loadDashboard() {
     { headers: activityHeaders },
   );
   const [boardResponse, activityResponse, dispatchResponse] = await Promise.all([boardRequest, activityRequest, dispatchRequest]);
+  if (requestVersion !== dashboardRequestVersion || projectId !== state.projectId) return;
   if (!boardResponse.ok) throw new Error(`Board request failed (${boardResponse.status})`);
-  state.board = (await boardResponse.json()).data;
+  const board = (await boardResponse.json()).data;
+  let activity, dispatch;
   if (activityResponse.ok) {
-    state.activity = (await activityResponse.json()).data;
+    activity = (await activityResponse.json()).data;
   } else {
-    state.activity = { calls: [], unavailable: `Activity log requires an authenticated dashboard (${activityResponse.status}).` };
+    activity = { calls: [], unavailable: `Activity log requires an authenticated dashboard (${activityResponse.status}).` };
   }
   if (dispatchResponse.ok) {
-    state.dispatch = (await dispatchResponse.json()).data;
+    dispatch = (await dispatchResponse.json()).data;
   } else {
-    state.dispatch = { agents: [], queues: [], unavailable: `Dispatch requires an authenticated dashboard (${dispatchResponse.status}).` };
+    dispatch = { agents: [], queues: [], unavailable: `Dispatch requires an authenticated dashboard (${dispatchResponse.status}).` };
   }
+  if (requestVersion !== dashboardRequestVersion || projectId !== state.projectId) return;
+  Object.assign(state, { board, activity, dispatch });
   document.querySelector("#project-description").textContent = state.board.project.description;
   syncProjectPicker();
   syncFeatureFilter();
@@ -159,6 +167,20 @@ async function loadDashboard() {
   renderFeatures();
   renderDispatch();
   renderActivity();
+  renderProjectSummary();
+}
+
+function renderProjectSummary() {
+  const tickets = Object.values(state.board.columns).flat().filter(ticket => !["CANCELLED", "SUPERSEDED"].includes(ticket.status));
+  const count = statuses => tickets.filter(ticket => statuses.includes(ticket.status)).length;
+  const values = [
+    ["Completed tickets", `${count(["DONE"])}/${tickets.length}`],
+    ["In progress", count(["DEV_IN_PROGRESS", "QA_IN_PROGRESS"])],
+    ["Awaiting QA", count(["QA_READY"])],
+    ["Awaiting integration", count(["VERIFIED", "MERGE_READY"])],
+    ["Blocked", count(["BLOCKED"])],
+  ];
+  document.querySelector("#project-summary").innerHTML = values.map(([label, value]) => `<div><span>${label}</span><strong>${value}</strong></div>`).join("");
 }
 
 function matchesFeatureFilter(ticket) {
@@ -199,6 +221,8 @@ function ticketCard(ticket) {
 }
 
 async function selectTicket(ticketId) {
+  const requestVersion = ++detailRequestVersion;
+  const projectId = state.projectId;
   const tickets = Object.values(state.board.columns).flat();
   const ticket = tickets.find(item => item.ticket_id === ticketId);
   if (!ticket) return;
@@ -213,7 +237,7 @@ async function selectTicket(ticketId) {
   } catch {
     context = { unavailable: "Dependencies, context references and evidence require an authenticated dashboard." };
   }
-  if (state.selectedTicketId === ticketId) renderTicketDetail(ticket, context);
+  if (requestVersion === detailRequestVersion && projectId === state.projectId && state.selectedTicketId === ticketId) renderTicketDetail(ticket, context);
 }
 
 function renderDependencies(context) {
@@ -375,6 +399,8 @@ document.querySelector("#refresh-button").addEventListener("click", () => loadDa
 projectPicker.addEventListener("change", () => {
   state.projectId = projectPicker.value;
   state.selectedTicketId = null;
+  ++detailRequestVersion;
+  detailElement.innerHTML = '<p class="empty-detail">Select a ticket to inspect its context, lease and evidence.</p>';
   state.featureFilter = "all";
   updateFilterQueryParams();
   loadDashboard().catch(error => showError(error.message));

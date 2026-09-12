@@ -51,10 +51,11 @@ def credentials_from_environment(raw: str | None = None) -> tuple[AgentCredentia
 
     credentials: list[AgentCredential] = []
     for token, value in parsed.items():
-        if not isinstance(token, str) or len(token) < _MINIMUM_TOKEN_CHARS:
+        if (not isinstance(token, str) or len(token) < _MINIMUM_TOKEN_CHARS
+                or not token.isascii() or any(char.isspace() for char in token)):
             raise ValidationError(
                 f"{TOKENS_VARIABLE} tokens must be at least "
-                f"{_MINIMUM_TOKEN_CHARS} characters"
+                f"{_MINIMUM_TOKEN_CHARS} ASCII characters without whitespace"
             )
         if not isinstance(value, dict):
             raise ValidationError(f"{TOKENS_VARIABLE} entries must be objects")
@@ -89,6 +90,8 @@ def resolve_actor(
     if not authorization or not authorization.startswith(prefix):
         raise AuthorizationError("A bearer credential is required")
     presented = authorization[len(prefix) :]
+    if not presented.isascii():
+        raise AuthorizationError("Unknown credential")
     matched: Actor | None = None
     for credential in credentials:
         if hmac.compare_digest(credential.token, presented) and matched is None:

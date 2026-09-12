@@ -112,6 +112,8 @@ class PostgresStore:
     def initialize(self) -> None:
         connection = self._connect()
         try:
+            connection.execute(f"SET LOCAL lock_timeout = '{int(self.lock_timeout_seconds * 1000)}ms'")
+            connection.execute("SELECT pg_advisory_xact_lock(684643, hashtext(current_schema()))")
             connection.execute(translate_schema())
             # The schema script creates anything missing whole, but it cannot
             # add a column to a table that already exists, so a database from an
@@ -156,16 +158,17 @@ class PostgresStore:
         import psycopg
 
         raw = self._connect()
-        raw.execute(f"SET lock_timeout = '{int(self.lock_timeout_seconds * 1000)}ms'")
         wrapped = StoreConnection(
             raw, self.dialect, integrity_errors=(psycopg.errors.IntegrityError,)
         )
         try:
+            raw.execute(f"SET LOCAL lock_timeout = '{int(self.lock_timeout_seconds * 1000)}ms'")
             if immediate:
-                # SQLite's BEGIN IMMEDIATE takes the write lock up front so two
-                # writers cannot both believe they hold it. The equivalent here is
-                # an explicit transaction that serialises on the rows it touches.
-                raw.execute("BEGIN")
+                # BEGIN alone does not serialize read/check/write operations.
+                # Preserve the existing single-writer service contract until its
+                # predicates have explicit row locks / atomic updates. Scope by
+                # schema so independent deployments do not share this lock.
+                raw.execute("SELECT pg_advisory_xact_lock(684643, hashtext(current_schema()))")
             yield wrapped
             raw.commit()
         except psycopg.errors.IntegrityError as error:
@@ -178,7 +181,7 @@ class PostgresStore:
             raise ContentionError(
                 "The database is busy with another operation; retry this request."
             ) from error
-        except psycopg.errors.SerializationFailure as error:
+        except (psycopg.errors.SerializationFailure, psycopg.errors.DeadlockDetected) as error:
             raw.rollback()
             raise ContentionError(
                 "The database is busy with another operation; retry this request."

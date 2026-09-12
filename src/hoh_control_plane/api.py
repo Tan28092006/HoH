@@ -4,9 +4,10 @@ import hmac
 import json
 import os
 import sqlite3
-import time
 from pathlib import Path
 from typing import Annotated, Any
+
+import anyio
 
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -20,6 +21,7 @@ from hoh_control_plane.domain import (
     ConflictError,
     DomainError,
     Role,
+    require_project,
 )
 from hoh_control_plane.observability import WorkflowMetrics, correlation_scope
 from hoh_control_plane.seed import seed_demo as seed_demo_data
@@ -137,26 +139,6 @@ def create_app(
     if seed_demo:
         seed_demo_data(service)
 
-    polls_remaining = {"count": event_stream_max_idle_polls}
-
-    def sleep_between_polls(seconds: float) -> bool:
-        """Wait for the next poll; False ends the stream.
-
-        A bounded poll count exists so a test can drain a stream deterministically
-        instead of racing a timer. Unbounded is the production default.
-        """
-        if polls_remaining["count"] is not None:
-            if polls_remaining["count"] <= 0:
-                return False
-            polls_remaining["count"] -= 1
-            return True
-        time.sleep(seconds)
-        return True
-
-    def request_is_gone(request: Request) -> bool:
-        """Stop producing for a client that has disconnected."""
-        return bool(getattr(request, "_hoh_disconnected", False))
-
     app = FastAPI(title="Harness Control Plane", version="0.3.0")
     app.state.service = service
     app.state.local_mode = is_local
@@ -264,12 +246,23 @@ def create_app(
         if not authorization or not authorization.startswith(prefix):
             raise AuthenticationError("Bearer token is required")
         presented_token = authorization[len(prefix) :]
+        if not presented_token.isascii():
+            raise AuthenticationError("Invalid bearer token")
         if admin_token and hmac.compare_digest(presented_token, admin_token):
             return Actor("api-admin", Role.ADMIN, frozenset({"*"}))
         for token, identity in identities.items():
             if hmac.compare_digest(presented_token, token):
                 return identity
         raise AuthenticationError("Invalid bearer token")
+
+    def observer_dependency(request: Request) -> Actor:
+        # Native EventSource cannot attach custom local identity headers. Only
+        # explicitly local read endpoints get this fallback; writes keep the
+        # ordinary identity requirement and production always authenticates.
+        if is_local and not request.headers.get("X-HOH-Agent-Id") and not request.headers.get("X-HOH-Role"):
+            return Actor("local-observer", Role.PLANNER, frozenset({"*"}))
+        return actor_dependency(request.headers.get("Authorization"),
+                                request.headers.get("X-HOH-Agent-Id"), request.headers.get("X-HOH-Role"))
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def index() -> HTMLResponse:
@@ -280,7 +273,8 @@ def create_app(
         return {"data": {"status": "ok", "version": "0.3.0"}}
 
     @app.get("/api/v1/projects/{project_id}/board")
-    def board(project_id: str) -> dict[str, Any]:
+    def board(project_id: str, actor: Actor = Depends(observer_dependency)) -> dict[str, Any]:
+        require_project(actor, project_id)
         return {"data": service.board(project_id)}
 
     @app.get("/api/v1/projects/{project_id}/dispatch")
@@ -453,7 +447,7 @@ def create_app(
         project_id: str,
         after: int = Query(default=0, ge=0),
         last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
-        actor: Actor = Depends(actor_dependency),
+        actor: Actor = Depends(observer_dependency),
     ) -> StreamingResponse:
         """Stream bounded change signals so a board can react without polling.
 
@@ -470,14 +464,15 @@ def create_app(
         # response rather than inside an already-open stream.
         service.list_event_signals(actor, project_id, cursor, limit=1)
 
-        def emit() -> Any:
+        async def emit() -> Any:
             position = cursor
+            polls_remaining = event_stream_max_idle_polls
             yield f"retry: {int(event_stream_retry_seconds * 1000)}\n\n".encode()
             idle = 0.0
             while True:
-                if request_is_gone(request):
+                if await request.is_disconnected():
                     return
-                batch = service.list_event_signals(actor, project_id, position)
+                batch = await anyio.to_thread.run_sync(service.list_event_signals, actor, project_id, position)
                 if batch["reset"]:
                     # The cursor cannot belong to this history, so nothing will
                     # ever arrive after it. Say so instead of hanging.
@@ -499,8 +494,12 @@ def create_app(
                     # front of it from timing the stream out.
                     yield b": heartbeat\n\n"
                     idle = 0.0
-                if not sleep_between_polls(event_stream_poll_seconds):
-                    return
+                if polls_remaining is not None:
+                    if polls_remaining <= 0:
+                        return
+                    polls_remaining -= 1
+                else:
+                    await anyio.sleep(event_stream_poll_seconds)
 
         return StreamingResponse(
             emit(),
