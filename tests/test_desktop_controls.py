@@ -1,4 +1,5 @@
 import json
+from contextlib import closing
 from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
@@ -92,15 +93,15 @@ def test_drain_waits_for_workers_and_reopen_restores_admission(desktop):
     content['requested_at'] = 0
     marker.write_text(json.dumps(content))
     database = json.loads((root / 'config/settings.json').read_text())['database_path']
-    with sqlite3.connect(database) as db:
+    with closing(sqlite3.connect(database)) as db, db:
         db.execute("INSERT INTO worker_executions (execution_id, runner_id, job_kind, job_id, status, started_at, heartbeat_at) VALUES ('x','test','qa','test-job','RUNNING','now','now')")
     assert not shutdown_ready(root)
-    with sqlite3.connect(database) as db:
+    with closing(sqlite3.connect(database)) as db, db:
         db.execute("UPDATE worker_executions SET status='FINISHED' WHERE execution_id='x'")
     assert shutdown_ready(root)
     prepare_desktop_start(root)
     assert not marker.exists()
-    with sqlite3.connect(database) as db:
+    with closing(sqlite3.connect(database)) as db:
         assert db.execute("SELECT state_value FROM runtime_state WHERE state_key='paused'").fetchone()[0] == '0'
 
 
@@ -165,3 +166,28 @@ def test_agent_reconnect_does_not_undo_operator_shutdown(desktop):
         '--project', 'shop', '--role', 'planner'], env=os.environ.copy(), input='', capture_output=True, text=True, timeout=20)
     assert not marker.exists(), 'A reconnect must not silently restart an operator-stopped host'
     assert result.returncode != 0
+
+
+def test_local_reads_close_database_handles(desktop, monkeypatch):
+    import sqlite3
+    from hoh_control_plane.local_agent import checked_project
+    from hoh_control_plane.desktop_control import shutdown_ready
+    client, root = desktop
+    client.post('/local/projects', json={'project_id': 'shop', 'name': 'Shop'}, headers=headers(client))
+    (root / 'config/shutdown.request').write_text('{"requested_at":0,"resume_on_start":true}')
+    connections = []
+    connect = sqlite3.connect
+    def observed_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+    monkeypatch.setattr(sqlite3, 'connect', observed_connect)
+    checked_project(root, 'shop')
+    assert shutdown_ready(root)
+    try:
+        for connection in connections:
+            with pytest.raises(sqlite3.ProgrammingError):
+                connection.execute('SELECT 1')
+    finally:
+        for connection in connections:
+            connection.close()
