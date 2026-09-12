@@ -123,3 +123,45 @@ def test_explicit_skill_upgrade_keeps_backup_and_rolls_back_config_conflict(desk
     with pytest.raises(ValueError):
         install_profile(root, 'shop', 'planner', 'primary', 'codex', home, upgrade_skills=True)
     assert skill.read_text() == 'preserve me on failure'
+
+
+def test_stdio_profile_authenticates_exact_role_and_rejects_other_project(desktop):
+    import asyncio
+    import os
+    import sys
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    client, root = desktop
+    client.post('/local/projects', json={'project_id': 'shop', 'name': 'Shop'}, headers=headers(client))
+    client.post('/local/projects', json={'project_id': 'other', 'name': 'Other'}, headers=headers(client))
+    (root / 'hoh_desktop.py').write_text('pass\n')
+    async def check():
+        parameters = StdioServerParameters(command=sys.executable,
+            args=['-m', 'hoh_control_plane.local_agent', 'serve', '--root', str(root), '--project', 'shop', '--role', 'planner'],
+            env={**os.environ, 'HOH_AGENT_ROLE': 'admin', 'HOH_PROJECT_IDS': '*'})
+        async with stdio_client(parameters) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool('session.bootstrap', {'project_id': 'shop'})
+                assert not result.isError
+                assert result.structuredContent['identity']['role'] == 'planner'
+                assert result.structuredContent['identity']['project_ids'] == ['shop']
+                assert result.structuredContent['selected_project_id'] == 'shop'
+                denied = await session.call_tool('session.bootstrap', {'project_id': 'other'})
+                assert denied.isError
+    asyncio.run(check())
+
+
+def test_agent_reconnect_does_not_undo_operator_shutdown(desktop):
+    import os
+    import subprocess
+    import sys
+    client, root = desktop
+    client.post('/local/projects', json={'project_id': 'shop', 'name': 'Shop'}, headers=headers(client))
+    marker = root / 'unexpected-start'
+    (root / 'hoh_desktop.py').write_text(f'from pathlib import Path\nPath({str(marker)!r}).touch()\n')
+    (root / 'config/stop.request').touch()
+    result = subprocess.run([sys.executable, '-m', 'hoh_control_plane.local_agent', 'serve', '--root', str(root),
+        '--project', 'shop', '--role', 'planner'], env=os.environ.copy(), input='', capture_output=True, text=True, timeout=20)
+    assert not marker.exists(), 'A reconnect must not silently restart an operator-stopped host'
+    assert result.returncode != 0
