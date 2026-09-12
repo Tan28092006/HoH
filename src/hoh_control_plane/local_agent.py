@@ -47,12 +47,12 @@ def install_profile(root, project, role, instance, client, home, upgrade_skills=
     command = str(root / '.venv/Scripts/python.exe')
     arguments = ['-m', 'hoh_control_plane.local_agent', 'serve', '--root', str(root),
                  '--project', project, '--role', role, '--instance', instance]
-    codex = {'command': command, 'args': arguments}
+    codex = {'command': command, 'args': arguments, 'tool_timeout_sec': 86400}
     with tempfile.TemporaryDirectory(prefix='hoh-profile-') as temp:
         kit = Path(temp) / 'kit'
         build_kit(kit, role, 'http://127.0.0.1:8931/mcp')
-        (kit / 'codex.toml').write_text(f'[mcp_servers.{server}]\ncommand = {json.dumps(command)}\nargs = {json.dumps(arguments)}\n', encoding='utf-8')
-        (kit / 'mcp.json').write_text(json.dumps({'mcpServers': {server: {'type': 'stdio', **codex}}}), encoding='utf-8')
+        (kit / 'codex.toml').write_text(f'[mcp_servers.{server}]\ncommand = {json.dumps(command)}\nargs = {json.dumps(arguments)}\ntool_timeout_sec = 86400\n', encoding='utf-8')
+        (kit / 'mcp.json').write_text(json.dumps({'mcpServers': {server: {'type': 'stdio', 'command': command, 'args': arguments}}}), encoding='utf-8')
         manifest = json.loads((kit / 'manifest.json').read_text(encoding='utf-8'))
         manifest['server_name'], manifest['codex'] = server, codex
         manifest['files'] = {p.relative_to(kit).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
@@ -85,7 +85,7 @@ def install_profile(root, project, role, instance, client, home, upgrade_skills=
             'skill_backups': [str(backup) for _, backup in moved]}
 
 
-def make_prompts(root, project):
+def make_prompts(root, project, instance='primary'):
     root = str(root)
     role_work = {
         'planner': 'Đọc spec và context; nếu repository/test command chưa cấu hình, xác minh đường dẫn Git, default branch, workspace model và lệnh test với người dùng trước khi configure_repository/configure_test_command. Không tự coi thư mục chat là repo dự án. Sau đó tạo feature/ticket có acceptance, scope và dependency rõ ràng. Không implement, QA hay merge.',
@@ -94,19 +94,21 @@ def make_prompts(root, project):
         'integrator': 'Chỉ nhận candidate đã QA-verified/merge-ready, kiểm tra đúng SHA, base, evidence và hold. Dùng queued integrator.merge_candidate một lần rồi poll merge_job_id; xác minh trạng thái DONE và mainline SHA. Nếu drift/conflict hoặc SHA đổi, chuyển về luồng rework/QA; không force-push, merge tay hay sửa DB.'}
     prompts = {}
     for role in ROLES:
-        actor = profile_actor(project, role, 'primary')
+        actor = profile_actor(project, role, instance)
         prompts[role] = f'''Thiết lập và làm việc với HoH trên máy Windows này.
-Vai trò: {role}. Project ID bắt buộc: {project}. Instance: primary.
+Vai trò: {role}. Project ID bắt buộc: {project}. Instance: {instance}.
 Tôi cho phép cài/cập nhật đúng skill HoH base + {role} và thêm MCP profile này; sao lưu skill HoH cũ, giữ nguyên mọi cấu hình khác.
 
 1. Xác định client là Codex hay Claude Code. Dùng shell PowerShell chạy:
-& '{root}\\.venv\\Scripts\\python.exe' -m hoh_control_plane.local_agent setup --root '{root}' --project '{project}' --role {role} --instance primary --client codex --upgrade-skills
+& '{root}\\.venv\\Scripts\\python.exe' -m hoh_control_plane.local_agent setup --root '{root}' --project '{project}' --role {role} --instance {instance} --client codex --upgrade-skills
 Nếu là Claude Code, thay giá trị --client bằng claude-code. Không cài cả hai client nếu không cần.
 2. Load $hoh-control-plane và $hoh-{role}. MCP server cần dùng là hoh-{actor.agent_id}. Nếu công cụ mới chưa xuất hiện, báo cần reload MCP/restart client rồi tiếp tục; không giả vờ đã kết nối hoặc dùng server role/project khác.
 3. Gọi session.bootstrap(project_id="{project}") trên đúng MCP đó. Xác minh identity.role="{role}", identity.agent_id="{actor.agent_id}", identity.project_ids chỉ chứa "{project}" và selected_project_id="{project}". Sai bất kỳ mục nào thì dừng trước khi ghi/claim.
-4. Resume lease/job hiện có trước khi nhận việc khác. Đăng ký đúng role/skills, kiểm tra inbox và lọc discovery theo project này. Không tự tạo lại project đã có. Một role/instance chỉ dùng cho một chat đang làm việc; nếu đã có chat dùng primary thì yêu cầu instance riêng, không chiếm lease của chat đó.
+4. Resume lease/job hiện có trước khi nhận việc khác. Đăng ký đúng role/skills, capacity=1, kiểm tra inbox và lọc discovery theo project này. Không tự tạo lại project đã có. Một role/instance chỉ dùng cho một chat đang làm việc; nếu đã có chat dùng {instance} thì yêu cầu instance riêng, không chiếm lease của chat đó.
 5. {role_work[role]}
 6. Chỉ dùng tool thật được server công bố, giữ lease khi đang làm việc, lưu checkpoint/handoff bền vững. Không truy cập DB trực tiếp, không sửa worktree của agent khác, không đưa token vào chat. Kết thúc thiết lập bằng cách báo client, MCP server, role, project ID, repository/workspace model và việc sẽ làm tiếp. Không suy diễn MCP có thể tự đánh thức một chat đã dừng.
+
+7. Chế độ GUI nhận sự kiện, không cron: khi hết việc sẵn sàng, thông báo ngắn rồi gọi work.wait_for_event(project_id="{project}", timeout_seconds=43200) và để chat chờ tool. Không kết thúc lượt chỉ vì inbox rỗng, không lặp polling bằng lượt model. Khi có event, resolve context hiện tại và claim theo đúng role; event không cấp lease. Giữ event_id, truyền ack_event_id ở lần wait tiếp theo sau khi đã xử lý hoặc xác định event hết hiệu lực. Khi queue job provision/submission/qa/merge, dùng work.wait_for_event với job_kind và job_id tương ứng, sau đó gọi poll_tool trong kết quả đúng một lần để lấy trạng thái. HoH duy trì lease hợp lệ của job trong lúc tool đang chờ. Nếu cần bạn trả lời thì báo rõ và dừng; không giấu câu hỏi trong một lần chờ 12 giờ. Nếu timeout/mất kết nối, kiểm tra lại host và bootstrap; không tự tạo cron. Đóng chat, bấm Stop, sleep máy hoặc tắt HoH sẽ ngắt chờ. Cách này giữ chính chat Codex app/Claude extension; không tạo phiên CLI thay thế.
 
 Cấu hình này dùng stdio với quyền tài khoản Windows trên cùng máy, không cần chép bearer token. Máy khác cần bộ cấu hình HTTP riêng và đường mạng đã được cấp quyền.'''
     return prompts

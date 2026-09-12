@@ -38,10 +38,10 @@ def build_kit(output: Path, role: str, server_url: str, token_env: str = "HOH_AG
     for name in names:
         shutil.copytree(source / name, output / "skills" / name)
     server_name = f"hoh-{role}"
-    codex = {"url": server_url, "bearer_token_env_var": token_env}
+    codex = {"url": server_url, "bearer_token_env_var": token_env, "tool_timeout_sec": 86400}
     (output / "codex.toml").write_text(
         f'[mcp_servers.{server_name}]\nurl = {json.dumps(server_url)}\n'
-        f'bearer_token_env_var = {json.dumps(token_env)}\n', encoding="utf-8"
+        f'bearer_token_env_var = {json.dumps(token_env)}\ntool_timeout_sec = 86400\n', encoding="utf-8"
     )
     claude = {"mcpServers": {server_name: {
         "type": "http", "url": server_url,
@@ -71,7 +71,11 @@ session has stopped. Follow the returned workspace model: colocated requires
 access to the server filesystem; agent_workspace needs Git access and a local
 checkout. Auth does not grant shell, filesystem or browser capabilities.
 For several projects, select the intended project in session.bootstrap.
-The kit does not wake a stopped chat; use the client's supported scheduler.
+For event-driven GUI work, call work.wait_for_event with a 43200-second wait.
+The kit sets Codex's MCP tool timeout to 86400 seconds. Claude's default MCP
+timeout supports this wait; check for a shorter local override. An open pending
+MCP call costs no model polling turns. Stop/close/sleep disconnects it; reconnect
+and bootstrap to resume. A stopped chat cannot be awakened by ordinary MCP.
 For clients other than Codex/Claude Code, install the skill folders and configure
 an HTTP MCP connection using the URL and token environment variable in this kit.
 """

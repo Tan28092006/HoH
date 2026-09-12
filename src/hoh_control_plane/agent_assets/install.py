@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import tempfile
 import tomllib
@@ -17,10 +18,19 @@ def install(kit: Path, home: Path, client: str) -> None:
     config = home / (".codex/config.toml" if client == "codex" else ".claude.json")
     skill_root = home / (".codex/skills" if client == "codex" else ".claude/skills")
     text = config.read_text(encoding="utf-8") if config.exists() else ""
+    original_text = text
     name = manifest["server_name"]
     if client == "codex":
         parsed = tomllib.loads(text)
         old = parsed.get("mcp_servers", {}).get(name)
+        if old is not None and 'tool_timeout_sec' not in old and {**old, 'tool_timeout_sec': 86400} == manifest['codex']:
+            # Only the generated, otherwise identical profile receives this
+            # additive timeout upgrade. Keep comments and other profiles intact.
+            header = re.compile(r'(?m)^\[mcp_servers\.' + re.escape(name) + r'\][ \t]*$')
+            if len(header.findall(text)) != 1:
+                raise ValueError('Cannot safely locate the generated HoH profile to upgrade its timeout')
+            text = header.sub(lambda match: match.group(0) + '\ntool_timeout_sec = 86400', text)
+            old = {**old, 'tool_timeout_sec': 86400}
         if old is not None and old != manifest["codex"]:
             raise ValueError("Existing HoH MCP configuration differs; review before replacing it")
         new_text = text if old is not None else text.rstrip() + "\n\n" + (kit / "codex.toml").read_text(encoding="utf-8")
@@ -46,7 +56,7 @@ def install(kit: Path, home: Path, client: str) -> None:
         if not destination.exists():
             shutil.copytree(source, destination)
     config.parent.mkdir(parents=True, exist_ok=True)
-    if new_text != text:
+    if new_text != original_text:
         if config.exists():
             with tempfile.NamedTemporaryFile(dir=config.parent, prefix=config.name + ".hoh-backup-", delete=False) as stream:
                 stream.write(config.read_bytes())

@@ -10,7 +10,7 @@ import sqlite3
 import threading
 import time
 
-from fastapi import Request, HTTPException
+from fastapi import Request, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from hoh_control_plane.api import create_app, ProjectCreate
@@ -109,10 +109,17 @@ def create_desktop_app(root: Path):
             return service.create_project(operator, **payload.model_dump())
 
     @app.get('/local/prompts')
-    def prompts(project_id: str):
+    def prompts(project_id: str, instance: str = Query(default='primary', pattern=r'^[A-Za-z0-9_-]{1,40}$')):
         from hoh_control_plane.local_agent import make_prompts, checked_project
         checked_project(root, project_id)
-        return {'project_id': project_id, 'prompts': make_prompts(root, project_id)}
+        return {'project_id': project_id, 'instance': instance, 'prompts': make_prompts(root, project_id, instance)}
+
+    @app.get('/local/agents')
+    def agents(project_id: str):
+        from hoh_control_plane.local_agent import checked_project
+        from hoh_control_plane.event_wait import session_status
+        checked_project(root, project_id)
+        return {'agents': session_status(service, project_id)}
 
     @app.post('/local/shutdown', status_code=202)
     def stop():
