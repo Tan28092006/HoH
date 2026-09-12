@@ -12,6 +12,8 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 from hoh_control_plane.domain import Actor, Role, NotFoundError
 
@@ -126,6 +128,8 @@ def main():
     if args.action == 'setup':
         print(json.dumps(install_profile(root, args.project, args.role, args.instance, args.client, args.home, args.upgrade_skills)))
         return
+    if any((root / 'config' / name).exists() for name in ('stop.request', 'shutdown.request')):
+        raise SystemExit('HoH was stopped by the operator. Open the HoH desktop icon before reconnecting.')
     os.environ.pop('HOH_DATABASE_URL', None)
     os.environ.pop('PYTHONPATH', None)
     os.environ.update(HOH_DATABASE_PATH=config['database_path'], HOH_WORKER_MODE='supervised',
@@ -134,6 +138,12 @@ def main():
     # Start the supervised host while reserving stdout for MCP protocol frames.
     subprocess.run([sys.executable, str(root / 'hoh_desktop.py'), '--no-browser'],
                    stdout=subprocess.DEVNULL, check=True, creationflags=0x08000000 if os.name == 'nt' else 0)
+    def watch_stop():
+        while True:
+            if (root / 'config/stop.request').exists():
+                os._exit(0)
+            time.sleep(1)
+    threading.Thread(target=watch_stop, daemon=True).start()
     from hoh_control_plane.mcp_server import main as serve
     serve()
 
