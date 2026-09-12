@@ -97,25 +97,31 @@ def _pending(service, actor, project, kind=None, identifier=None):
              'queue_id': offer['queue_id'], 'offer_id': offer['offer_id']}) for offer in inbox['offers']]
 
 
+def _reserve(db, actor, project, key):
+    current = db.execute('SELECT r.agent_id,r.expires_at,w.expires_at AS connection_expiry FROM agent_event_reservations r LEFT JOIN agent_event_waiters w ON w.agent_id=r.agent_id WHERE r.project_id=? AND r.event_key=?', (project, key)).fetchone()
+    if current and current['agent_id'] != actor.agent_id and current['expires_at'] > _iso() and (current['connection_expiry'] or '') > _iso():
+        return False
+    db.execute('DELETE FROM agent_event_reservations WHERE project_id=? AND event_key=?', (project, key))
+    db.execute('INSERT INTO agent_event_reservations VALUES (?,?,?,?)',
+               (project, key, actor.agent_id, _iso(_now() + timedelta(seconds=WAIT_PRESENCE_SECONDS))))
+    return True
+
+
 def _deliver(service, actor, project, candidates):
     with service.store.connection(immediate=True) as db:
         pending_rows = db.execute("SELECT event_id,event_key,payload FROM agent_event_deliveries WHERE agent_id=? AND project_id=? AND state='pending' ORDER BY created_at LIMIT 50", (actor.agent_id, project)).fetchall()
         eligible = {key for key, _ in candidates}
         for pending in pending_rows:
             payload = json.loads(pending['payload'])
-            if pending['event_key'] in eligible:
+            if pending['event_key'] in eligible and _reserve(db, actor, project, pending['event_key']):
                 return {'status': 'event', 'event_id': pending['event_id'], 'event': payload, 'replayed': True}
             if payload['kind'] == 'work_available':
                 source = db.execute('SELECT status FROM work_queue WHERE queue_id=?', (payload['queue_id'],)).fetchone()
                 if source is None or source['status'] not in {'pending', 'offered'}:
                     db.execute("UPDATE agent_event_deliveries SET state='obsolete' WHERE event_id=?", (pending['event_id'],))
         for key, payload in candidates:
-            reserved = db.execute("SELECT 1 FROM agent_event_deliveries d JOIN agent_event_waiters w ON w.agent_id=d.agent_id WHERE d.project_id=? AND d.event_key=? AND d.agent_id<>? AND d.state='pending' AND w.state IN ('waiting','notified') AND w.expires_at>? LIMIT 1",
-                                  (project, key, actor.agent_id, _iso())).fetchone()
-            if reserved:
-                continue
             exists = db.execute('SELECT 1 FROM agent_event_deliveries WHERE agent_id=? AND project_id=? AND event_key=?', (actor.agent_id, project, key)).fetchone()
-            if exists:
+            if exists or not _reserve(db, actor, project, key):
                 continue
             payload = {**payload, 'project_id': project, 'role': actor.role.value}
             identifier = 'delivery_' + secrets.token_hex(16)
@@ -149,10 +155,11 @@ async def wait_for_event(service, actor, project_id, *, timeout_seconds=43200,
             if old and old['state'] == 'waiting' and old['expires_at'] > _iso():
                 raise ConflictError('This identity is already waiting in another session; use a distinct instance')
             if ack_event_id:
-                delivery = db.execute('SELECT agent_id,project_id FROM agent_event_deliveries WHERE event_id=?', (ack_event_id,)).fetchone()
+                delivery = db.execute('SELECT agent_id,project_id,event_key FROM agent_event_deliveries WHERE event_id=?', (ack_event_id,)).fetchone()
                 if not delivery or delivery['agent_id'] != actor.agent_id or delivery['project_id'] != project_id:
                     raise AuthorizationError('Cannot acknowledge another agent or project event')
                 db.execute("UPDATE agent_event_deliveries SET state='acked',acknowledged_at=? WHERE event_id=?", (_iso(), ack_event_id))
+                db.execute('DELETE FROM agent_event_reservations WHERE project_id=? AND event_key=? AND agent_id=?', (project_id, delivery['event_key'], actor.agent_id))
             db.execute('DELETE FROM agent_event_waiters WHERE agent_id=?', (actor.agent_id,))
             db.execute("INSERT INTO agent_event_waiters VALUES (?,?,?,?,?,'waiting',?,?)",
                        (actor.agent_id, project_id, actor.role.value, wait_id, receiver.getsockname()[1],

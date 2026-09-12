@@ -900,6 +900,13 @@ CREATE TABLE IF NOT EXISTS agent_event_deliveries (
 );
 CREATE INDEX IF NOT EXISTS agent_event_pending
     ON agent_event_deliveries(agent_id, project_id, state);
+CREATE TABLE IF NOT EXISTS agent_event_reservations (
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    event_key TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY(project_id, event_key)
+);
 """
 
 
