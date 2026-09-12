@@ -37,8 +37,10 @@ SECRET_VARIABLE = "HOH_PLANNER_WAKEUP_SECRET"
 # are imported rather than restated. Two copies of a security primitive drift,
 # and the copy that does not get the fix is the one still in the path.
 ALLOWED_HOSTS = _shared.ALLOWED_HOSTS
+ALLOWED_HOSTS_VARIABLE = _shared.ALLOWED_HOSTS_VARIABLE
 EndpointNotAllowed = _shared.EndpointNotAllowed
 SigningSecretMissing = _shared.SigningSecretMissing
+allowed_hosts = _shared.allowed_hosts
 validate_endpoint = _shared.validate_endpoint
 
 

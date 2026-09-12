@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
@@ -25,6 +26,12 @@ from uuid import uuid4
 # place this service will make an outbound request to, so the allowlist is the
 # whole of the protection.
 ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+# Agents on other machines need endpoints this list cannot contain, so an
+# operator may add hosts here. Deliberately additive and deliberately explicit:
+# the default survives a misconfigured variable, and a blank or absent value
+# means loopback rather than "no restriction".
+ALLOWED_HOSTS_VARIABLE = "HOH_WAKEUP_ALLOWED_HOSTS"
 
 SECRET_VARIABLE = "HOH_WAKEUP_SECRET"
 
@@ -63,10 +70,39 @@ class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
         )
 
 
+def allowed_hosts() -> frozenset[str]:
+    """The hosts this service may make an outbound wakeup request to.
+
+    Read on each call rather than captured at import, so an operator changing
+    the variable does not need the meaning of "allowed" to depend on which
+    process started first.
+    """
+    configured = os.getenv(ALLOWED_HOSTS_VARIABLE, "")
+    extra = {host.strip().lower() for host in configured.split(",") if host.strip()}
+    if "*" in extra:
+        # A wildcard here would turn every registered endpoint into an outbound
+        # request to anywhere, which is the one thing this list exists to stop.
+        raise EndpointNotAllowed(
+            f"{ALLOWED_HOSTS_VARIABLE} must name hosts; '*' is not a host"
+        )
+    return ALLOWED_HOSTS | frozenset(extra)
+
+
 def validate_endpoint(endpoint: str) -> str:
     parsed = urlparse(endpoint)
-    if parsed.scheme not in {"http", "https"} or parsed.hostname not in ALLOWED_HOSTS:
-        raise EndpointNotAllowed("A wakeup endpoint must be an http(s) loopback address")
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in {"http", "https"} or host not in allowed_hosts():
+        raise EndpointNotAllowed(
+            "A wakeup endpoint must be an http(s) address on the allowlist"
+        )
+    if host not in ALLOWED_HOSTS and parsed.scheme != "https":
+        # Off the machine, plain HTTP puts the envelope on the wire in the clear.
+        # It carries no credential by design, but it still names a project and a
+        # ticket, and nothing about it survives an attacker rewriting it in
+        # flight. Loopback keeps http because there is no wire to read.
+        raise EndpointNotAllowed(
+            "A wakeup endpoint outside loopback must use https"
+        )
     return endpoint
 
 

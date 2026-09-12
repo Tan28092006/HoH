@@ -257,3 +257,79 @@ def test_the_scheduler_sweep_knocks_on_every_role(
 
     assert swept["agent_wakeups"]["delivered"], "the sweep is what does the knocking"
     assert sent[0][0] == ENDPOINT
+
+
+# --- widening the allowlist without losing it ------------------------------------
+
+
+def test_loopback_is_the_default_when_nothing_is_configured(monkeypatch) -> None:
+    monkeypatch.delenv(agent_wakeup.ALLOWED_HOSTS_VARIABLE, raising=False)
+
+    assert agent_wakeup.validate_endpoint("http://127.0.0.1:9099/wake")
+    with pytest.raises(agent_wakeup.EndpointNotAllowed):
+        agent_wakeup.validate_endpoint("https://agents.example.com/wake")
+
+
+def test_a_blank_setting_means_loopback_not_everything(monkeypatch) -> None:
+    """The failure mode of a misread variable has to be closed, not open."""
+    monkeypatch.setenv(agent_wakeup.ALLOWED_HOSTS_VARIABLE, "   ")
+
+    with pytest.raises(agent_wakeup.EndpointNotAllowed):
+        agent_wakeup.validate_endpoint("https://agents.example.com/wake")
+
+
+def test_an_operator_can_add_a_host_for_agents_on_other_machines(monkeypatch) -> None:
+    monkeypatch.setenv(
+        agent_wakeup.ALLOWED_HOSTS_VARIABLE, "agents.example.com, qa.example.com"
+    )
+
+    assert agent_wakeup.validate_endpoint("https://agents.example.com/wake")
+    assert agent_wakeup.validate_endpoint("https://QA.example.com/wake")
+    with pytest.raises(agent_wakeup.EndpointNotAllowed):
+        agent_wakeup.validate_endpoint("https://elsewhere.example.com/wake")
+
+
+def test_widening_the_list_never_removes_loopback(monkeypatch) -> None:
+    monkeypatch.setenv(agent_wakeup.ALLOWED_HOSTS_VARIABLE, "agents.example.com")
+
+    assert agent_wakeup.validate_endpoint("http://127.0.0.1:9099/wake")
+
+
+def test_a_wildcard_is_refused(monkeypatch) -> None:
+    """It would turn every registered endpoint into a request to anywhere."""
+    monkeypatch.setenv(agent_wakeup.ALLOWED_HOSTS_VARIABLE, "*")
+
+    with pytest.raises(agent_wakeup.EndpointNotAllowed):
+        agent_wakeup.validate_endpoint("https://anything.example.com/wake")
+
+
+def test_an_allowed_host_off_the_machine_still_has_to_use_https(monkeypatch) -> None:
+    """Plain HTTP off-box puts the envelope on the wire for anyone to rewrite."""
+    monkeypatch.setenv(agent_wakeup.ALLOWED_HOSTS_VARIABLE, "agents.example.com")
+
+    with pytest.raises(agent_wakeup.EndpointNotAllowed) as error:
+        agent_wakeup.validate_endpoint("http://agents.example.com/wake")
+
+    assert "https" in str(error.value)
+
+
+def test_the_setting_is_read_when_it_is_used(monkeypatch) -> None:
+    """Captured at import, the meaning of 'allowed' would depend on start order."""
+    monkeypatch.delenv(agent_wakeup.ALLOWED_HOSTS_VARIABLE, raising=False)
+    with pytest.raises(agent_wakeup.EndpointNotAllowed):
+        agent_wakeup.validate_endpoint("https://agents.example.com/wake")
+
+    monkeypatch.setenv(agent_wakeup.ALLOWED_HOSTS_VARIABLE, "agents.example.com")
+
+    assert agent_wakeup.validate_endpoint("https://agents.example.com/wake")
+
+
+def test_registering_a_widened_endpoint_is_accepted(service, actors, seeded, monkeypatch) -> None:
+    """The guard runs at registration, so widening has to reach that path too."""
+    monkeypatch.setenv(agent_wakeup.ALLOWED_HOSTS_VARIABLE, "agents.example.com")
+
+    presence = _register(
+        service, actors, "developer", endpoint="https://agents.example.com/wake"
+    )
+
+    assert presence["endpoint"] == "https://agents.example.com/wake"
