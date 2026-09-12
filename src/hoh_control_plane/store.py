@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -291,6 +292,13 @@ CREATE TABLE IF NOT EXISTS spec_sections (
     -- 106 sections: a table of contents that costs half the document it indexes
     -- has not saved anybody anything.
     depth INTEGER NOT NULL DEFAULT 1,
+    -- How far this section reaches once its nested sections are counted in. A
+    -- section's own span ends where its first child begins, so a trimmed outline
+    -- that reported that span would send a reader to the preamble and call it
+    -- the section. Computed when the document is synced rather than on every
+    -- read: syncing is rare and reading is not.
+    subtree_end_line INTEGER,
+    subtree_tokens INTEGER,
     -- The revision this section last moved at, which is what a reader compares
     -- its own cursor against to learn whether it has drifted.
     changed_at_revision INTEGER NOT NULL,
@@ -332,6 +340,19 @@ CREATE TABLE IF NOT EXISTS experience_notes (
 
 CREATE INDEX IF NOT EXISTS experience_notes_project
     ON experience_notes(project_id, times_seen DESC, last_seen_at DESC);
+
+-- What each note attaches to, one row per rooted scope, so the question "which
+-- notes reach this ticket" is answered by an index instead of by loading every
+-- note in the project and deciding in Python. Reading a ticket's context is the
+-- hottest path there is; it must not get slower as the project accumulates.
+CREATE TABLE IF NOT EXISTS experience_note_scopes (
+    note_id TEXT NOT NULL REFERENCES experience_notes(note_id),
+    scope_root TEXT NOT NULL,
+    PRIMARY KEY (note_id, scope_root)
+);
+
+CREATE INDEX IF NOT EXISTS experience_note_scopes_root
+    ON experience_note_scopes(scope_root);
 
 CREATE TABLE IF NOT EXISTS leases (
     lease_id TEXT PRIMARY KEY,
@@ -843,6 +864,10 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("qa_test_runs", "storage_checksum", "TEXT"),
     # Heading level, so a cold reader can ask for an outline instead of all of it.
     ("spec_sections", "depth", "INTEGER NOT NULL DEFAULT 1"),
+    # Subtree extent, so trimming the outline costs a page rather than a scan.
+    # NULL until the next sync recomputes it, which the reader falls back for.
+    ("spec_sections", "subtree_end_line", "INTEGER"),
+    ("spec_sections", "subtree_tokens", "INTEGER"),
 )
 
 # Indexes that cannot be declared in SCHEMA. The schema script runs before these
@@ -873,6 +898,35 @@ def apply_additive_columns(connection: Any, columns_of: Any) -> None:
         existing.add(column)
     for statement in MIGRATED_INDEXES:
         connection.execute(statement)
+    backfill_experience_scopes(connection)
+
+
+def backfill_experience_scopes(connection: Any) -> int:
+    """Index the scopes of notes written before the index existed.
+
+    A note absent from this table is invisible to the query that surfaces it, so
+    this is not an optimisation that can be skipped: without it, upgrading loses
+    every lesson already recorded. Cheap to run always, because it only looks at
+    notes that have no rows yet.
+    """
+    from hoh_control_plane.scopes import roots_of
+
+    rows = connection.execute(
+        """
+        SELECT note_id, file_scope FROM experience_notes
+        WHERE note_id NOT IN (SELECT note_id FROM experience_note_scopes)
+        """
+    ).fetchall()
+    indexed = 0
+    for row in rows:
+        note_id = row["note_id"]
+        for root in roots_of(json.loads(row["file_scope"])):
+            connection.execute(
+                "INSERT INTO experience_note_scopes (note_id, scope_root) VALUES (?, ?)",
+                (note_id, root),
+            )
+            indexed += 1
+    return indexed
 
 
 class SQLiteStore:

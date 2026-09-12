@@ -357,3 +357,55 @@ def test_derived_metadata_is_refreshed_even_when_the_text_did_not_change(
     assert section["tokens"] > 1, "the size was recomputed"
     assert section["lines"][1] > 1, "and so was the span"
     assert _digest(service, planner, revision)["sections"] == [], "without looking like a change"
+
+
+def test_a_subtree_extent_is_folded_up_in_one_pass(service, actors, seeded) -> None:
+    """The obvious nested scan is quadratic, and specifications only ever grow."""
+    from hoh_control_plane.service.spec import SpecMixin
+
+    deep = [
+        {"depth": 1, "end_line": 10, "token_estimate": 1},
+        {"depth": 2, "end_line": 20, "token_estimate": 2},
+        {"depth": 3, "end_line": 30, "token_estimate": 4},
+        {"depth": 2, "end_line": 40, "token_estimate": 8},
+        {"depth": 1, "end_line": 50, "token_estimate": 16},
+    ]
+
+    extents = SpecMixin._subtree_extents(deep)
+
+    assert extents[0] == (40, 15), "the first root covers its three descendants"
+    assert extents[1] == (30, 6), "and the branch covers only its own child"
+    assert extents[3] == (40, 8), "a leaf covers itself"
+    assert extents[4] == (50, 16), "the last root has no descendants to absorb"
+
+
+def test_the_outline_does_not_read_sections_it_is_not_returning(
+    service, actors, seeded
+) -> None:
+    """Trimming has to cost a page, not a walk over every section in the document."""
+    planner = actors["planner"]
+    document = "# Root\n\n" + "".join(
+        f"## Section {index}\n\nBody.\n\n### Nested {index}\n\nDeep.\n\n" for index in range(60)
+    )
+    _sync(service, planner, document)
+
+    with service.store.connection() as connection:
+        plan = "\n".join(
+            str(row[3])
+            for row in connection.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT * FROM spec_sections
+                WHERE project_id = ? AND changed_at_revision > ? AND depth <= ?
+                ORDER BY document ASC, start_line ASC LIMIT ?
+                """,
+                ("project-1", 0, 2, 51),
+            ).fetchall()
+        )
+
+    assert "spec_sections_cursor" in plan or "SEARCH" in plan, (
+        f"the outline scans the whole index:\n{plan}"
+    )
+    trimmed = _digest(service, planner, 0, limit=200, max_depth=2)
+    assert len(trimmed["sections"]) == 61, "root plus 60 second-level sections"
+    assert all(entry["tokens"] > 0 for entry in trimmed["sections"])

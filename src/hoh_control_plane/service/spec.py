@@ -149,6 +149,13 @@ class SpecMixin:
                     (next_revision, now, leftover["section_id"]),
                 )
 
+            # Recomputed for the whole document, because a section's extent is a
+            # fact about its neighbours: adding one child changes its parent's
+            # reach without changing a single character of the parent. Done here,
+            # where the document is already parsed, so that reading stays a page
+            # lookup instead of a walk over every section.
+            self._store_subtree_extents(connection, project_id, document, parsed, now)
+
             touched = bool(added or changed or removed)
             if touched:
                 self._set_revision(connection, project_id, next_revision, now)
@@ -240,11 +247,6 @@ class SpecMixin:
                 """,
                 tuple(parameters),
             ).fetchall()
-            extents = (
-                self._subtree_extents(connection, project_id)
-                if max_depth is not None
-                else {}
-            )
 
         has_more = len(rows) > limit
         sections = []
@@ -254,10 +256,14 @@ class SpecMixin:
             # A trimmed outline hides the children, so an entry has to stand for
             # the whole branch: its own span ends at its first child, and sending
             # a reader there would hand them the preamble and call it the section.
-            end_line, tokens = extents.get(
-                str(section["section_id"]),
-                (section["end_line"], section["token_estimate"]),
-            )
+            # Falls back to the section's own span when the stored extent is
+            # still NULL, which is what an upgraded database looks like until its
+            # next sync -- a span that is too small, never one that is wrong.
+            if max_depth is None:
+                end_line, tokens = section["end_line"], section["token_estimate"]
+            else:
+                end_line = section["subtree_end_line"] or section["end_line"]
+                tokens = section["subtree_tokens"] or section["token_estimate"]
             sections.append(
                 {
                     "document": section["document"],
@@ -274,43 +280,58 @@ class SpecMixin:
             "has_more": has_more,
         }
 
-    @staticmethod
-    def _subtree_extents(
-        connection: Connection, project_id: str
-    ) -> dict[str, tuple[int, int]]:
-        """How far each section reaches once its nested sections are counted in.
+    def _store_subtree_extents(
+        self,
+        connection: Connection,
+        project_id: str,
+        document: str,
+        parsed: list[dict[str, Any]],
+        now: str,
+    ) -> None:
+        """Write how far each section reaches once its children are counted in.
 
-        Computed on read rather than stored: a child's edit would otherwise have
-        to write to its parent's row, which is exactly the coupling that makes a
-        parent look changed when nothing in it was touched.
+        One reverse pass with a stack rather than the obvious nested scan: the
+        nested version is quadratic in the worst case, and a specification is
+        exactly the kind of document that grows sections forever.
         """
-        rows = [
-            _row(row)
-            for row in connection.execute(
+        extents = self._subtree_extents(parsed)
+        for section, (end_line, tokens) in zip(parsed, extents):
+            connection.execute(
                 """
-                SELECT section_id, document, start_line, end_line, token_estimate, depth
-                FROM spec_sections
-                WHERE project_id = ? AND status = 'present'
-                ORDER BY document ASC, start_line ASC
+                UPDATE spec_sections
+                SET subtree_end_line = ?, subtree_tokens = ?, updated_at = ?
+                WHERE section_id = ?
                 """,
-                (project_id,),
-            ).fetchall()
-        ]
-        extents: dict[str, tuple[int, int]] = {}
-        for index, section in enumerate(rows):
-            assert section is not None
+                (
+                    end_line,
+                    tokens,
+                    now,
+                    self._section_id(project_id, document, section["heading_path"]),
+                ),
+            )
+
+    @staticmethod
+    def _subtree_extents(parsed: list[dict[str, Any]]) -> list[tuple[int, int]]:
+        """For each section in order, how far it reaches and what it totals.
+
+        Walked backwards so every section's children have already been folded up
+        by the time it is reached: each one absorbs the running totals of the
+        deeper sections still on the stack, which makes this linear rather than
+        quadratic in the number of sections.
+        """
+        results: list[tuple[int, int]] = [(0, 0)] * len(parsed)
+        stack: list[tuple[int, int, int]] = []  # depth, end_line, tokens
+        for index in range(len(parsed) - 1, -1, -1):
+            section = parsed[index]
             end_line = section["end_line"]
             tokens = section["token_estimate"]
-            for following in rows[index + 1 :]:
-                assert following is not None
-                if following["document"] != section["document"]:
-                    break
-                if following["depth"] <= section["depth"]:
-                    break
-                end_line = max(end_line, following["end_line"])
-                tokens += following["token_estimate"]
-            extents[str(section["section_id"])] = (end_line, tokens)
-        return extents
+            while stack and stack[-1][0] > section["depth"]:
+                _, child_end, child_tokens = stack.pop()
+                end_line = max(end_line, child_end)
+                tokens += child_tokens
+            stack.append((section["depth"], end_line, tokens))
+            results[index] = (end_line, tokens)
+        return results
 
     # --- parsing ----------------------------------------------------------------
 

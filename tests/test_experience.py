@@ -185,3 +185,103 @@ def test_recording_a_lesson_does_not_touch_the_ticket(service, actors, seeded) -
     after = service.get_ticket_context(planner, "ticket:DEV-819")["ticket"]
     assert after["version"] == created["version"]
     assert after["status"] == created["status"]
+
+
+# --- the index has to agree with the rule it replaced ----------------------------
+
+
+@pytest.mark.parametrize(
+    "note_scope,ticket_scope",
+    [
+        (["src/payments/**"], ["src/payments/**"]),
+        (["src/payments/**"], ["src/payments/retry.py"]),
+        (["src/payments/retry.py"], ["src/payments/**"]),
+        (["src/**"], ["src/payments/deep/nested.py"]),
+        (["src/payments/**"], ["src/pay/**"]),
+        (["src/payments/**"], ["docs/**"]),
+        (["**/conftest.py"], ["src/payments/**"]),
+        (["src/a/**", "docs/**"], ["docs/guide.md"]),
+        (["src/payments/**"], ["src/payments2/**"]),
+    ],
+)
+def test_the_indexed_query_answers_what_the_overlap_rule_says(
+    service, actors, seeded, note_scope, ticket_scope
+) -> None:
+    """Pushing the filter into SQL must not change which lessons are found."""
+    from hoh_control_plane import scopes
+
+    planner = actors["planner"]
+    _ticket(service, planner, "DEV-900", note_scope)
+    service.record_experience(actors["developer"], "ticket:DEV-900", LESSON, note_scope)
+    _ticket(service, planner, "DEV-901", ticket_scope)
+
+    surfaced = _experience(service, actors["developer"], "DEV-901")
+
+    expected = any(
+        scopes.roots_overlap(left, right)
+        for left in scopes.roots_of(note_scope)
+        for right in scopes.roots_of(ticket_scope)
+    )
+    assert bool(surfaced) is expected, (
+        f"{note_scope} against {ticket_scope}: the index and the rule disagree"
+    )
+
+
+def test_a_note_written_before_the_index_existed_is_not_lost(
+    service, actors, seeded
+) -> None:
+    """Upgrading must not make an already-recorded lesson invisible."""
+    planner = actors["planner"]
+    _ticket(service, planner, "DEV-902", ["src/payments/**"])
+    service.record_experience(actors["developer"], "ticket:DEV-902", LESSON)
+    _ticket(service, planner, "DEV-903", ["src/payments/retry.py"])
+    with service.store.connection(immediate=True) as connection:
+        connection.execute("DELETE FROM experience_note_scopes")
+    assert _experience(service, actors["developer"], "DEV-903") == [], "index really gone"
+
+    with service.store.connection(immediate=True) as connection:
+        from hoh_control_plane.store import backfill_experience_scopes
+
+        indexed = backfill_experience_scopes(connection)
+
+    assert indexed, "it had something to rebuild"
+    assert _experience(service, actors["developer"], "DEV-903"), "and the lesson is back"
+
+
+def test_surfacing_uses_the_index_instead_of_reading_every_note(
+    service, actors, seeded
+) -> None:
+    """A context read is the hottest path there is.
+
+    Asserted on the query plan rather than on a stopwatch: a timing threshold
+    passes on a fast machine no matter how the query is written, and this is a
+    claim about how the work grows, not about how long it took here.
+    """
+    from hoh_control_plane import scopes
+    from hoh_control_plane.service.experience import ExperienceMixin
+
+    planner = actors["planner"]
+    for index in range(40):
+        holder = f"DEV-91{index:02d}"
+        _ticket(service, planner, holder, [f"src/unrelated{index}/**"])
+        service.record_experience(actors["developer"], f"ticket:{holder}", f"Lesson {index}")
+    _ticket(service, planner, "DEV-999", ["src/payments/**"])
+
+    assert _experience(service, actors["developer"], "DEV-999") == [], (
+        "none of those 40 notes touch this scope"
+    )
+
+    clause, parameters = ExperienceMixin._overlap_clause(scopes.roots_of(["src/payments/**"]))
+    with service.store.connection() as connection:
+        plan = "\n".join(
+            str(row[3])
+            for row in connection.execute(
+                f"EXPLAIN QUERY PLAN SELECT note_id FROM experience_note_scopes WHERE {clause}",
+                tuple(parameters),
+            ).fetchall()
+        )
+
+    assert "SCAN experience_note_scopes" not in plan, (
+        f"the scope lookup reads the whole table:\n{plan}"
+    )
+    assert "experience_note_scopes_root" in plan or "SEARCH" in plan, plan

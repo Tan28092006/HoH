@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hoh_control_plane import scopes
 from hoh_control_plane.service._common import (
     Actor,
     Any,
@@ -395,26 +396,16 @@ class LeaseMixin:
 
     @staticmethod
     def _scope_roots_overlap(left_scope: str, right_scope: str) -> bool:
-        left_root = LeaseMixin._scope_root(left_scope)
-        right_root = LeaseMixin._scope_root(right_scope)
-        if not left_root or not right_root:
-            return True
-        return (
-            left_root == right_root
-            or left_root.startswith(f"{right_root}/")
-            or right_root.startswith(f"{left_root}/")
+        return scopes.roots_overlap(
+            scopes.scope_root(left_scope), scopes.scope_root(right_scope)
         )
 
     @staticmethod
     def _scope_root(scope: str) -> str:
-        normalized = scope.replace("\\", "/").strip("/")
-        static_parts = []
-        for part in normalized.split("/"):
-            if any(character in part for character in "*?["):
-                break
-            if part:
-                static_parts.append(part)
-        return "/".join(static_parts)
+        # Delegated rather than defined here: the store indexes what a note
+        # attaches to using the same rule, and a second copy of it would let
+        # lease collision and experience disagree about what overlaps.
+        return scopes.scope_root(scope)
 
     @staticmethod
     def _path_is_in_any_scope(path: str, scopes: list[str]) -> bool:

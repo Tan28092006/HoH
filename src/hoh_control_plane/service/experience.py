@@ -11,6 +11,7 @@ go and read it, which is the part that prose in a document never solves.
 """
 from __future__ import annotations
 
+from hoh_control_plane import scopes
 from hoh_control_plane.service._common import (
     Actor,
     Any,
@@ -91,6 +92,15 @@ class ExperienceMixin:
                         now,
                     ),
                 )
+                # Indexed as it is written. A note missing from here is a note
+                # the surfacing query cannot see, so the two writes belong in
+                # the same transaction as each other.
+                for root in scopes.roots_of(scope):
+                    connection.execute(
+                        "INSERT INTO experience_note_scopes (note_id, scope_root) "
+                        "VALUES (?, ?)",
+                        (note_id, root),
+                    )
             self._event(
                 connection,
                 actor,
@@ -158,21 +168,25 @@ class ExperienceMixin:
         scope = list(ticket.get("file_scope") or [])
         if not scope:
             return []
+        clause, parameters = self._overlap_clause(scopes.roots_of(scope))
         with self.store.connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT * FROM experience_notes
-                WHERE project_id = ? AND (learned_on_ticket IS NULL OR learned_on_ticket != ?)
+                WHERE project_id = ?
+                  AND (learned_on_ticket IS NULL OR learned_on_ticket != ?)
+                  AND note_id IN (
+                      SELECT note_id FROM experience_note_scopes WHERE {clause}
+                  )
                 ORDER BY times_seen DESC, last_seen_at DESC
+                LIMIT ?
                 """,
-                (project_id, ticket["ticket_id"]),
+                (project_id, ticket["ticket_id"], *parameters, _MAX_EXPERIENCE_NOTES),
             ).fetchall()
         relevant: list[dict[str, Any]] = []
         for row in rows:
             note = _row(row)
             assert note is not None
-            if not self._scopes_overlap(scope, note["file_scope"]):
-                continue
             relevant.append(
                 {
                     "lesson": note["lesson"],
@@ -182,9 +196,30 @@ class ExperienceMixin:
                     "recorded_by": note["actor_role"],
                 }
             )
-            if len(relevant) >= _MAX_EXPERIENCE_NOTES:
-                break
         return relevant
+
+    @staticmethod
+    def _overlap_clause(roots: list[str]) -> tuple[str, list[Any]]:
+        """Ask the index which notes can reach these roots, in two shapes it can use.
+
+        Overlap is "one root contains the other", which splits cleanly: the roots
+        that contain this one are a short known list, answerable by equality; the
+        roots nested under it are a contiguous range, answerable by comparison.
+        Both use an ordinary index on either backend, where a LIKE pattern only
+        sometimes does.
+        """
+        terms: list[str] = []
+        parameters: list[Any] = []
+        for root in roots:
+            ancestors = scopes.ancestors_of(root)
+            placeholders = ",".join("?" for _ in ancestors)
+            terms.append(f"scope_root IN ({placeholders})")
+            parameters.extend(ancestors)
+            span = scopes.descendant_range(root)
+            if span is not None:
+                terms.append("(scope_root >= ? AND scope_root < ?)")
+                parameters.extend(span)
+        return " OR ".join(terms), parameters
 
     def list_experience(
         self, actor: Actor, project_id: str, limit: int = _MAX_EXPERIENCE_NOTES
