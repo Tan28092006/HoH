@@ -147,12 +147,20 @@ class StoreConnection:
         # rather than hardcoded, so a second backend translates its own errors
         # without this class learning about every driver.
         self._integrity_errors = integrity_errors
+        self.event_changed = False
 
     def execute(self, statement: str, parameters: Any = ()) -> Any:
         try:
-            return self._raw.execute(
+            result = self._raw.execute(
                 translate_placeholders(statement, self.dialect.placeholder), parameters
             )
+            words = statement.lstrip().lower().split()
+            if words and words[0] in {'insert', 'update', 'delete'} and any(
+                table in words[:5] for table in ('audit_events', 'qa_test_jobs', 'merge_jobs',
+                    'candidate_submission_jobs', 'worktree_provision_jobs', 'planner_jobs')
+            ):
+                self.event_changed = True
+            return result
         except self._integrity_errors as error:
             raise StoreIntegrityError(
                 "This change conflicts with a constraint the schema enforces."
@@ -163,9 +171,14 @@ class StoreConnection:
 
     def commit(self) -> None:
         self._raw.commit()
+        if self.event_changed:
+            self.event_changed = False
+            from hoh_control_plane.event_wait import notify_waiters
+            notify_waiters(self)
 
     def rollback(self) -> None:
         self._raw.rollback()
+        self.event_changed = False
 
     def close(self) -> None:
         self._raw.close()
@@ -863,6 +876,30 @@ CREATE TABLE IF NOT EXISTS agent_tool_calls (
 );
 CREATE INDEX IF NOT EXISTS agent_tool_calls_project_sequence
     ON agent_tool_calls(project_id, sequence);
+
+CREATE TABLE IF NOT EXISTS agent_event_waiters (
+    agent_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    role TEXT NOT NULL,
+    wait_id TEXT NOT NULL,
+    notification_port INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS agent_event_deliveries (
+    event_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    event_key TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    state TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    acknowledged_at TEXT,
+    UNIQUE(agent_id, project_id, event_key)
+);
+CREATE INDEX IF NOT EXISTS agent_event_pending
+    ON agent_event_deliveries(agent_id, project_id, state);
 """
 
 

@@ -170,7 +170,7 @@ class PostgresStore:
                 # schema so independent deployments do not share this lock.
                 raw.execute("SELECT pg_advisory_xact_lock(684643, hashtext(current_schema()))")
             yield wrapped
-            raw.commit()
+            wrapped.commit()
         except psycopg.errors.IntegrityError as error:
             raw.rollback()
             raise StoreIntegrityError(
