@@ -1,6 +1,11 @@
 import json
+import hashlib
 from contextlib import closing
 from pathlib import Path
+import subprocess
+import sys
+import tomllib
+import zipfile
 import pytest
 from fastapi.testclient import TestClient
 
@@ -275,6 +280,12 @@ def test_gui_wait_profiles_have_long_timeout_and_unique_instances(desktop, tmp_p
     assert 'Thoát hoàn toàn Codex desktop' in prompt
     assert 'reload task/renderer không nạp lại inventory MCP' in prompt
     assert 'không thử MCP mặc định' in prompt
+    assert 'snapshot trước work.claim đã stale' in prompt
+    planner_prompt = make_prompts(root, 'shop', instance='codex-1')['planner']
+    assert 'delivery_completed' in planner_prompt
+    assert 'planner.sync_repository' in planner_prompt
+    integrator_prompt = make_prompts(root, 'shop', instance='codex-1')['integrator']
+    assert 'wake Planner' in integrator_prompt
     assert client.get('/local/agents?project_id=shop').json() == {'agents': []}
 
 
@@ -293,6 +304,33 @@ def test_desktop_host_launcher_escapes_the_calling_process_job():
     ).read_text(encoding='utf-8')
     assert "bundle / 'start-host.ps1'" in upgrader
     assert "backup / 'start-host.ps1'" in upgrader
+
+
+def test_local_upgrade_packager_includes_checksummed_detached_launcher(tmp_path):
+    source = Path(__file__).resolve().parents[1]
+    version = tomllib.loads((source / 'pyproject.toml').read_text())['project']['version']
+    wheel = tmp_path / f'hoh_control_plane-{version}-py3-none-any.whl'
+    wheel.write_bytes(b'test wheel placeholder')
+    archive = tmp_path / 'upgrade.zip'
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(source / 'deploy/desktop/package_local.py'),
+            '--wheel', str(wheel),
+            '--output', str(archive),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    with zipfile.ZipFile(archive) as bundle:
+        names = set(bundle.namelist())
+        manifest = json.loads(bundle.read('manifest.json'))
+        launcher = bundle.read('start-host.ps1')
+    assert 'start-host.ps1' in names
+    assert manifest['files']['start-host.ps1'] == hashlib.sha256(launcher).hexdigest()
 
 
 def test_claude_profile_upgrade_handles_idle_timeout_and_preserves_higher_override(desktop, tmp_path):

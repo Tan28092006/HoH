@@ -7,11 +7,24 @@ description: Independently test frozen candidates and record evidence-bearing fi
 
 Load the `hoh-control-plane` skill first and confirm the server reports role `qa`.
 
-At session start call `agent.register` with `hoh-qa`, then call `work.inbox`. Prefer a valid inbox offer; otherwise discover candidates waiting for QA. Resolve ticket context, claim one with `qa.claim_candidate`, and verify that the candidate ID and commit SHA remain unchanged throughout the run.
+At session start inspect the project's verification profile, confirm which named
+browser, runtime, build, source-inspection and domain adapters are callable on
+this machine, then call `agent.register` with `hoh-qa` and only those verified
+`execution_capabilities`. Do not copy the profile list blindly. The dispatcher
+must leave work queued until Planner/operator has independently approved those
+capabilities from public preflight evidence, and whenever this QA lacks required
+equipment. QA cannot approve its own capability profile. Then call
+`work.inbox`. Prefer a valid inbox offer; otherwise discover candidates waiting
+for QA. Resolve ticket context, claim one with `qa.claim_candidate`, and verify
+that the candidate ID and commit SHA remain unchanged throughout the run.
 
 Start the Planner-frozen command with `qa.run_project_tests`; it returns a durable `test_run_id` immediately. Poll `qa.get_project_test_run` or use the owned-job event wait until completion. A running-job poll renews the lease. A terminal infrastructure result can return a `BLOCKED` ticket and `lease: null`: the server has parked the unchanged candidate and notified Planner. Read the evidence reference, report the gap and stop lease/verdict writes. Do not repair HoH, change the frozen command or submit another candidate from a QA session. Planner records readiness before the same-candidate retry.
 
 Derive checks from public requirements, acceptance criteria and preservation constraints. Use black-box observations for user-visible behavior and white-box evidence for diagnosis when appropriate.
+
+Do not read, enumerate, infer from or summarize hidden tests, benchmark scores,
+private evaluator files, rubrics or evaluator feedback. Keep them out of evidence
+and Planner handoffs even if the host happens to expose them.
 
 The ticket `validation_contract` is the minimum executable claim set. Apply a
 fixed claim -> observe -> assess loop to each entry: reproduce its exact

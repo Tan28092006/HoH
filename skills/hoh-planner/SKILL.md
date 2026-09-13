@@ -7,7 +7,24 @@ description: Plan feature trees and bounded engineering tickets through Harness 
 
 Load the `hoh-control-plane` skill first and confirm the server reports role `planner`.
 
+At every session start, before releasing work, and after each
+`delivery_completed` report, call `planner.sync_repository`. It fetches the
+configured upstream and returns local/upstream SHAs, ahead/behind counts,
+incoming commits, changed paths, document paths and changed/new/deleted remote
+branch refs without changing the checked
+out default branch. Never use `git pull` as a freshness probe: it may merge or
+rebase the shared integration checkout while candidate worktrees are active. If
+the result is `behind` or `diverged`, review the incoming diff and changed docs
+before changing tickets or declaring the board current. Review a changed shared
+branch only when it is linked to an active ticket/candidate or declared team
+integration branch; keep its detailed diff out of unrelated ticket packets.
+
 Inspect the product specification, feature context, unresolved findings, dependency graph and verified behaviors. Create or update work so that each ticket is bounded but locally complete. For a real codebase, call `planner.configure_repository` once with the local Git repository, then `planner.configure_test_command` with the project test command before releasing Developer tickets. Use `planner.create_feature`, `planner.create_ticket` and `planner.set_ticket_ready`; capture decisions or risks with `planner.append_context`.
+
+Construct each new development document from the current public specification,
+the current artifact and candidate-bound QA evidence. Do not ask for or recreate
+an earlier ticket's development document as a third cross-iteration state channel.
+Never turn hidden evaluator information into a requirement or priority.
 
 Every executable ticket must define:
 
@@ -24,6 +41,14 @@ verification equipment and call `planner.configure_verification_profile` before
 releasing work. Use portable capability names such as `build_execution`,
 `source_inspection`, `runtime_trace`, `browser_interaction`, `screenshot`,
 `audio_observation` or a domain adapter.
+
+The project profile is only the allowed equipment catalog. After a QA agent
+registers what its current session can execute, independently inspect public
+preflight records for that machine/toolchain and call
+`planner.configure_agent_capability_profile` with the approved subset and durable
+evidence refs. Never approve from the QA self-report alone. Revoke unavailable
+equipment by approving a smaller set with a new evidence ref. Strict QA dispatch
+uses the intersection of the live declaration and this approval.
 
 Before `planner.set_ticket_ready`, call `planner.configure_validation_contract`.
 Cover every acceptance criterion exactly once. Each entry names a stable
@@ -42,6 +67,24 @@ Do not copy obsolete paths from an old handoff. Never alter scope while an execu
 is active or the ticket is in Development or QA.
 
 Do not edit production code, submit candidates, issue QA verdicts or bypass evidence gates. Ticket workflow mutations go through the Planner MCP tools and are logged. The local operator UI may create a project; select that existing project ID instead of creating it again. Repository and test policy still require explicit Planner setup before releasing executable tickets.
+
+Treat a `delivery_completed` Planner job as the mandatory return report for one
+finished engineering iteration. Resolve the referenced ticket packet and verify
+the candidate, merge job when present, and actual mainline commit. Then update
+feature progress, unblock only dependencies the landed behavior truly satisfies,
+create or release the next bounded ticket when warranted, and resolve the Planner
+job with the actions taken. Acknowledging the wakeup alone does not close this
+planning step. Replayed recovery of the same merge must not create another report.
+
+Classify an incoming upstream diff by observable impact: requirements/spec and
+docs, public API/schema/config, production/runtime state, tests/evidence, and
+source-only implementation. Map each affected requirement and file scope to the
+current dependency graph. A remote commit or production status note is provenance,
+not QA evidence: do not mark a ticket DONE unless it passed the controlled merge
+path or an Integrator records an explicit ungated landing. Add new requirements
+with their Git source ref, revise validation contracts for changed behavior,
+retire or supersede obsolete work, and send active/frozen candidates through
+base-drift/revalidation rather than silently transferring old evidence.
 
 ## Reading the board
 

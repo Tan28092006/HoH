@@ -21,6 +21,17 @@ validation contract needs an undeclared capability. Enabling this policy also
 checks tickets already in READY so the migration cannot strand work behind an
 implicit test plan.
 
+The project profile is the intended harness surface. Each QA presence separately
+registers `execution_capabilities` that the current session has actually checked.
+A Planner or operator then inspects durable public preflight records and calls
+`planner.configure_agent_capability_profile`; self-report alone never grants claim
+authority. Strict work is offered and claimable only when every required capability
+is both live-declared and independently approved. This prevents a browser or
+runtime-trace ticket from being assigned to a machine that merely copied the
+project declaration. A later `agent.register` updates the live declaration but
+cannot overwrite the approval. Approval is bound to `machine_id`; moving the
+same agent identity to another host requires a new preflight and approval.
+
 ## Ticket validation contract
 
 Planner attaches one contract entry per acceptance criterion, either during
@@ -54,10 +65,13 @@ originating chat.
 
 ## Multi-machine rule
 
-Capabilities belong to the project contract; evidence still records the actual
-environment digest and frozen candidate SHA. A machine that lacks a required
-capability reports `insufficient_evidence`. Planner adds or routes the required
-runner instead of weakening the ticket. `colocated` and `agent_workspace`
+Capabilities belong to the project contract, the approved QA profile and the
+current QA presence;
+evidence still records the actual environment digest and frozen candidate SHA.
+A machine that lacks a required capability does not receive or claim the ticket.
+If a capability disappears during a run, QA records `insufficient_evidence`.
+Planner adds or routes the required runner instead of weakening the ticket.
+`colocated` and `agent_workspace`
 worktree rules are unchanged: the validation contract never grants filesystem
 access or permission to reuse another agent's mutable worktree.
 

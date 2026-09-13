@@ -64,14 +64,23 @@ class PlannerJobMixin:
             connection.execute(
                 """
                 UPDATE planner_jobs
-                SET summary = ?, evidence_refs = ?, candidate_id = COALESCE(?, candidate_id),
-                    context_entry_id = COALESCE(?, context_entry_id), updated_at = ?
+                SET job_type = ?, summary = ?, evidence_refs = ?,
+                    candidate_id = CASE WHEN job_type != ? THEN ?
+                                        ELSE COALESCE(?, candidate_id) END,
+                    context_entry_id = CASE WHEN job_type != ? THEN ?
+                                            ELSE COALESCE(?, context_entry_id) END,
+                    updated_at = ?
                 WHERE planner_job_id = ?
                 """,
                 (
+                    job_type.value,
                     summary,
                     json.dumps(merged),
+                    job_type.value,
                     candidate_id,
+                    candidate_id,
+                    job_type.value,
+                    context_entry_id,
                     context_entry_id,
                     timestamp,
                     existing["planner_job_id"],
@@ -125,6 +134,66 @@ class PlannerJobMixin:
             artifact_commit=artifact_commit,
         )
         return opened
+
+    def _report_delivery_completed(
+        self,
+        connection: Connection,
+        actor: Actor,
+        project_id: str,
+        ticket: dict[str, Any],
+        *,
+        candidate_id: str | None,
+        mainline_commit: str,
+        merge_job_id: str | None = None,
+        gated: bool = True,
+    ) -> dict[str, Any]:
+        """Close the engineering feedback loop with one durable Planner report."""
+        evidence_refs = [f"candidate:{candidate_id}"] if candidate_id is not None else []
+        if merge_job_id is not None:
+            evidence_refs.append(f"merge_job:{merge_job_id}")
+        evidence_refs.append(f"mainline:{mainline_commit}")
+        if candidate_id is not None:
+            existing = _row(
+                connection.execute(
+                    """SELECT * FROM planner_jobs
+                       WHERE ticket_id = ? AND job_type = 'delivery_completed'
+                         AND candidate_id = ?
+                       ORDER BY created_at DESC LIMIT 1""",
+                    (ticket["ticket_id"], candidate_id),
+                ).fetchone()
+            )
+        else:
+            existing = _row(
+                connection.execute(
+                    """SELECT j.* FROM planner_jobs j
+                       JOIN planner_interventions i ON i.planner_job_id = j.planner_job_id
+                       WHERE j.ticket_id = ? AND j.job_type = 'delivery_completed'
+                         AND i.artifact_commit = ?
+                       ORDER BY j.created_at DESC LIMIT 1""",
+                    (ticket["ticket_id"], mainline_commit),
+                ).fetchone()
+            )
+        if existing is not None:
+            return self._planner_job(connection, existing["planner_job_id"])
+        return self._open_planner_job(
+            connection,
+            actor,
+            project_id,
+            ticket,
+            job_type=PlannerJobType.DELIVERY_COMPLETED,
+            summary=(
+                f"{ticket['ticket_id']} landed on mainline at {mainline_commit}. "
+                + (
+                    "Review feature progress, unblock satisfied dependencies, and select the next bounded work."
+                    if gated else
+                    "This landing was recorded outside the gate and certifies no QA criterion; "
+                    "reconcile scope and verification needs before selecting the next bounded work."
+                )
+            ),
+            evidence_refs=evidence_refs,
+            candidate_id=candidate_id,
+            artifact_commit=mainline_commit,
+        )
 
     def _record_planner_intervention(
         self,

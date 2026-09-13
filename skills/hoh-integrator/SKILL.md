@@ -13,6 +13,11 @@ If rebase, conflict resolution or another operation changes the candidate artifa
 
 Record integration evidence and final mainline identity. Requeue the ticket with a specific conflict or regression reason when integration cannot safely complete.
 
+A successful controlled merge creates one durable `delivery_completed` report
+and Planner wakeup in the same state transition. Verify that report exists through
+the returned workflow state; do not replace it with a chat message or a second
+ticket. Worker recovery and MCP retries must reuse that one report.
+
 ## Protected asynchronous integration
 
 Register, check the inbox and resume an owned lease/job before claiming another

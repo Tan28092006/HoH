@@ -37,7 +37,9 @@ from hoh_control_plane.service._common import (
 # other agent, while storage_ref is the portable reference to the same report.
 _REDUNDANT_SECTION_FIELDS: dict[str, tuple[str, ...]] = {
     "ticket": ("created_at", "updated_at"),
-    "context_entries": ("project_id", "feature_id", "ticket_id", "superseded_by"),
+    "context_entries": (
+        "project_id", "feature_id", "ticket_id", "superseded_by", "actor_id", "created_at"
+    ),
     "candidate": ("ticket_id",),
     "worktree": ("ticket_id", "project_id"),
     "test_runs": ("ticket_id", "candidate_id", "report_path"),
@@ -132,6 +134,11 @@ class ContextMixin:
             )
             project = self._one(
                 connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+            )
+            repository = _row(
+                connection.execute(
+                    "SELECT * FROM project_repositories WHERE project_id = ?", (project_id,)
+                ).fetchone()
             )
             verification_profile = project.get("verification_profile") or {
                 "schema_version": "1", "quality_policy": "legacy", "capabilities": []
@@ -248,6 +255,10 @@ class ContextMixin:
             "context_version": ticket["version"],
             "role": actor.role.value,
             "project_id": project_id,
+            "repository_state": self._repository_revision(
+                repository,
+                self._relevant_branch_refs(candidate, worktree),
+            ),
             "verification_profile": verification_profile,
             "feature": feature,
             "ticket": ticket,
@@ -261,13 +272,12 @@ class ContextMixin:
             "inherited_constraints": inherited,
             "experience": experience,
         }
-        decisions = [entry for entry in contexts if entry["actor_role"] in {"planner", "admin"}
-                     and entry["entry_type"] in {"planner_decision", "planning_decision", "design_decision", "risk", "note"}]
-        latest = decisions[-1] if decisions else None
-        payload["latest_planner_decision"] = ({"entry_id": latest["entry_id"],
-            "context_ref": "ctx:entry:" + latest["entry_id"], "summary": _checkpoint(latest["content"])} if latest else None)
         source_versions = {
             "planning_revision": self._planning_revision(contexts),
+            "repository_revision": self._repository_revision_digest(
+                repository,
+                self._relevant_branch_refs(candidate, worktree),
+            ),
             "ticket_version": ticket["version"],
             "feature_version": feature["version"],
             "candidate_commit": candidate["commit_sha"] if candidate else None,
@@ -413,10 +423,24 @@ class ContextMixin:
         candidate = _row(
             connection.execute(
                 """
-                SELECT commit_sha FROM candidates WHERE ticket_id = ?
+                SELECT commit_sha, branch_ref FROM candidates WHERE ticket_id = ?
                 ORDER BY submitted_at DESC LIMIT 1
                 """,
                 (ticket_id,),
+            ).fetchone()
+        )
+        repository = _row(
+            connection.execute(
+                """SELECT r.* FROM project_repositories r
+                   JOIN features f ON f.project_id = r.project_id
+                   JOIN tickets t ON t.feature_id = f.feature_id
+                   WHERE t.ticket_id = ?""",
+                (ticket_id,),
+            ).fetchone()
+        )
+        worktree = _row(
+            connection.execute(
+                "SELECT branch_ref FROM worktrees WHERE ticket_id = ?", (ticket_id,)
             ).fetchone()
         )
         dependencies = {
@@ -439,6 +463,10 @@ class ContextMixin:
         # instead of allowing a pre-upgrade view to authorize current work.
         if observed.get("planning_revision") != self._planning_revision(decisions):
             stale.append("planning_decisions")
+        if observed.get("repository_revision") != self._repository_revision_digest(
+            repository, self._relevant_branch_refs(candidate, worktree)
+        ):
+            stale.append("repository")
         if observed.get("ticket_version") != ticket["version"]:
             stale.append("ticket")
         if observed.get("feature_version") != feature["version"]:
@@ -461,6 +489,45 @@ class ContextMixin:
         material = [(e["entry_id"], e["entry_type"], e["content"], e["source_ref"]) for e in entries
                     if e["actor_role"] in {"planner", "admin"}]
         return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
+
+    @staticmethod
+    def _repository_revision(repository, branch_refs: tuple[str, ...] = ()):
+        if repository is None:
+            return None
+        revision = {
+            "mainline_commit": repository.get("observed_mainline_commit"),
+            "upstream_commit": repository.get("observed_upstream_commit"),
+        }
+        if branch_refs:
+            remote_refs = json.loads(repository.get("observed_remote_refs") or "{}")
+            relevant: dict[str, str | None] = {}
+            for branch_ref in branch_refs:
+                short = branch_ref.removeprefix("refs/heads/").removeprefix("refs/remotes/")
+                exact = remote_refs.get(short)
+                matches = sorted(
+                    commit for name, commit in remote_refs.items()
+                    if name.endswith("/" + short)
+                )
+                relevant[short] = exact if exact is not None else (matches[0] if matches else None)
+            revision["relevant_branches"] = relevant
+        return revision
+
+    @classmethod
+    def _repository_revision_digest(cls, repository, branch_refs: tuple[str, ...] = ()):
+        revision = cls._repository_revision(repository, branch_refs)
+        if revision is None:
+            return None
+        return hashlib.sha256(
+            json.dumps(revision, sort_keys=True).encode()
+        ).hexdigest()
+
+    @staticmethod
+    def _relevant_branch_refs(candidate, worktree) -> tuple[str, ...]:
+        return tuple(sorted({
+            row["branch_ref"]
+            for row in (candidate, worktree)
+            if row is not None and row.get("branch_ref")
+        }))
 
     @staticmethod
     def _project_role_sections(payload: dict[str, Any], actor: Actor) -> None:
@@ -569,17 +636,16 @@ class ContextMixin:
     def _compact_history(
         self, payload: dict[str, Any], omitted: list[dict[str, Any]], token_budget: int
     ) -> None:
-        """Shorten narration to a checkpoint, keeping every entry's provenance."""
+        """Shorten history to checkpoints while keeping resolvable entry references."""
         references = [
             f"ctx:entry:{entry['entry_id']}"
             for entry in payload.get("context_entries") or []
-            if entry["entry_type"] in _VERBOSE_ENTRY_TYPES
-            and len(entry["content"]) > _CHECKPOINT_CHARS
+            if len(entry["content"]) > _CHECKPOINT_CHARS
         ]
         if not references:
             return
         for entry in payload["context_entries"]:
-            if entry["entry_type"] in _VERBOSE_ENTRY_TYPES:
+            if len(entry["content"]) > _CHECKPOINT_CHARS:
                 entry["content"] = _checkpoint(entry["content"])
         omitted.append(
             {
@@ -656,7 +722,7 @@ class ContextMixin:
     def _drop_verbose_entries(
         self, payload: dict[str, Any], omitted: list[dict[str, Any]], token_budget: int
     ) -> None:
-        """Drop the oldest narration first; durable decisions always stay."""
+        """Drop old history while retaining the newest checkpoint of each durable type."""
         entries = payload.get("context_entries")
         if not entries:
             return
@@ -670,6 +736,11 @@ class ContextMixin:
         }
         omitted.append(record)
         while _estimate_tokens(payload) > token_budget:
+            # Narration is already represented by test runs/audit state and is the
+            # first thing to go. If decisions alone still overflow the packet,
+            # retain the newest checkpoint for every typed decision and replace
+            # older instances with references. The finite vocabulary bounds the
+            # remaining packet even on a long-running project.
             index = next(
                 (
                     position
@@ -678,6 +749,18 @@ class ContextMixin:
                 ),
                 None,
             )
+            if index is None:
+                newest_by_type = {
+                    entry["entry_type"]: entry["entry_id"] for entry in entries
+                }
+                index = next(
+                    (
+                        position
+                        for position, entry in enumerate(entries)
+                        if newest_by_type[entry["entry_type"]] != entry["entry_id"]
+                    ),
+                    None,
+                )
             if index is None:
                 break
             record["references"].append(f"ctx:entry:{entries.pop(index)['entry_id']}")

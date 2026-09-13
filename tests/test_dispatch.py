@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from hoh_control_plane.domain import Actor, ConflictError, Role, TicketStatus
+from hoh_control_plane.domain import Actor, ConflictError, Role, TicketStatus, ValidationError
 from hoh_control_plane.service import ControlPlaneService
 
 
@@ -97,6 +97,148 @@ def test_offline_qa_work_stays_durable_until_an_agent_checks_in(
 
     assert inbox["offers"][0]["target_role"] == Role.QA.value
     assert inbox["offers"][0]["ticket"]["status"] == TicketStatus.QA_READY.value
+
+
+def test_strict_qa_work_waits_for_a_session_with_its_execution_equipment(
+    service: ControlPlaneService,
+    actors: dict[str, Actor],
+    seeded: dict[str, object],
+) -> None:
+    ticket = seeded["ticket"]
+    contract = [
+        {
+            "criterion": criterion,
+            "scenario_ref": f"browser:{index}",
+            "method": "black_box",
+            "expected_observation": criterion,
+            "required_evidence_types": ["browser_trace", "screenshot"],
+            "required_capabilities": ["browser_interaction", "screenshot"],
+        }
+        for index, criterion in enumerate(ticket["acceptance_criteria"], start=1)
+    ]
+    configured = service.configure_validation_contract(
+        actors["planner"], ticket["ticket_id"], ticket["version"], contract,
+        "Freeze the browser assessment surface.",
+    )
+    seeded["ticket"] = configured["ticket"]
+    service.configure_verification_profile(
+        actors["planner"], "project-1",
+        capabilities=["browser_interaction", "screenshot"],
+        quality_policy="claim-evidence-v1",
+    )
+    submitted = _submit_candidate(service, actors, seeded)
+    admin = Actor("scheduler", Role.ADMIN, frozenset({"*"}))
+
+    service.register_agent(
+        actors["qa"], skills=["hoh-qa"],
+        execution_capabilities=["source_inspection"],
+    )
+    assert service.dispatch_pending_work(admin)["offered_count"] == 0
+    assert service.get_agent_inbox(actors["qa"], "project-1")["offers"] == []
+    with pytest.raises(ValidationError, match="approved capability profile"):
+        service.claim_qa(
+            actors["qa"], "DEV-142", submitted["ticket"]["version"], 900
+        )
+
+    service.register_agent(
+        actors["qa"], skills=["hoh-qa"],
+        execution_capabilities=["browser_interaction", "screenshot"], machine_id="qa-host-a",
+    )
+    assert service.get_agent_inbox(actors["qa"], "project-1")["offers"] == []
+    approved = service.configure_agent_capability_profile(
+        actors["planner"], "project-1", actors["qa"].agent_id,
+        ["browser_interaction", "screenshot"],
+        ["evidence://qa-01/browser-preflight"],
+    )
+    assert approved["approved_execution_capabilities"] == [
+        "browser_interaction", "screenshot"
+    ]
+    inbox = service.get_agent_inbox(actors["qa"], "project-1")
+    assert inbox["offers"][0]["ticket"]["ticket_id"] == "DEV-142"
+    service.register_agent(
+        actors["qa"], skills=["hoh-qa"],
+        execution_capabilities=["browser_interaction", "screenshot"], machine_id="qa-host-b",
+    )
+    with pytest.raises(ValidationError, match="machine does not match"):
+        service.claim_qa(
+            actors["qa"], "DEV-142", submitted["ticket"]["version"], 900
+        )
+
+
+def test_qa_capability_approval_is_limited_by_project_profile(service, actors, seeded):
+    service.configure_verification_profile(
+        actors["planner"], "project-1", capabilities=["runtime_trace"],
+        quality_policy="legacy",
+    )
+    service.register_agent(
+        actors["qa"], skills=["hoh-qa"], execution_capabilities=["runtime_trace"],
+        machine_id="qa-host-a",
+    )
+    with pytest.raises(ValidationError, match="exceeds the project's verification profile"):
+        service.configure_agent_capability_profile(
+            actors["planner"], "project-1", actors["qa"].agent_id,
+            ["browser_interaction"], ["evidence://qa-01/preflight"],
+        )
+
+
+def test_agent_reregistration_preserves_independent_capability_approval(service, actors, seeded):
+    service.configure_verification_profile(
+        actors["planner"], "project-1", capabilities=["runtime_trace"],
+        quality_policy="legacy",
+    )
+    service.register_agent(
+        actors["qa"], skills=["hoh-qa"], execution_capabilities=["runtime_trace"],
+        machine_id="qa-host-a",
+    )
+    service.configure_agent_capability_profile(
+        actors["planner"], "project-1", actors["qa"].agent_id,
+        ["runtime_trace"], ["evidence://qa-01/runtime-preflight"],
+    )
+
+    presence = service.register_agent(
+        actors["qa"], skills=["hoh-qa"], execution_capabilities=[], machine_id="qa-host-a"
+    )
+
+    assert presence["execution_capabilities"] == []
+    assert presence["approved_execution_capabilities"] == ["runtime_trace"]
+    assert presence["capability_approval_refs"] == [
+        "evidence://qa-01/runtime-preflight"
+    ]
+    assert presence["capability_approved_machine_id"] == "qa-host-a"
+
+
+def test_strict_qa_claim_requires_registered_execution_equipment(
+    service: ControlPlaneService,
+    actors: dict[str, Actor],
+    seeded: dict[str, object],
+) -> None:
+    ticket = seeded["ticket"]
+    contract = [
+        {
+            "criterion": criterion,
+            "scenario_ref": f"runtime:{index}",
+            "method": "mixed",
+            "expected_observation": criterion,
+            "required_evidence_types": ["runtime_trace"],
+            "required_capabilities": ["runtime_trace"],
+        }
+        for index, criterion in enumerate(ticket["acceptance_criteria"], start=1)
+    ]
+    configured = service.configure_validation_contract(
+        actors["planner"], ticket["ticket_id"], ticket["version"], contract,
+        "Freeze the runtime assessment surface.",
+    )
+    seeded["ticket"] = configured["ticket"]
+    service.configure_verification_profile(
+        actors["planner"], "project-1", capabilities=["runtime_trace"],
+        quality_policy="claim-evidence-v1",
+    )
+    submitted = _submit_candidate(service, actors, seeded)
+
+    with pytest.raises(ValidationError, match="must register"):
+        service.claim_qa(
+            actors["qa"], "DEV-142", submitted["ticket"]["version"], 900
+        )
 
 
 def test_later_qa_check_in_receives_an_offer_even_when_another_offer_is_open(

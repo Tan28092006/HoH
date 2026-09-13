@@ -22,7 +22,10 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hoh-upgrade-bundle-') as scratch:
         bundle = Path(scratch)
         shutil.copy2(args.wheel, bundle / args.wheel.name)
-        for name in ('hoh_desktop.py', 'upgrade_local.py', 'verify_shared_profiles.py', 'README.md'):
+        for name in (
+            'hoh_desktop.py', 'start-host.ps1', 'upgrade_local.py',
+            'verify_shared_profiles.py', 'README.md',
+        ):
             shutil.copy2(source / name, bundle / name)
         files = {path.name:hashlib.sha256(path.read_bytes()).hexdigest() for path in bundle.iterdir()}
         (bundle / 'manifest.json').write_text(json.dumps({'version':version, 'wheel':args.wheel.name, 'files':files}, indent=2))

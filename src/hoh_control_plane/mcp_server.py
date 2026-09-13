@@ -289,6 +289,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
     @server.tool(name="agent.register", structured_output=True)
     def agent_register(
         skills: list[str],
+        execution_capabilities: list[str] | None = None,
         capacity: int = 1,
         machine_id: str | None = None,
         presence_seconds: int = 120,
@@ -296,6 +297,11 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
         protocol_version: str | None = None,
     ) -> dict[str, Any]:
         """Register this authenticated agent as available for durable work dispatch.
+
+        execution_capabilities lists only observable project equipment this
+        session has checked it can use. Strict QA work is offered and claimable
+        only when this set and the independent Planner/operator approval both
+        cover the ticket validation contract on the same machine.
 
         skill_manifest is an optional list of {name, version, checksum, loaded_at}
         entries recording which skill files this agent actually loaded; combined
@@ -305,6 +311,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
         """
         arguments = {
             "skills": skills,
+            "execution_capabilities": execution_capabilities,
             "capacity": capacity,
             "machine_id": machine_id,
             "presence_seconds": presence_seconds,
@@ -558,6 +565,23 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
                 'planner.configure_repository', arguments,
                 lambda: service.configure_repository(actor, **arguments)))
 
+        @server.tool(name="planner.sync_repository", structured_output=True)
+        async def planner_sync_repository(project_id: str) -> dict[str, Any]:
+            """Fetch upstream and report bounded commit/path changes without pulling or merging."""
+            arguments = {"project_id": project_id}
+            return await anyio.to_thread.run_sync(lambda: invoke(
+                "planner.sync_repository", arguments,
+                lambda: service.sync_repository(actor, project_id)))
+
+        @server.tool(name="planner.reconcile_delivery_report", structured_output=True)
+        def planner_reconcile_delivery_report(merge_job_id: str) -> dict[str, Any]:
+            """Recover exactly one missing Planner report for a completed merge."""
+            arguments = {"merge_job_id": merge_job_id}
+            return invoke(
+                "planner.reconcile_delivery_report", arguments,
+                lambda: service.reconcile_delivery_report(actor, merge_job_id),
+            )
+
         @server.tool(name="planner.configure_test_command", structured_output=True)
         def planner_configure_test_command(
             project_id: str, test_command: list[str], timeout_seconds: int = 600
@@ -607,6 +631,25 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             return invoke(
                 "planner.configure_verification_profile", arguments,
                 lambda: service.configure_verification_profile(actor, **arguments),
+            )
+
+        @server.tool(name="planner.configure_agent_capability_profile", structured_output=True)
+        def planner_configure_agent_capability_profile(
+            project_id: str,
+            agent_id: str,
+            capabilities: list[str],
+            evidence_refs: list[str],
+        ) -> dict[str, Any]:
+            """Approve a QA agent's verified equipment from durable public evidence."""
+            arguments = {
+                "project_id": project_id,
+                "agent_id": agent_id,
+                "capabilities": capabilities,
+                "evidence_refs": evidence_refs,
+            }
+            return invoke(
+                "planner.configure_agent_capability_profile", arguments,
+                lambda: service.configure_agent_capability_profile(actor, **arguments),
             )
 
         @server.tool(name="planner.create_project", structured_output=True)

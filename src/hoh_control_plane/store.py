@@ -224,6 +224,10 @@ CREATE TABLE IF NOT EXISTS project_repositories (
     repository_path TEXT NOT NULL,
     workspace_model TEXT NOT NULL DEFAULT 'colocated'
         CHECK (workspace_model IN ('colocated', 'agent_workspace')),
+    observed_mainline_commit TEXT,
+    observed_upstream_commit TEXT,
+    observed_remote_refs TEXT NOT NULL DEFAULT '{}',
+    observed_at TEXT,
     configured_by TEXT NOT NULL,
     configured_at TEXT NOT NULL
 );
@@ -628,6 +632,12 @@ CREATE TABLE IF NOT EXISTS agent_presence (
     role TEXT NOT NULL,
     project_ids TEXT NOT NULL,
     skills TEXT NOT NULL,
+    execution_capabilities TEXT NOT NULL DEFAULT '[]',
+    approved_execution_capabilities TEXT NOT NULL DEFAULT '[]',
+    capability_approval_refs TEXT NOT NULL DEFAULT '[]',
+    capability_approved_machine_id TEXT,
+    capability_approved_by TEXT,
+    capability_approved_at TEXT,
     capacity INTEGER NOT NULL CHECK (capacity BETWEEN 1 AND 20),
     machine_id TEXT,
     last_seen_at TEXT NOT NULL,
@@ -744,7 +754,7 @@ CREATE TABLE IF NOT EXISTS planner_jobs (
     project_id TEXT NOT NULL REFERENCES projects(project_id),
     ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
     job_type TEXT NOT NULL CHECK (
-        job_type IN ('qa_failure', 'developer_blocker', 'integration_conflict')
+        job_type IN ('qa_failure', 'developer_blocker', 'integration_conflict', 'delivery_completed')
     ),
     status TEXT NOT NULL CHECK (status IN ('READY', 'IN_PROGRESS', 'RESOLVED')),
     summary TEXT NOT NULL,
@@ -788,7 +798,7 @@ CREATE TABLE IF NOT EXISTS planner_interventions (
     project_id TEXT NOT NULL REFERENCES projects(project_id),
     ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
     event_class TEXT NOT NULL CHECK (
-        event_class IN ('developer_blocker', 'qa_failure', 'integration_conflict')
+        event_class IN ('developer_blocker', 'qa_failure', 'integration_conflict', 'delivery_completed')
     ),
     severity TEXT NOT NULL CHECK (severity IN ('high', 'normal')),
     context_ref TEXT NOT NULL,
@@ -939,6 +949,12 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("tickets", "validation_contract", "TEXT NOT NULL DEFAULT '[]'"),
     # Skill and protocol compatibility, for presence rows written before it.
     ("agent_presence", "skill_manifest", "TEXT NOT NULL DEFAULT '[]'"),
+    ("agent_presence", "execution_capabilities", "TEXT NOT NULL DEFAULT '[]'"),
+    ("agent_presence", "approved_execution_capabilities", "TEXT NOT NULL DEFAULT '[]'"),
+    ("agent_presence", "capability_approval_refs", "TEXT NOT NULL DEFAULT '[]'"),
+    ("agent_presence", "capability_approved_machine_id", "TEXT"),
+    ("agent_presence", "capability_approved_by", "TEXT"),
+    ("agent_presence", "capability_approved_at", "TEXT"),
     ("agent_presence", "protocol_version", "TEXT"),
     ("agent_presence", "skill_compatibility", "TEXT NOT NULL DEFAULT '{}'"),
     # Where to knock. No endpoint means polling, which was the only path before.
@@ -954,6 +970,10 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # An existing project was necessarily co-located, because that was the only
     # model the service could serve, so the default states the truth about it.
     ("project_repositories", "workspace_model", "TEXT NOT NULL DEFAULT 'colocated'"),
+    ("project_repositories", "observed_mainline_commit", "TEXT"),
+    ("project_repositories", "observed_upstream_commit", "TEXT"),
+    ("project_repositories", "observed_remote_refs", "TEXT NOT NULL DEFAULT '{}'"),
+    ("project_repositories", "observed_at", "TEXT"),
     # Provenance. Older rows keep NULL, which reads as "not recorded" rather
     # than as a verified environment.
     ("evidence", "checksum_source", "TEXT"),
@@ -1088,9 +1108,10 @@ class SQLiteStore:
             # from the current schema never had the defect they undo.
             self._migrate_qa_test_job_lease_foreign_key(connection)
             self._migrate_planner_job_types(connection)
+            self._migrate_planner_intervention_types(connection)
             apply_additive_columns(connection, self._existing_columns(connection))
             repaired = self._migrate_stale_migration_table_references(connection)
-            self._require_clean_foreign_keys(connection, repaired)
+            self._require_clean_foreign_keys(connection, [*repaired, "planner_interventions"])
 
     @staticmethod
     def _existing_columns(connection: sqlite3.Connection) -> Any:
@@ -1245,7 +1266,7 @@ class SQLiteStore:
         definition = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'planner_jobs'"
         ).fetchone()
-        if definition is None or "integration_conflict" in definition["sql"]:
+        if definition is None or "delivery_completed" in definition["sql"]:
             return
 
         columns = (
@@ -1263,7 +1284,7 @@ class SQLiteStore:
                 project_id TEXT NOT NULL REFERENCES projects(project_id),
                 ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
                 job_type TEXT NOT NULL CHECK (
-                    job_type IN ('qa_failure', 'developer_blocker', 'integration_conflict')
+                    job_type IN ('qa_failure', 'developer_blocker', 'integration_conflict', 'delivery_completed')
                 ),
                 status TEXT NOT NULL CHECK (status IN ('READY', 'IN_PROGRESS', 'RESOLVED')),
                 summary TEXT NOT NULL,
@@ -1291,6 +1312,68 @@ class SQLiteStore:
             CREATE UNIQUE INDEX planner_jobs_one_open_per_ticket
                 ON planner_jobs(ticket_id) WHERE status IN ('READY', 'IN_PROGRESS')
             """
+        )
+
+    @staticmethod
+    def _migrate_planner_intervention_types(connection: sqlite3.Connection) -> None:
+        """Allow the durable wakeup outbox to carry successful delivery reports."""
+        definition = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'planner_interventions'"
+        ).fetchone()
+        if definition is None or "delivery_completed" in definition["sql"]:
+            return
+
+        columns = (
+            "intervention_id, planner_job_id, project_id, ticket_id, event_class, severity, "
+            "context_ref, artifact_commit, candidate_id, evidence_refs, status, "
+            "delivery_attempts, last_error, nonce, created_at, updated_at, delivered_at, "
+            "acknowledged_at, acknowledged_by"
+        )
+        connection.execute("DROP INDEX IF EXISTS planner_interventions_one_open_per_job")
+        connection.execute("DROP INDEX IF EXISTS planner_interventions_project_status")
+        connection.execute(
+            "ALTER TABLE planner_interventions RENAME TO planner_interventions_legacy"
+        )
+        connection.execute(
+            """
+            CREATE TABLE planner_interventions (
+                intervention_id TEXT PRIMARY KEY,
+                planner_job_id TEXT NOT NULL REFERENCES planner_jobs(planner_job_id),
+                project_id TEXT NOT NULL REFERENCES projects(project_id),
+                ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
+                event_class TEXT NOT NULL CHECK (
+                    event_class IN ('developer_blocker', 'qa_failure', 'integration_conflict', 'delivery_completed')
+                ),
+                severity TEXT NOT NULL CHECK (severity IN ('high', 'normal')),
+                context_ref TEXT NOT NULL,
+                artifact_commit TEXT,
+                candidate_id TEXT,
+                evidence_refs TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('PENDING', 'DELIVERED', 'ACKNOWLEDGED')),
+                delivery_attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                nonce TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                delivered_at TEXT,
+                acknowledged_at TEXT,
+                acknowledged_by TEXT
+            )
+            """
+        )
+        connection.execute(
+            f"INSERT INTO planner_interventions ({columns}) "
+            f"SELECT {columns} FROM planner_interventions_legacy"
+        )
+        connection.execute("DROP TABLE planner_interventions_legacy")
+        connection.execute(
+            """CREATE UNIQUE INDEX planner_interventions_one_open_per_job
+               ON planner_interventions(planner_job_id)
+               WHERE status IN ('PENDING', 'DELIVERED')"""
+        )
+        connection.execute(
+            """CREATE INDEX planner_interventions_project_status
+               ON planner_interventions(project_id, status, created_at)"""
         )
 
     @staticmethod

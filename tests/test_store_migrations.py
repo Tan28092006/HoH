@@ -24,11 +24,22 @@ from hoh_control_plane.store import SCHEMA, SchemaMigrationError, SQLiteStore
 # if the current text is ever reformatted.
 _CURRENT_JOB_TYPE_CHECK = (
     "job_type TEXT NOT NULL CHECK (\n"
-    "        job_type IN ('qa_failure', 'developer_blocker', 'integration_conflict')\n"
+    "        job_type IN ('qa_failure', 'developer_blocker', 'integration_conflict', 'delivery_completed')\n"
     "    ),"
 )
 _LEGACY_JOB_TYPE_CHECK = (
-    "job_type TEXT NOT NULL CHECK (job_type IN ('qa_failure', 'developer_blocker')),"
+    "job_type TEXT NOT NULL CHECK (job_type IN ('qa_failure', 'developer_blocker'))"
+    ","
+)
+_CURRENT_INTERVENTION_TYPE_CHECK = (
+    "event_class TEXT NOT NULL CHECK (\n"
+    "        event_class IN ('developer_blocker', 'qa_failure', 'integration_conflict', 'delivery_completed')\n"
+    "    ),"
+)
+_LEGACY_INTERVENTION_TYPE_CHECK = (
+    "event_class TEXT NOT NULL CHECK (\n"
+    "        event_class IN ('developer_blocker', 'qa_failure', 'integration_conflict')\n"
+    "    ),"
 )
 
 
@@ -39,7 +50,9 @@ def legacy_schema() -> str:
             "regression narrows; update _CURRENT_JOB_TYPE_CHECK so the legacy "
             "upgrade is still actually exercised."
         )
-    return SCHEMA.replace(_CURRENT_JOB_TYPE_CHECK, _LEGACY_JOB_TYPE_CHECK)
+    return SCHEMA.replace(_CURRENT_JOB_TYPE_CHECK, _LEGACY_JOB_TYPE_CHECK).replace(
+        _CURRENT_INTERVENTION_TYPE_CHECK, _LEGACY_INTERVENTION_TYPE_CHECK
+    )
 
 
 def write_legacy_database(path: Path) -> None:
@@ -244,6 +257,16 @@ def test_upgrading_still_widens_the_planner_job_kinds(upgraded) -> None:
         connection.close()
 
     assert "integration_conflict" in definition
+    assert "delivery_completed" in definition
+    connection = sqlite3.connect(upgraded["path"])
+    try:
+        intervention_definition = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'planner_interventions'"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert "delivery_completed" in intervention_definition
 
 
 def test_a_database_already_damaged_by_the_shipped_migration_is_repaired(

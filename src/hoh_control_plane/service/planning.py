@@ -174,6 +174,122 @@ class PlanningMixin:
             )
         return {"project": configured_project, "repository_path": normalized_path}
 
+    def sync_repository(self, actor: Actor, project_id: str) -> dict[str, Any]:
+        """Fetch upstream metadata without changing main, then persist its review manifest."""
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        require_project(actor, project_id)
+        with self.store.connection() as connection:
+            project = self._one(
+                connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+            )
+            repository = self._one(
+                connection,
+                "SELECT * FROM project_repositories WHERE project_id = ?",
+                (project_id,),
+            )
+
+        manifest = self.git_worktrees.sync_upstream(
+            repository["repository_path"], project["default_branch"]
+        )
+        document_extensions = {
+            ".md", ".mdx", ".rst", ".txt", ".pdf", ".doc", ".docx", ".yaml", ".yml"
+        }
+        incoming_paths = [row["path"] for row in manifest["incoming_changes"]]
+        document_paths = [
+            path for path in incoming_paths
+            if path.lower().startswith(("docs/", "spec/", "specs/"))
+            or any(path.lower().endswith(extension) for extension in document_extensions)
+        ]
+        manifest = {
+            **manifest,
+            "document_paths": document_paths,
+            "review_required": bool(manifest["behind"]),
+        }
+        timestamp = _iso()
+        with self.store.connection(immediate=True) as connection:
+            current = self._one(
+                connection,
+                "SELECT * FROM project_repositories WHERE project_id = ?",
+                (project_id,),
+            )
+            if current["repository_path"] != repository["repository_path"]:
+                raise ConflictError("Project repository changed while its upstream was fetched")
+            changed = (
+                current.get("observed_mainline_commit") != manifest["local_commit"]
+                or current.get("observed_upstream_commit") != manifest["upstream_commit"]
+            )
+            previous_refs = json.loads(current.get("observed_remote_refs") or "{}")
+            remote_refs = manifest.pop("remote_branches")
+            branch_updates = []
+            for branch in sorted(set(previous_refs) | set(remote_refs)):
+                previous_commit = previous_refs.get(branch)
+                commit = remote_refs.get(branch)
+                if previous_commit == commit:
+                    continue
+                branch_updates.append({
+                    "branch": branch,
+                    "previous_commit": previous_commit,
+                    "commit": commit,
+                    "change": "new" if previous_commit is None else
+                              "deleted" if commit is None else "updated",
+                })
+            manifest["branch_updates"] = branch_updates
+            changed = changed or bool(branch_updates)
+            connection.execute(
+                """UPDATE project_repositories
+                   SET observed_mainline_commit = ?, observed_upstream_commit = ?,
+                       observed_remote_refs = ?, observed_at = ?
+                   WHERE project_id = ?""",
+                (
+                    manifest["local_commit"], manifest["upstream_commit"],
+                    json.dumps(remote_refs, sort_keys=True), timestamp, project_id
+                ),
+            )
+            if changed:
+                refreshed_project = self._one(
+                    connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+                )
+                next_version = refreshed_project["version"] + 1
+                connection.execute(
+                    "UPDATE projects SET version = ?, updated_at = ? WHERE project_id = ?",
+                    (next_version, timestamp, project_id),
+                )
+                entry_id = _id("ctx")
+                connection.execute(
+                    """INSERT INTO context_entries
+                       (entry_id, project_id, entry_type, content, source_ref,
+                        artifact_commit, actor_id, actor_role, created_at)
+                       VALUES (?, ?, 'repository_observation', ?, ?, ?, ?, ?, ?)""",
+                    (
+                        entry_id,
+                        project_id,
+                        json.dumps(manifest, sort_keys=True),
+                        f"git:{manifest['local_commit']}...{manifest['upstream_commit'] or manifest['local_commit']}",
+                        manifest["upstream_commit"] or manifest["local_commit"],
+                        actor.agent_id,
+                        actor.role.value,
+                        timestamp,
+                    ),
+                )
+                self._event(
+                    connection,
+                    actor,
+                    project_id,
+                    "project.repository_observed",
+                    "project",
+                    project_id,
+                    next_version,
+                    {
+                        "relation": manifest["relation"],
+                        "local_commit": manifest["local_commit"],
+                        "upstream_commit": manifest["upstream_commit"],
+                        "incoming_change_count": len(manifest["incoming_changes"]),
+                        "document_change_count": len(document_paths),
+                        "branch_update_count": len(branch_updates),
+                    },
+                )
+        return manifest
+
     def configure_test_command(
         self,
         actor: Actor,
@@ -295,6 +411,79 @@ class PlanningMixin:
             )
             return self._one(
                 connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+            )
+
+    def configure_agent_capability_profile(
+        self,
+        actor: Actor,
+        project_id: str,
+        agent_id: str,
+        capabilities: list[str],
+        evidence_refs: list[str],
+    ) -> dict[str, Any]:
+        """Approve the QA equipment independently verified for one agent.
+
+        Registration remains a session self-report. Dispatch and claim use only
+        the intersection of that live declaration and this durable approval, so
+        restarting a client cannot grant it new execution authority.
+        """
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        require_project(actor, project_id)
+        self._bounded_text(agent_id, "agent_id", 200)
+        self._bounded_list(capabilities, "capabilities", 50, 100)
+        self._bounded_list(evidence_refs, "evidence_refs", 20, 1000, required=True)
+        normalized = sorted(set(capabilities))
+        refs = list(dict.fromkeys(evidence_refs))
+        if len(normalized) != len(capabilities):
+            raise ValidationError("capabilities cannot contain duplicates")
+        if len(refs) != len(evidence_refs):
+            raise ValidationError("evidence_refs cannot contain duplicates")
+        for capability in normalized:
+            if not capability.replace("_", "").replace("-", "").isalnum():
+                raise ValidationError("capabilities must use portable names")
+
+        timestamp = _iso()
+        with self.store.connection(immediate=True) as connection:
+            project = self._one(
+                connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+            )
+            available = set((project.get("verification_profile") or {}).get("capabilities") or [])
+            unsupported = sorted(set(normalized) - available)
+            if unsupported:
+                raise ValidationError(
+                    "Agent capability approval exceeds the project's verification profile",
+                    {"reason": "verification_capabilities_missing", "capabilities": unsupported},
+                )
+            presence = self._one(
+                connection, "SELECT * FROM agent_presence WHERE agent_id = ?", (agent_id,)
+            )
+            if presence["role"] != Role.QA.value:
+                raise ValidationError("Only QA agents can receive execution capability approval")
+            if project_id not in set(presence.get("project_ids") or []):
+                raise ValidationError("QA agent is not registered for this project")
+            if not presence.get("machine_id"):
+                raise ValidationError(
+                    "QA agent must register a stable machine_id before capability approval",
+                    {"reason": "capability_machine_missing"},
+                )
+            connection.execute(
+                """UPDATE agent_presence
+                   SET approved_execution_capabilities = ?, capability_approval_refs = ?,
+                       capability_approved_machine_id = ?, capability_approved_by = ?,
+                       capability_approved_at = ?, updated_at = ?
+                   WHERE agent_id = ?""",
+                (
+                    json.dumps(normalized), json.dumps(refs), presence["machine_id"],
+                    actor.agent_id, timestamp, timestamp, agent_id,
+                ),
+            )
+            self._event(
+                connection, actor, project_id, "agent.capability_profile_configured",
+                "agent_presence", agent_id, 1,
+                {"capabilities": normalized, "evidence_ref_count": len(refs)},
+            )
+            return self._one(
+                connection, "SELECT * FROM agent_presence WHERE agent_id = ?", (agent_id,)
             )
 
     def _validated_validation_contract(

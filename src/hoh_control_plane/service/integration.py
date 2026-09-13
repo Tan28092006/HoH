@@ -22,6 +22,7 @@ from hoh_control_plane.service._common import (
     _row,
     hashlib,
     re,
+    require_project,
     require_role,
     Connection,
     timedelta,
@@ -333,6 +334,14 @@ class IntegrationMixin:
                 {"candidate_id": candidate_id, "commit_sha": mainline_commit},
             )
             merged_ticket = self._ticket(connection, ticket_id)
+            self._report_delivery_completed(
+                connection,
+                actor,
+                project_id,
+                merged_ticket,
+                candidate_id=candidate_id,
+                mainline_commit=mainline_commit,
+            )
             record = self._settled_record_inputs(connection, ticket_id, candidate_id)
 
         # Outside the write transaction: this runs Git, and a long external
@@ -570,8 +579,18 @@ class IntegrationMixin:
             # An expired lease is no longer an owner. Leaving it behind lets an
             # older recovery path put already-landed work back on the queue.
             connection.execute("DELETE FROM leases WHERE ticket_id = ?", (ticket_id,))
+            completed_ticket = self._ticket(connection, ticket_id)
+            self._report_delivery_completed(
+                connection,
+                actor,
+                project_id,
+                completed_ticket,
+                candidate_id=None,
+                mainline_commit=landed_commit,
+                gated=False,
+            )
             return {
-                "ticket": self._ticket(connection, ticket_id),
+                "ticket": completed_ticket,
                 "merge_status": "landed_ungated",
                 "gated": False,
             }
@@ -1242,6 +1261,16 @@ class IntegrationMixin:
                 job["ticket_id"], next_version,
                 {"candidate_id": job["candidate_id"], "commit_sha": mainline_commit},
             )
+            completed_ticket = self._ticket(connection, job["ticket_id"])
+            self._report_delivery_completed(
+                connection,
+                actor,
+                job["project_id"],
+                completed_ticket,
+                candidate_id=job["candidate_id"],
+                mainline_commit=mainline_commit,
+                merge_job_id=merge_job_id,
+            )
             connection.execute(
                 """UPDATE merge_jobs
                    SET status = 'COMPLETED', merge_status = 'merged', mainline_commit = ?,
@@ -1270,6 +1299,31 @@ class IntegrationMixin:
                 job["ticket_id"], ticket["version"], {"merge_job_id": merge_job_id},
             )
             return self._merge_job(connection, merge_job_id)
+
+    def reconcile_delivery_report(self, actor: Actor, merge_job_id: str) -> dict[str, Any]:
+        """Idempotently recover the Planner report for an already completed merge."""
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        with self.store.connection(immediate=True) as connection:
+            job = self._merge_job(connection, merge_job_id)
+            require_project(actor, job["project_id"])
+            if (
+                job["status"] != "COMPLETED"
+                or job["merge_status"] != "merged"
+                or not job["mainline_commit"]
+            ):
+                raise ConflictError("Only a successfully completed merge has a delivery report")
+            ticket = self._ticket(connection, job["ticket_id"])
+            if ticket["status"] != TicketStatus.DONE.value:
+                raise ConflictError("The merged ticket is not in its completed state")
+            return self._report_delivery_completed(
+                connection,
+                actor,
+                job["project_id"],
+                ticket,
+                candidate_id=job["candidate_id"],
+                mainline_commit=job["mainline_commit"],
+                merge_job_id=merge_job_id,
+            )
 
     def _merge_job(self, connection: Connection, merge_job_id: str) -> dict[str, Any]:
         return self._one(

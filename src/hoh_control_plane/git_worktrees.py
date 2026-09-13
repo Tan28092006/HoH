@@ -67,6 +67,139 @@ class GitWorktreeManager:
             raise ValidationError("repository_path must reference a Git repository")
         return str(Path(result.stdout.strip()).resolve())
 
+    def sync_upstream(self, repository_path: str, default_branch: str) -> dict[str, object]:
+        """Fetch the configured upstream and return a bounded, read-only change manifest.
+
+        This deliberately never pulls, merges, rebases or checks out a branch. The
+        control plane first needs facts about remote movement; changing the
+        integration checkout while worktrees are active would destroy those facts.
+        """
+        repository = Path(self.validate_repository(repository_path))
+        local_ref = f"refs/heads/{default_branch}"
+        local_commit = self._resolve_commit(repository, local_ref)
+        remote = self._git(
+            repository, "config", "--get", f"branch.{default_branch}.remote", check=False
+        ).stdout.strip()
+        if not remote:
+            return {
+                "relation": "no_upstream",
+                "local_commit": local_commit,
+                "upstream_ref": None,
+                "upstream_commit": None,
+                "ahead": 0,
+                "behind": 0,
+                "incoming_commits": [],
+                "incoming_changes": [],
+                "local_changes": [],
+                "remote_branches": {},
+            }
+        if remote != ".":
+            configured_remotes = {
+                line.strip()
+                for line in self._git(repository, "remote").stdout.splitlines()
+                if line.strip()
+            }
+            if remote not in configured_remotes:
+                raise ValidationError(
+                    "The default branch names a Git remote that is not configured",
+                    {"reason": "upstream_remote_missing", "remote": remote},
+                )
+            fetched = self._git(
+                repository,
+                "fetch",
+                "--prune",
+                "--no-tags",
+                "--",
+                remote,
+                f"+refs/heads/*:refs/remotes/{remote}/*",
+                check=False,
+            )
+            if fetched.returncode != 0:
+                raise ValidationError(
+                    "Could not fetch the configured Git upstream; repository freshness is unknown",
+                    {"reason": "upstream_fetch_failed", "remote": remote},
+                )
+        remote_branches: dict[str, str] = {}
+        if remote != ".":
+            refs = self._git(
+                repository,
+                "for-each-ref",
+                "--format=%(refname:short)%09%(objectname)",
+                f"refs/remotes/{remote}/",
+            ).stdout
+            for line in refs.splitlines()[:200]:
+                name, separator, commit = line.partition("\t")
+                if separator and name != f"{remote}/HEAD":
+                    remote_branches[name] = commit
+        upstream_name = self._git(
+            repository,
+            "rev-parse",
+            "--abbrev-ref",
+            f"{default_branch}@{{upstream}}",
+            check=False,
+        ).stdout.strip()
+        if not upstream_name:
+            return {
+                "relation": "no_upstream",
+                "local_commit": local_commit,
+                "upstream_ref": None,
+                "upstream_commit": None,
+                "ahead": 0,
+                "behind": 0,
+                "incoming_commits": [],
+                "incoming_changes": [],
+                "local_changes": [],
+                "remote_branches": remote_branches,
+            }
+        upstream_commit = self._resolve_commit(repository, upstream_name)
+        counts = self._git(
+            repository, "rev-list", "--left-right", "--count",
+            f"{local_ref}...{upstream_name}",
+        ).stdout.split()
+        ahead, behind = (int(counts[0]), int(counts[1]))
+        relation = (
+            "up_to_date" if ahead == 0 and behind == 0 else
+            "behind" if ahead == 0 else
+            "ahead" if behind == 0 else
+            "diverged"
+        )
+        merge_base = self._git(
+            repository, "merge-base", local_ref, upstream_name
+        ).stdout.strip()
+
+        def changes(end: str) -> list[dict[str, str]]:
+            output = self._git(
+                repository, "diff", "--name-status", "--no-renames", merge_base, end
+            ).stdout
+            rows: list[dict[str, str]] = []
+            for line in output.splitlines()[:200]:
+                status, separator, path = line.partition("\t")
+                if separator and path:
+                    rows.append({"status": status, "path": path})
+            return rows
+
+        incoming_log = self._git(
+            repository, "log", "--format=%H%x09%s", "--max-count=100",
+            f"{merge_base}..{upstream_name}",
+        ).stdout
+        incoming_commits = []
+        for line in incoming_log.splitlines():
+            commit, separator, subject = line.partition("\t")
+            if separator:
+                incoming_commits.append({"commit": commit, "subject": subject[:500]})
+        return {
+            "relation": relation,
+            "local_commit": local_commit,
+            "upstream_ref": upstream_name,
+            "upstream_commit": upstream_commit,
+            "ahead": ahead,
+            "behind": behind,
+            "incoming_commits": incoming_commits,
+            "incoming_changes": changes(upstream_name),
+            "local_changes": changes(local_ref),
+            "remote_branches": remote_branches,
+        }
+
     def prepare(
         self,
         *,

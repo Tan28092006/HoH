@@ -444,6 +444,10 @@ def test_integrator_fast_forwards_a_verified_candidate_to_main(
     # The candidate is main's parent: the merge lands the code, then the record of
     # what it was for, so both arrive or neither does.
     assert _git(repository, "rev-parse", "main~1") == candidate["candidate"]["commit_sha"]
+    reports = service.discover_planner_jobs(actors["planner"], "project-1")
+    assert len(reports) == 1
+    assert reports[0]["job_type"] == "delivery_completed"
+    assert reports[0]["candidate_id"] == candidate["candidate"]["candidate_id"]
 
 
 def test_integrator_returns_candidate_to_rework_when_main_has_drifted(

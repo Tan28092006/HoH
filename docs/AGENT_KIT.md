@@ -37,7 +37,11 @@ For colocated development, the agent must access the service's assigned worktree
 For agent_workspace, the operator must supply Git access and a delivery/fetch path
 that makes submitted SHAs reachable in the service repository. The kit does not
 copy private repositories or credentials. Install the QA/browser dependencies on
-the service runner for remote QA commands.
+the service runner for remote QA commands. At registration, QA declares only the
+project `execution_capabilities` it has actually exercised on that machine; a
+Planner/operator separately approves the verified subset from durable preflight
+evidence. A strict contract is left queued until required equipment is both
+declared and approved for the current `machine_id`.
 
 ## Server ingress
 

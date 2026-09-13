@@ -67,7 +67,11 @@ def test_new_planner_decision_invalidates_a_snapshot_even_without_ticket_version
         service.claim_ticket(actors["developer"], ticket["ticket_id"], ticket["version"], 900,
                              context_snapshot_id=before["context_snapshot_id"])
     current = service.get_ticket_context(actors["developer"], ticket["ticket_id"])
-    assert current["latest_planner_decision"]["entry_id"] == decision["entry_id"]
+    assert "latest_planner_decision" not in current
+    assert any(
+        entry["entry_id"] == decision["entry_id"]
+        for entry in current["context_entries"]
+    )
 
 
 def test_a_snapshot_records_what_each_role_actually_saw(service, actors, seeded) -> None:
@@ -251,4 +255,5 @@ def test_a_snapshot_holds_no_narrative_only_versions(service, actors, seeded) ->
         "feature_version",
         "candidate_commit",
         "dependencies",
+        "repository_revision",
     }

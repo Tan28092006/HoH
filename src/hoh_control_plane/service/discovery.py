@@ -17,6 +17,7 @@ from hoh_control_plane.service._common import (
     _iso,
     _now,
     _row,
+    _required_execution_capabilities,
     _serialize,
     base64,
     datetime,
@@ -304,8 +305,10 @@ class DiscoveryMixin:
                 "ticket:retire",
                 "candidate:requeue",
                 "repository:configure",
+                "repository:sync",
                 "test_command:configure",
                 "verification_profile:configure",
+                "agent_capabilities:approve",
                 "validation_contract:configure",
                 "skill_policy:configure",
             ],
@@ -326,6 +329,7 @@ class DiscoveryMixin:
         actor: Actor,
         *,
         skills: list[str],
+        execution_capabilities: list[str] | None = None,
         capacity: int = 1,
         machine_id: str | None = None,
         presence_seconds: int = 120,
@@ -340,11 +344,24 @@ class DiscoveryMixin:
         allowed is refused outright, because an endpoint that looks deliverable
         and is not would silently swallow every wakeup sent to it.
 
+        execution_capabilities records the observable equipment this session has
+        actually checked it can use. Strict QA dispatch uses only its intersection
+        with the separately approved profile; self-report never grants authority.
+
         skill_manifest/protocol_version are recorded for project skill-policy
         compatibility only; they never grant or widen role permission, which
         always comes from the authenticated actor's own role.
         """
         self._bounded_list(skills, "skills", 30, 100)
+        self._bounded_list(
+            execution_capabilities or [], "execution_capabilities", 50, 100
+        )
+        normalized_capabilities = sorted(set(execution_capabilities or []))
+        if len(normalized_capabilities) != len(execution_capabilities or []):
+            raise ValidationError("execution_capabilities cannot contain duplicates")
+        for capability in normalized_capabilities:
+            if not capability.replace("_", "").replace("-", "").isalnum():
+                raise ValidationError("execution_capabilities must use portable names")
         self._capacity(capacity)
         self._presence_seconds(presence_seconds)
         if machine_id is not None:
@@ -386,13 +403,15 @@ class DiscoveryMixin:
             connection.execute(
                 """
                 INSERT INTO agent_presence
-                    (agent_id, role, project_ids, skills, capacity, machine_id,
+                    (agent_id, role, project_ids, skills, execution_capabilities,
+                     capacity, machine_id,
                      last_seen_at, expires_at, created_at, updated_at,
                      skill_manifest, protocol_version, skill_compatibility, endpoint)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_id) DO UPDATE SET
                     project_ids = excluded.project_ids,
                     skills = excluded.skills,
+                    execution_capabilities = excluded.execution_capabilities,
                     capacity = excluded.capacity,
                     machine_id = excluded.machine_id,
                     last_seen_at = excluded.last_seen_at,
@@ -408,6 +427,7 @@ class DiscoveryMixin:
                     actor.role.value,
                     json.dumps(sorted(actor.project_ids)),
                     json.dumps(skills),
+                    json.dumps(normalized_capabilities),
                     capacity,
                     machine_id,
                     _iso(timestamp),
@@ -861,6 +881,16 @@ class DiscoveryMixin:
                 continue
             if not self._presence_can_access(presence, queue["project_id"]):
                 continue
+            if queue["target_role"] == Role.QA.value:
+                ticket = self._ticket(connection, queue["ticket_id"])
+                required = _required_execution_capabilities(ticket)
+                available = set(presence.get("execution_capabilities") or []) & set(
+                    presence.get("approved_execution_capabilities") or []
+                )
+                if presence.get("machine_id") != presence.get("capability_approved_machine_id"):
+                    available = set()
+                if required - available:
+                    continue
             if len(offers) >= available_slots:
                 break
             active_leases = connection.execute(

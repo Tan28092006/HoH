@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import subprocess
 from pathlib import Path
@@ -7,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from hoh_control_plane import mcp_server
-from hoh_control_plane.domain import ValidationError
+from hoh_control_plane.domain import AuthorizationError, ConflictError, ValidationError
 from hoh_control_plane.mcp_server import create_mcp_server
 
 
@@ -170,6 +171,86 @@ def test_merge_worker_fast_forwards_then_poll_reports_completed(
             "SELECT status FROM tickets WHERE ticket_id = ?", (ticket["ticket_id"],)
         ).fetchone()
         assert final_ticket["status"] == "DONE"
+
+
+def test_successful_merge_reports_once_and_wakes_the_planner(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """A delivery is not complete until the planning loop receives its report."""
+    _repository_path, ticket, candidate, verified = _candidate_ready_for_integration(
+        service, actors, seeded, tmp_path
+    )
+    integration = _claimed_for_integration(service, actors, ticket, verified)
+    queued = service.queue_merge_candidate(
+        actors["integrator"], ticket["ticket_id"],
+        integration["lease"]["lease_id"], integration["ticket"]["version"],
+    )
+
+    service.register_agent(actors["planner"], skills=["planning"], capacity=1)
+    wait_for_event = __import__(
+        "hoh_control_plane.event_wait", fromlist=["wait_for_event"]
+    ).wait_for_event
+
+    async def merge_while_planner_waits():
+        waiting = asyncio.create_task(
+            wait_for_event(service, actors["planner"], "project-1", timeout_seconds=30)
+        )
+        await asyncio.sleep(0.04)
+        completed_job = await asyncio.to_thread(
+            service.execute_queued_merge, queued["merge_job"]["merge_job_id"]
+        )
+        return completed_job, await asyncio.wait_for(waiting, 1)
+
+    completed, report = asyncio.run(merge_while_planner_waits())
+    replay = service.execute_queued_merge(queued["merge_job"]["merge_job_id"])
+
+    assert completed["merge_status"] == replay["merge_status"] == "merged"
+    assert report["status"] == "event"
+    assert report["event"]["kind"] == "planner_work"
+    planning_jobs = service.discover_planner_jobs(actors["planner"], "project-1")
+    assert len(planning_jobs) == 1
+    assert planning_jobs[0]["job_type"] == "delivery_completed"
+    assert planning_jobs[0]["candidate_id"] == candidate["candidate"]["candidate_id"]
+    assert planning_jobs[0]["evidence_refs"] == [
+        f"candidate:{candidate['candidate']['candidate_id']}",
+        f"merge_job:{queued['merge_job']['merge_job_id']}",
+        f"mainline:{candidate['candidate']['commit_sha']}",
+    ]
+    interventions = service.list_planner_interventions(actors["planner"], "project-1")
+    assert len(interventions) == 1
+    assert interventions[0]["event_class"] == "delivery_completed"
+    recovered = service.reconcile_delivery_report(
+        actors["planner"], queued["merge_job"]["merge_job_id"]
+    )
+    assert recovered["planner_job_id"] == planning_jobs[0]["planner_job_id"]
+    assert len(service.discover_planner_jobs(actors["planner"], "project-1")) == 1
+
+
+def test_delivery_report_recovery_refuses_unfinished_or_unauthorized_merges(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    _repository_path, ticket, candidate, verified = _candidate_ready_for_integration(
+        service, actors, seeded, tmp_path
+    )
+    integration = _claimed_for_integration(service, actors, ticket, verified)
+    queued = service.queue_merge_candidate(
+        actors["integrator"], ticket["ticket_id"],
+        integration["lease"]["lease_id"], integration["ticket"]["version"],
+    )["merge_job"]
+
+    with pytest.raises(AuthorizationError):
+        service.reconcile_delivery_report(actors["developer"], queued["merge_job_id"])
+    with pytest.raises(ConflictError, match="successfully completed"):
+        service.reconcile_delivery_report(actors["planner"], queued["merge_job_id"])
+
+    with service.store.connection(immediate=True) as connection:
+        connection.execute(
+            """UPDATE merge_jobs SET status='COMPLETED', merge_status='merged',
+               mainline_commit=? WHERE merge_job_id=?""",
+            (candidate["candidate"]["commit_sha"], queued["merge_job_id"]),
+        )
+    with pytest.raises(ConflictError, match="ticket is not in its completed state"):
+        service.reconcile_delivery_report(actors["planner"], queued["merge_job_id"])
 
 
 def test_merge_worker_requeues_rework_when_mainline_drifts_after_queueing(

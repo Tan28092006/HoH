@@ -133,7 +133,11 @@ Claude chat.
 
 Ask each agent to call `identity.get_capabilities` first. Each Developer and QA
 then calls `agent.register` with its installed role skill and `work.inbox` before
-using `work.discover`. `agent.heartbeat` renews availability; it is distinct
+using `work.discover`. QA also supplies only verified `execution_capabilities`
+from the project profile. Planner/operator separately approves the public
+preflight-backed subset for that `machine_id`; both sets are checked at dispatch
+and claim time.
+`agent.heartbeat` renews availability; it is distinct
 from `work.heartbeat`, which renews an active ticket lease.
 
 - Planner should see only `planner.*` mutation tools.

@@ -448,21 +448,23 @@ thực" vẫn là yêu cầu còn nợ, không phải yêu cầu đã bị bỏ.
 
 ### 6.1. Công cụ chung
 
-Tên dưới đây là tên server thực sự đăng ký. Bảy công cụ này có mặt cho mọi role:
+Tên dưới đây là tên server thực sự đăng ký. Các công cụ đọc/khởi tạo chung gồm:
 
 - `identity.get_capabilities` — trả identity, role, project scope, capabilities và protocol version.
-- `agent.register` và `agent.heartbeat` — đăng ký/gia hạn presence ngắn hạn. Chỉ role và project scope lấy từ identity đã xác thực được lưu; `skills`, `capacity`, `machine_id` chỉ là metadata dispatch, không cấp quyền.
+- `session.bootstrap` — khôi phục identity, project, workspace, lease/job và wait ID mà không claim hay gia hạn.
+- `agent.register` và `agent.heartbeat` — đăng ký/gia hạn presence ngắn hạn. Chỉ role và project scope lấy từ identity đã xác thực được lưu. `skills`, `capacity`, `machine_id` và capability tự khai không tự cấp quyền.
 - `work.discover` — liệt kê feature/ticket theo role dưới dạng metadata và typed reference (xem §5.2, §5.3).
 - `feature.get_context` — feature rollup, ticket, blockers, verified behaviors, preservation constraints.
 - `ticket.get_context` — context packet của một ticket (xem §7).
 - `skill.get_compatibility` — trạng thái tương thích skill/protocol của project.
+- `events.list` và `spec.digest` — digest thay đổi theo cursor/typed reference.
+- `work.wait_for_event` — long-poll có ACK/resume, đánh thức GUI chat đang chờ mà không tạo model polling turn.
 
 `work.inbox` chỉ có cho execution role (Developer, QA, Integrator); Planner không nhận offer từ hàng đợi thực thi mà dùng `planner.claim_job`.
 
 Chưa hiện thực:
 
 - `workspace.list_projects` — chưa có. Project scope hiện lấy từ `identity.get_capabilities`.
-- `events.list` — trả digest của thay đổi sau một cursor, gộp theo đối tượng bị đổi, không mang payload. Dùng khi thức dậy để hỏi "có gì đổi" thay vì đọc lại trạng thái; một khoảng lặng tốn khoảng 34 token. Bản đầy đủ theo từng event vẫn đọc được qua REST.
 - `context.resolve` — chưa có dưới dạng MCP tool, dù `context:resolve` vẫn là capability string; hiện typed reference được resolve qua `feature.get_context` và `ticket.get_context`. Giữ lại như yêu cầu cho tới khi có nhiều loại reference hơn hai loại đó.
 
 ### 6.2. Planner tools
@@ -489,8 +491,12 @@ Vòng đời và phục hồi:
 Cấu hình project:
 
 - `planner.configure_repository` — kèm `workspace_model` (xem `docs/DEPLOYMENT.md`)
+- `planner.sync_repository` — fetch toàn bộ remote branch refs, ghi manifest main/shared-branch mà không checkout, pull, merge hoặc rebase integration checkout
 - `planner.configure_test_command`
 - `planner.configure_skill_policy`
+- `planner.configure_verification_profile`
+- `planner.configure_validation_contract`
+- `planner.configure_agent_capability_profile` — duyệt capability QA độc lập từ public preflight evidence, gắn với `machine_id`; self-report không cấp quyền claim
 
 Hàng đợi planning job và intervention (§4 Dispatch, HOH-202/HOH-234):
 
@@ -499,6 +505,7 @@ Hàng đợi planning job và intervention (§4 Dispatch, HOH-202/HOH-234):
 - `planner.list_interventions`
 - `planner.acknowledge_intervention`
 - `planner.append_context`
+- `planner.reconcile_delivery_report` — phục hồi idempotent report thành công bị thiếu của một merge job đã hoàn tất
 
 `planning.update_feature` chưa hiện thực.
 
@@ -534,6 +541,12 @@ Developer không được:
 - `qa.record_test_run` — ghi nhận một lần chạy kèm provenance (§3.6, HOH-217)
 - `qa.submit_verdict` — nhận finding theo criterion kèm evidence trong cùng một lời gọi, thay cho `qa.append_observation`, `qa.attach_evidence` và `qa.record_finding` rời nhau: verdict và bằng chứng của nó phải cùng vào hoặc cùng không vào.
 
+Với project `claim-evidence-v1`, dispatcher và claim gate yêu cầu giao của
+capability QA đang khai và capability Planner/operator đã duyệt trên cùng máy
+phải bao phủ `required_capabilities` của toàn bộ validation contract. Thiếu
+browser/runtime/domain adapter thì candidate giữ trong queue, không biến thành
+code failure.
+
 `qa.discover_candidates` gộp vào `work.discover` (QA chỉ thấy `QA_READY`). `qa.reopen_verified_behavior` và `qa.release_candidate` chưa hiện thực.
 
 QA không được:
@@ -551,10 +564,13 @@ Namespace là `integrator.*` (không phải `integration.*`).
 - `integrator.claim_candidate`
 - `integrator.merge_candidate` — queue một merge job bền vững; regression gate cô lập, kiểm tra release policy, base-drift và fast-forward đều nằm trong job này (HOH-201, HOH-233, HOH-232)
 - `integrator.get_merge_candidate` — poll tới trạng thái terminal
+- `integrator.record_external_landing` — ghi lịch sử đã landed ngoài gate nhưng không chứng nhận QA
 
 `integration.discover_ready_candidates` gộp vào `work.discover`. `integration.check_mergeability` và `integration.run_mainline_regression` không còn là lời gọi riêng: chúng là các bước bắt buộc bên trong merge job, nên không thể bỏ qua bằng cách không gọi. `integration.record_conflict` và `integration.requeue` chưa hiện thực dưới dạng tool; base drift tự động trả ticket về `REWORK` kèm context bền vững.
 
-Integrator chỉ merge candidate đã đạt QA gate và policy gate.
+Integrator chỉ merge candidate đã đạt QA gate và policy gate. Merge thành công
+tự tạo đúng một `delivery_completed` Planner job/intervention, nên Planner nhận
+report của iteration mà không phụ thuộc tin nhắn tay hoặc cron.
 
 ### 6.6. Ví dụ input/output của thao tác claim
 
@@ -668,12 +684,15 @@ Khi context vượt budget:
 
 1. Giữ nguyên acceptance criteria và security constraints.
 2. Giữ evidence gần nhất của bug đang xử lý.
-3. Giữ quyết định chưa bị superseded.
-4. Tóm tắt progress cũ thành checkpoint.
+3. Giữ checkpoint mới nhất của mỗi loại quyết định chưa bị superseded; quyết định cũ còn typed reference để resolve khi cần.
+4. Tóm tắt progress và narration cũ thành checkpoint tối đa 200 ký tự.
 5. Thay log dài bằng summary và storage reference.
 6. Ghi rõ phần nào đã bị lược bỏ.
 
 Không được tóm tắt làm thay đổi trạng thái verified/failed hoặc làm mất candidate SHA.
+Budget mặc định là 4.000 estimated token. Repository state chỉ xuất hiện một lần
+trong packet; context snapshot lưu digest để kiểm tra stale. Full history vẫn ở
+database/evidence store và chỉ được đọc lại qua reference cụ thể.
 
 ## 8. State machine
 

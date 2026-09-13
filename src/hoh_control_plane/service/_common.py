@@ -61,6 +61,9 @@ JSON_FIELDS = {
     "input_summary",
     "project_ids",
     "skills",
+    "execution_capabilities",
+    "approved_execution_capabilities",
+    "capability_approval_refs",
     "skill_manifest",
     "skill_compatibility",
     "accepted_protocol_versions",
@@ -70,7 +73,7 @@ COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
 
 MIN_TOKEN_BUDGET = 200
 MAX_TOKEN_BUDGET = 200_000
-DEFAULT_TOKEN_BUDGET = 8_000
+DEFAULT_TOKEN_BUDGET = 4_000
 _CHECKPOINT_CHARS = 200
 
 # Retention policy for idempotency records: a replay is honored for this long,
@@ -231,6 +234,15 @@ def _id(prefix: str) -> str:
 
 def _serialize(payload: Any) -> str:
     return json.dumps(payload, sort_keys=True, default=str)
+
+
+def _required_execution_capabilities(ticket: dict[str, Any]) -> set[str]:
+    """Return the portable equipment needed to assess this ticket."""
+    return {
+        str(capability)
+        for scenario in ticket.get("validation_contract") or []
+        for capability in scenario.get("required_capabilities") or []
+    }
 
 
 def _estimate_tokens(payload: Any) -> int:

@@ -50,6 +50,7 @@ class PlannerJobType(StrEnum):
     QA_FAILURE = "qa_failure"
     DEVELOPER_BLOCKER = "developer_blocker"
     INTEGRATION_CONFLICT = "integration_conflict"
+    DELIVERY_COMPLETED = "delivery_completed"
 
 
 class InterventionStatus(StrEnum):

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from hoh_control_plane.domain import Actor, AuthorizationError, Role, ValidationError
-from hoh_control_plane.service import MIN_TOKEN_BUDGET
+from hoh_control_plane.service import MAX_TOKEN_BUDGET, MIN_TOKEN_BUDGET
 
 
 # Below the protected floor: forces every optional section out of the packet.
@@ -72,7 +72,9 @@ def _rich_ticket(service, actors, seeded, tmp_path: Path, *, checkpoints: int = 
     decision = service.append_planner_context(
         actors["planner"],
         entry_type="design_decision",
-        content="Durable decision: a retry must stay idempotent for the same order id.",
+        content=(
+            "Durable decision: a retry must stay idempotent for the same order id. " * 12
+        ),
         ticket_id=ticket["ticket_id"],
     )
 
@@ -191,7 +193,9 @@ def test_packet_fits_a_budget_above_the_protected_floor(
     ticket, _candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
 
     for actor in _all_roles(actors).values():
-        full = service.get_ticket_context(actor, ticket["ticket_id"])
+        full = service.get_ticket_context(
+            actor, ticket["ticket_id"], token_budget=MAX_TOKEN_BUDGET
+        )
         bounded = service.get_ticket_context(
             actor, ticket["ticket_id"], token_budget=FIT_BUDGET
         )
@@ -289,7 +293,7 @@ def test_verbose_history_becomes_a_checkpoint_with_typed_references(
     assert retained_ids | referenced_ids == original_ids
 
 
-def test_durable_decisions_are_never_dropped_for_verbose_history(
+def test_durable_decisions_are_checkpointed_with_a_resolvable_reference(
     service, actors, seeded, tmp_path: Path
 ) -> None:
     ticket, _candidate, decision = _rich_ticket(service, actors, seeded, tmp_path)
@@ -300,13 +304,50 @@ def test_durable_decisions_are_never_dropped_for_verbose_history(
 
     retained = {entry["entry_id"]: entry for entry in context["context_entries"]}
     assert decision["entry_id"] in retained
-    assert retained[decision["entry_id"]]["content"] == decision["content"]
+    assert retained[decision["entry_id"]]["content"] == decision["content"][:200] + "..."
+    compacted = [
+        item for item in context["omitted_sections"]
+        if item["section"] == "context_entries.content"
+    ]
+    assert f"ctx:entry:{decision['entry_id']}" in compacted[0]["references"]
 
 
-def test_compacted_history_preserves_entry_provenance(
+def test_old_typed_decisions_become_references_but_the_latest_checkpoint_survives(
     service, actors, seeded, tmp_path: Path
 ) -> None:
-    """A shortened checkpoint keeps who wrote it, when, and what it points at."""
+    ticket, _candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
+    decisions = [
+        service.append_planner_context(
+            actors["planner"],
+            entry_type="planner_decision",
+            content=f"Decision {index}: " + "bounded planning state " * 30,
+            ticket_id=ticket["ticket_id"],
+        )
+        for index in range(12)
+    ]
+
+    packet = service.get_ticket_context(
+        actors["planner"], ticket["ticket_id"], token_budget=2_000
+    )
+
+    retained = {entry["entry_id"] for entry in packet["context_entries"]}
+    omitted = {
+        reference.removeprefix("ctx:entry:")
+        for section in packet["omitted_sections"]
+        if section["section"] == "context_entries"
+        for reference in section["references"]
+    }
+    assert decisions[-1]["entry_id"] in retained
+    historical = {decision["entry_id"] for decision in decisions[:-1]}
+    assert omitted & historical
+    assert historical <= retained | omitted
+    assert packet["estimated_tokens"] <= packet["token_budget"]
+
+
+def test_compacted_history_preserves_actionable_identity_and_reference(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """A checkpoint keeps typed identity; its reference resolves full provenance."""
     ticket, _candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
 
     full = service.get_ticket_context(actors["developer"], ticket["ticket_id"])
@@ -318,9 +359,7 @@ def test_compacted_history_preserves_entry_provenance(
     for entry in bounded["context_entries"]:
         source = original[entry["entry_id"]]
         assert entry["entry_type"] == source["entry_type"]
-        assert entry["actor_id"] == source["actor_id"]
         assert entry["actor_role"] == source["actor_role"]
-        assert entry["created_at"] == source["created_at"]
         assert entry["source_ref"] == source["source_ref"]
         assert entry["artifact_commit"] == source["artifact_commit"]
         assert source["content"].startswith(entry["content"].removesuffix("..."))
@@ -441,6 +480,8 @@ def test_packets_drop_repeated_identity_and_machine_local_paths(
             assert "ticket_id" not in entry
             assert "project_id" not in entry
             assert "superseded_by" not in entry
+            assert "actor_id" not in entry
+            assert "created_at" not in entry
         if packet.get("candidate"):
             assert "ticket_id" not in packet["candidate"]
         if packet.get("worktree"):

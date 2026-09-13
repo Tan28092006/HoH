@@ -13,15 +13,20 @@ role's skill. A role mismatch is a credential/configuration issue; declaring a
 different role in text does not change permissions.
 
 Read the `version` in bootstrap's `runtime` object and its capabilities after a restart or upgrade.
-Resolve the current ticket packet and its `latest_planner_decision` before acting;
-use its `context_snapshot_id` on consequential writes that accept it. Ticket
+Resolve the current ticket packet and read its latest live typed Planner decision
+from `context_entries` before acting; use its `context_snapshot_id` on
+consequential writes that accept it. Ticket
 version alone is insufficient: Planner may have appended a new decision without
 changing ticket fields. A stale-context refusal means refresh the packet and
 reassess the action, not replay the old call. Installed runtime, repository main
 and the assigned worktree can be at different commits; verify the assigned base
 against the current release handoff before implementation.
 
-Register presence and check compatibility as required by the project. Then inspect
+Register presence and check compatibility as required by the project. QA declares
+only `execution_capabilities` it has verified on this machine; the project profile
+is the intended surface, not proof that this particular session can use it. Strict
+QA remains queued until Planner/operator approves the evidence-backed subset for
+the same `machine_id`; QA cannot self-approve. Then inspect
 bootstrap assignments and the role inbox. A new chat can resume the same identity
 only after the earlier session has stopped. Two concurrent workers need different
 credentials/identities; HoH leases are keyed by identity, not chat/session ID.

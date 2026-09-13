@@ -94,6 +94,9 @@ async def test_mcp_exposes_only_role_appropriate_tools(tmp_path) -> None:
     assert "dev.submit_candidate" not in integrator_names
     assert "qa.submit_verdict" not in integrator_names
     assert "planner.configure_repository" in planner_names
+    assert "planner.configure_agent_capability_profile" in planner_names
+    assert "planner.sync_repository" in planner_names
+    assert "planner.reconcile_delivery_report" in planner_names
     assert "planner.configure_test_command" in planner_names
     assert "planner.configure_skill_policy" in planner_names
     assert "planner.configure_skill_policy" not in names
@@ -326,12 +329,17 @@ async def test_execution_mcp_registers_and_polls_its_durable_inbox(tmp_path) -> 
 
     names = {tool.name for tool in await server.list_tools()}
     _, presence = await server.call_tool(
-        "agent.register", {"skills": ["hoh-developer"], "machine_id": "dev-machine"}
+        "agent.register", {
+            "skills": ["hoh-developer"],
+            "execution_capabilities": ["build_execution"],
+            "machine_id": "dev-machine",
+        }
     )
     _, inbox = await server.call_tool("work.inbox", {"project_id": "project-1"})
 
     assert {"agent.register", "agent.heartbeat", "work.inbox"}.issubset(names)
     assert presence["agent_id"] == "dev-01"
+    assert presence["execution_capabilities"] == ["build_execution"]
     assert inbox["offers"][0]["ticket"]["ticket_id"] == "DEV-QUEUE"
     activity = service.list_agent_activity(developer, "project-1")["calls"]
     assert activity[-1]["tool_name"] == "work.inbox"

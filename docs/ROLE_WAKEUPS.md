@@ -12,7 +12,9 @@ not attach both the Developer and QA MCP profiles to the same worker.
 Every wakeup follows this small contract:
 
 1. Renew presence with `agent.heartbeat`. On the first run only, call
-   `agent.register` with the installed role skill and capacity `1`.
+   `agent.register` with the installed role skill and capacity `1`. QA also
+   declares only `execution_capabilities` verified on the current machine; a
+   Planner/operator must separately approve them from public preflight evidence.
 2. Call `work.inbox` for the assigned project.
 3. If `active_leases` is non-empty, do not claim another ticket. Resume only
    that lease's role workflow; renew its ticket lease only while doing useful

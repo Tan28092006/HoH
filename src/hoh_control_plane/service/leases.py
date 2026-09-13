@@ -14,6 +14,7 @@ from hoh_control_plane.service._common import (
     _iso,
     _now,
     _row,
+    _required_execution_capabilities,
     datetime,
     json,
     re,
@@ -192,6 +193,57 @@ class LeaseMixin:
                 {"project_id": project_id, "reasons": verdict["reasons"]},
             )
 
+    @staticmethod
+    def _require_qa_execution_capabilities(
+        connection: Connection, actor: Actor, project_id: str, ticket: dict[str, Any]
+    ) -> None:
+        """Require a strict-project QA to have the equipment promised at check-in."""
+        if actor.role is not Role.QA:
+            return
+        project = _row(
+            connection.execute(
+                "SELECT verification_profile FROM projects WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+        )
+        if project is None or (project.get("verification_profile") or {}).get(
+            "quality_policy"
+        ) != "claim-evidence-v1":
+            return
+        presence = _row(
+            connection.execute(
+                "SELECT execution_capabilities, approved_execution_capabilities, "
+                "machine_id, capability_approved_machine_id "
+                "FROM agent_presence WHERE agent_id = ?",
+                (actor.agent_id,),
+            ).fetchone()
+        )
+        if presence is None:
+            raise ValidationError(
+                "QA must register verified execution capabilities before claiming strict work",
+                {"reason": "execution_capabilities_not_registered"},
+            )
+        required = _required_execution_capabilities(ticket)
+        declared = set(presence.get("execution_capabilities") or [])
+        approved = set(presence.get("approved_execution_capabilities") or [])
+        if presence.get("machine_id") != presence.get("capability_approved_machine_id"):
+            raise ValidationError(
+                "QA session machine does not match its approved capability profile",
+                {"reason": "execution_capability_machine_mismatch"},
+            )
+        unapproved = sorted(required - approved)
+        if unapproved:
+            raise ValidationError(
+                "QA session lacks an approved capability profile for this ticket",
+                {"reason": "execution_capabilities_unapproved", "capabilities": unapproved},
+            )
+        missing = sorted(required - declared)
+        if missing:
+            raise ValidationError(
+                "QA session lacks execution capabilities required by this ticket",
+                {"reason": "execution_capabilities_missing", "capabilities": missing},
+            )
+
     def _claim(
         self,
         actor: Actor,
@@ -211,6 +263,7 @@ class LeaseMixin:
             self._expect_version(ticket, expected_version)
             self.require_fresh_context(connection, ticket_id, context_snapshot_id)
             self._require_skill_compatible(connection, actor, project_id)
+            self._require_qa_execution_capabilities(connection, actor, project_id, ticket)
             existing = connection.execute(
                 "SELECT * FROM leases WHERE ticket_id = ?", (ticket_id,)
             ).fetchone()

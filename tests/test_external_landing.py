@@ -71,6 +71,35 @@ def test_a_commit_really_on_the_branch_can_be_recorded(service, actors, landed) 
     assert result["ticket"]["status"] == "DONE"
     assert result["merge_status"] == "landed_ungated"
     assert result["gated"] is False
+    jobs = service.discover_planner_jobs(actors["planner"], "project-1")
+    assert len(jobs) == 1
+    assert jobs[0]["job_type"] == "delivery_completed"
+    assert jobs[0]["candidate_id"] is None
+    assert "certifies no QA criterion" in jobs[0]["summary"]
+
+
+def test_delivery_report_replaces_stale_open_planning_identity(service, actors, landed):
+    ticket = landed["ticket"]
+    claimed = service.claim_ticket(
+        actors["developer"], ticket["ticket_id"], ticket["version"], 900
+    )
+    blocked = service.report_blocker(
+        actors["developer"], ticket["ticket_id"], claimed["lease"]["lease_id"],
+        claimed["ticket"]["version"], "A temporary requirement decision is missing.",
+    )
+    old_job_id = blocked["planner_job"]["planner_job_id"]
+    assert blocked["planner_job"]["context_entry_id"]
+
+    _record(
+        service, actors["integrator"], landed,
+        version=blocked["ticket"]["version"],
+    )
+
+    job = service.discover_planner_jobs(actors["planner"], "project-1")[0]
+    assert job["planner_job_id"] == old_job_id
+    assert job["job_type"] == "delivery_completed"
+    assert job["candidate_id"] is None
+    assert job["context_entry_id"] is None
 
 
 def test_external_landing_does_not_certify_feature_or_inherited_criteria(service, actors, landed):
