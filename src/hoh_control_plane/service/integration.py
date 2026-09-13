@@ -259,6 +259,15 @@ class IntegrationMixin:
                     },
                 )
                 rework_ticket = self._ticket(connection, ticket_id)
+                self._open_commit_reconciliation(
+                    connection,
+                    actor,
+                    project_id,
+                    commit=candidate_commit,
+                    subject=f"Integration gate rejected candidate {candidate_id}",
+                    relation="integration_gate_failed",
+                    observation_ref=f"test_run:{gate_test_run['test_run_id']}",
+                )
                 self._queue_ticket(connection, actor, project_id, rework_ticket)
                 return {
                     "ticket": rework_ticket,
@@ -311,6 +320,16 @@ class IntegrationMixin:
                     {"candidate_id": candidate_id, "mainline_commit": mainline_commit},
                 )
                 rework_ticket = self._ticket(connection, ticket_id)
+                self._open_commit_reconciliation(
+                    connection,
+                    actor,
+                    project_id,
+                    commit=mainline_commit,
+                    subject=f"Mainline moved before candidate {candidate_id} could land",
+                    relation="integration_base_drift",
+                    observation_ref=f"candidate:{candidate_id}",
+                    advance_mainline=True,
+                )
                 self._queue_ticket(connection, actor, project_id, rework_ticket)
                 return {
                     "ticket": rework_ticket,
@@ -343,6 +362,16 @@ class IntegrationMixin:
                 merged_ticket,
                 candidate_id=candidate_id,
                 mainline_commit=mainline_commit,
+            )
+            self._open_commit_reconciliation(
+                connection,
+                actor,
+                project_id,
+                commit=mainline_commit,
+                subject=f"Integrated candidate {candidate_id}",
+                relation="integrated",
+                observation_ref=f"candidate:{candidate_id}",
+                advance_mainline=True,
             )
             record = self._settled_record_inputs(connection, ticket_id, candidate_id)
 
@@ -1240,6 +1269,20 @@ class IntegrationMixin:
                     {"candidate_id": job["candidate_id"], "mainline_commit": mainline_commit},
                 )
                 rework_ticket = self._ticket(connection, job["ticket_id"])
+                self._open_commit_reconciliation(
+                    connection,
+                    actor,
+                    job["project_id"],
+                    commit=(ticket["candidate_commit"] if regression_failure else mainline_commit),
+                    subject=(
+                        f"Integration gate rejected candidate {job['candidate_id']}"
+                        if regression_failure else
+                        f"Mainline moved before candidate {job['candidate_id']} could land"
+                    ),
+                    relation=("integration_gate_failed" if regression_failure else "integration_base_drift"),
+                    observation_ref=f"merge_job:{merge_job_id}",
+                    advance_mainline=not bool(regression_failure),
+                )
                 self._queue_ticket(connection, actor, job["project_id"], rework_ticket)
                 # A drifted candidate is a planning problem as much as a rework
                 # item: the Planner decides whether to rebase, re-scope or drop it.
@@ -1289,6 +1332,16 @@ class IntegrationMixin:
                 candidate_id=job["candidate_id"],
                 mainline_commit=mainline_commit,
                 merge_job_id=merge_job_id,
+            )
+            self._open_commit_reconciliation(
+                connection,
+                actor,
+                job["project_id"],
+                commit=mainline_commit,
+                subject=f"Integrated candidate {job['candidate_id']}",
+                relation="integrated",
+                observation_ref=f"merge_job:{merge_job_id}",
+                advance_mainline=True,
             )
             connection.execute(
                 """UPDATE merge_jobs

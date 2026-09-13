@@ -352,7 +352,9 @@ state transition:
 - `work_offers`: offer ngắn hạn tới các agent còn online.
 
 Khi Dev submit candidate, ticket vào `QA_READY` và một queue item cho QA được
-tạo. Khi QA fail, ticket vào `REWORK` và một queue item cho Dev được tạo. Nếu
+tạo. Khi QA fail, ticket vào `REWORK`, mở ngay commit reconciliation cho Planner
+và tạo queue item cho Dev ở trạng thái chờ; offer chỉ phát sau khi Planner đã
+đánh giá candidate/report và resolve barrier. Nếu
 không có agent đúng role, queue không biến mất. Khi nhiều QA/Dev check in trong
 cùng khoảng thời gian, mỗi agent có thể nhận offer; chỉ `claim` thành công đầu
 tiên tạo lease, đồng thời đóng những offer còn lại. Vì vậy offer không phải là
@@ -588,8 +590,10 @@ tự tạo đúng một `delivery_completed` Planner job/intervention, nên Plan
 report của iteration mà không phụ thuộc tin nhắn tay hoặc cron.
 
 Candidate gate còn ràng buộc một Developer iteration đúng bằng một commit thường
-ngay sau frozen base. Multi-commit range và merge commit bị từ chối trước QA, nên
-mỗi commit được tích hợp luôn tạo một artifact boundary rõ để Planner đánh giá lại.
+ngay sau frozen base hoặc candidate trước đã được QA/Planner đánh giá. Multi-commit
+range và merge commit bị từ chối trước QA. QA fail, integration fail và merge
+thành công đều mở reconciliation trong cùng transaction ghi kết quả, nên không có
+khoảng trống để role kế tiếp nhận việc trước khi Planner đánh giá lại.
 
 ### 6.6. Ví dụ input/output của thao tác claim
 

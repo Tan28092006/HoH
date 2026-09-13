@@ -823,6 +823,18 @@ class QaMixin:
                 {"candidate_id": candidate_id, "verdict": verdict},
             )
             verdict_ticket = self._ticket(connection, ticket_id)
+            reconciliation_id = None
+            if verdict == "failed":
+                reconciliation_id = self._open_commit_reconciliation(
+                    connection,
+                    actor,
+                    project_id,
+                    commit=candidate["commit_sha"],
+                    subject=f"QA rejected candidate {candidate_id}",
+                    relation="qa_failed",
+                    observation_ref=f"context:{known_failure_entry_id}",
+                    branch=candidate.get("branch_ref"),
+                )
             if verdict in {"passed", "failed"}:
                 self._queue_ticket(connection, actor, project_id, verdict_ticket)
             planner_job = None
@@ -868,6 +880,7 @@ class QaMixin:
                 "candidate": candidate,
                 "verdict": verdict,
                 "planner_job": planner_job,
+                "reconciliation_id": reconciliation_id,
                 "evidence_bundle": {
                     "schema_version": "1",
                     "candidate_id": candidate_id,

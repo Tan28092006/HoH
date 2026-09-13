@@ -159,6 +159,7 @@ class CandidateMixin:
                         repository_path=repository["repository_path"], worktree_path=worktree["worktree_path"],
                         expected_branch=worktree["branch_ref"], expected_base_commit=worktree["base_commit"],
                         candidate_commit=job["commit_sha"], submitted_base_commit=job["base_commit"],
+                        expected_iteration_parent=ticket.get("candidate_commit"),
                     )
                 else:
                     # No service-side tree exists to inspect, so every fact comes
@@ -167,6 +168,7 @@ class CandidateMixin:
                         repository_path=repository["repository_path"],
                         candidate_commit=job["commit_sha"],
                         submitted_base_commit=job["base_commit"],
+                        expected_iteration_parent=ticket.get("candidate_commit"),
                     )
                 changed_paths = self.git_worktrees.changed_paths(
                     repository_path=repository["repository_path"], base_commit=base_commit, candidate_commit=commit_sha
@@ -295,6 +297,7 @@ class CandidateMixin:
                     repository_path=repository["repository_path"],
                     candidate_commit=commit_sha,
                     submitted_base_commit=base_commit,
+                    expected_iteration_parent=ticket.get("candidate_commit"),
                 )
                 changed_paths = self.git_worktrees.changed_paths(
                     repository_path=repository["repository_path"],
@@ -332,6 +335,7 @@ class CandidateMixin:
                     expected_base_commit=worktree["base_commit"],
                     candidate_commit=commit_sha,
                     submitted_base_commit=base_commit,
+                    expected_iteration_parent=ticket.get("candidate_commit"),
                 )
                 changed_paths = self.git_worktrees.changed_paths(
                     repository_path=repository["repository_path"],

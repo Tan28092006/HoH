@@ -13,8 +13,8 @@ Also require that `planning_barrier.repository_reconciliation_required` is false
 A newly observed commit closes integration admission and the final merge step
 until Planner classifies every prior ticket. Preserve the candidate and lease;
 never race the reconciliation with a manual Git operation. Each successful merge
-is one commit boundary and its `delivery_completed` report must be planned against
-before the next execution iteration opens.
+atomically opens the next commit reconciliation beside its `delivery_completed`
+report; no execution role can enter the next iteration before Planner resolves it.
 
 If rebase, conflict resolution or another operation changes the candidate artifact, record the new identity and send it through the required QA gates again. Never reuse evidence from a different commit as proof for the changed artifact.
 

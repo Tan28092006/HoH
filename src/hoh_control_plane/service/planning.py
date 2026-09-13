@@ -470,6 +470,117 @@ class PlanningMixin:
             ).fetchall()
             return {"reconciliations": [self._repository_reconciliation(row) for row in rows]}
 
+    def _open_commit_reconciliation(
+        self,
+        connection: Connection,
+        actor: Actor,
+        project_id: str,
+        *,
+        commit: str,
+        subject: str,
+        relation: str,
+        observation_ref: str,
+        branch: str | None = None,
+        advance_mainline: bool = False,
+    ) -> str:
+        """Open the next Planner turn from a candidate or integration result.
+
+        Repository polling covers teammate branches. This path closes the race
+        after an internal QA or merge result: the same transaction that records
+        the result also closes execution until Planner has assessed it.
+        """
+        project = self._one(
+            connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+        )
+        timestamp = _iso()
+        observed_commits = [{
+            "commit": commit,
+            "subject": subject,
+            "branches": [branch or f"refs/heads/{project['default_branch']}"],
+            "relations": [relation],
+        }]
+        ticket_versions = {
+            str(row["ticket_id"]): {
+                "version": int(row["version"]),
+                "status": str(row["status"]),
+            }
+            for row in connection.execute(
+                """
+                SELECT t.ticket_id, t.version, t.status
+                FROM tickets t
+                JOIN features f ON f.feature_id = t.feature_id
+                WHERE f.project_id = ?
+                  AND t.status NOT IN ('DONE', 'CANCELLED', 'SUPERSEDED')
+                ORDER BY t.ticket_id
+                """,
+                (project_id,),
+            ).fetchall()
+        }
+        reconciliation_id = _id("recon")
+        connection.execute(
+            """
+            INSERT INTO repository_reconciliations
+                (reconciliation_id, project_id, observation_ref, observed_commits,
+                 ticket_versions, status, created_at)
+            VALUES (?, ?, ?, ?, ?, 'PENDING', ?)
+            """,
+            (
+                reconciliation_id,
+                project_id,
+                observation_ref,
+                json.dumps(observed_commits, sort_keys=True),
+                json.dumps(ticket_versions, sort_keys=True),
+                timestamp,
+            ),
+        )
+        if advance_mainline:
+            connection.execute(
+                """
+                UPDATE project_repositories
+                SET observed_mainline_commit = ?, observed_at = ?
+                WHERE project_id = ?
+                """,
+                (commit, timestamp, project_id),
+            )
+        connection.execute(
+            """
+            UPDATE work_offers SET status = 'cancelled', closed_at = ?
+            WHERE status = 'offered' AND queue_id IN (
+                SELECT queue_id FROM work_queue
+                WHERE project_id = ? AND status IN ('pending', 'offered')
+            )
+            """,
+            (timestamp, project_id),
+        )
+        connection.execute(
+            """
+            UPDATE work_queue SET status = 'pending', updated_at = ?
+            WHERE project_id = ? AND status = 'offered'
+            """,
+            (timestamp, project_id),
+        )
+        next_version = int(project["version"]) + 1
+        connection.execute(
+            "UPDATE projects SET version = ?, updated_at = ? WHERE project_id = ?",
+            (next_version, timestamp, project_id),
+        )
+        self._event(
+            connection,
+            actor,
+            project_id,
+            "project.repository_iteration_opened",
+            "project",
+            project_id,
+            next_version,
+            {
+                "reconciliation_id": reconciliation_id,
+                "observation_ref": observation_ref,
+                "commit": commit,
+                "relation": relation,
+            },
+        )
+        return reconciliation_id
+
     def resolve_repository_reconciliation(
         self,
         actor: Actor,

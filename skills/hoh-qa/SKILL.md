@@ -77,7 +77,7 @@ For every finding:
 - State the observation and user impact.
 - Keep evidence bound to the frozen candidate.
 
-A passed verdict requires verified evidence for every mandatory criterion. Developer claims are inputs, not acceptance evidence. Do not edit production code; return failures as rework context.
+A passed verdict requires verified evidence for every mandatory criterion. Developer claims are inputs, not acceptance evidence. Do not edit production code; return failures as rework context. A failed verdict atomically opens a commit reconciliation, so the Developer rework queue remains dormant until Planner has read this candidate and its evidence and has classified the current plan.
 
 Record every criterion's outcome even when an early failure prevents execution;
 those later criteria remain unverified. Continue independent checks if safe and

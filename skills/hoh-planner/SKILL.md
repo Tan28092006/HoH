@@ -16,6 +16,12 @@ artifact. `repository_reconciliation_required` is a hard runtime barrier, not a
 notification: READY, execution claims, Developer submission and integration are
 closed until Planner resolves every pending observation in order.
 
+The runtime also opens this barrier immediately after a QA-rejected candidate,
+an integration conflict/regression, and a successful controlled merge. These
+observations carry the candidate, test-run or merge-job reference needed to read
+the report. Process them before the dormant Developer/Integrator queue; do not
+wait for a later Git poll to supply direction.
+
 For each observation, call `planner.list_repository_reconciliations`, resolve its
 typed observation, and audit every ticket captured in `ticket_versions`. Give
 each exactly one evidenced disposition:

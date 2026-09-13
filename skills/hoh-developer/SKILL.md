@@ -28,7 +28,11 @@ For each work item:
 
 If `dev.submit_candidate` errors, is interrupted, or does not return a submission ID: record the exact error code/message verbatim (e.g. via `dev.append_progress` or directly to the user) and do not retry blindly. Re-read ticket/candidate and submission state first, since the first attempt may have queued successfully. For `context_stale` only, obtain a fresh ticket packet and compare ticket version, lease owner, assigned worktree/branch/base, candidate SHA, validation contract, dependencies and `repository_state`. If no candidate or submission job exists and none of those material inputs changed, retry exactly once with the new snapshot ID and the same idempotency key. If a job exists, resume it; if any input changed or repository freshness is unresolved, stop and route the new fact to Planner. A slow `QUEUED` or `RUNNING` job is not a blocker; keep polling it and renewing the lease.
 
-Every submitted Developer run is one commit and ends this role's iteration. Before
+Every submitted Developer run is one ordinary commit and ends this role's
+iteration. Runtime rejects a merge commit or a hidden multi-commit range. The
+commit's parent must be the frozen base, or the previous QA-assessed candidate
+during rework; after mainline drift a replacement may restart with one commit on
+the newly frozen base. Before
 that submission, inspect `planning_barrier` in the refreshed packet. If it says
 `repository_reconciliation_required`, stop new edits and preserve the current
 worktree/commit. Keep the lease alive while Planner decides whether this ticket
