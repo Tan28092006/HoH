@@ -544,6 +544,9 @@ class GitWorktreeManager:
         )
         if ancestry.returncode != 0:
             raise ValidationError("Candidate commit does not descend from the assigned base commit")
+        self._require_single_commit_iteration(
+            repository, canonical_base, canonical_candidate
+        )
         return canonical_candidate, canonical_base
 
     def verify_pushed_candidate(
@@ -580,7 +583,29 @@ class GitWorktreeManager:
         )
         if ancestry.returncode != 0:
             raise ValidationError("Candidate commit does not descend from the submitted base commit")
+        self._require_single_commit_iteration(
+            repository, canonical_base, canonical_candidate
+        )
         return canonical_candidate, canonical_base
+
+    def _require_single_commit_iteration(
+        self, repository: Path, base_commit: str, candidate_commit: str
+    ) -> None:
+        """Require one ordinary candidate commit directly on the frozen base.
+
+        The candidate is the artifact emitted by one Developer iteration.  A
+        multi-commit range would hide intermediate iteration boundaries from
+        Planner; a merge commit would import an unreviewed side history.  Both
+        are rejected before the candidate can become QA-ready.
+        """
+        parents = self._git(
+            repository, "rev-list", "--parents", "-n", "1", candidate_commit
+        ).stdout.strip().split()
+        if len(parents) != 2 or parents[0] != candidate_commit or parents[1] != base_commit:
+            raise ValidationError(
+                "One Developer iteration must submit exactly one non-merge commit "
+                "whose parent is the frozen base commit"
+            )
 
     def verify_frozen_candidate(self, worktree_path: str, candidate_commit: str) -> str:
         """Ensure QA executes against a clean worktree still at the frozen candidate SHA."""

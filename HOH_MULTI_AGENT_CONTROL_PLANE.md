@@ -587,6 +587,10 @@ Integrator chỉ merge candidate đã đạt QA gate và policy gate. Merge thà
 tự tạo đúng một `delivery_completed` Planner job/intervention, nên Planner nhận
 report của iteration mà không phụ thuộc tin nhắn tay hoặc cron.
 
+Candidate gate còn ràng buộc một Developer iteration đúng bằng một commit thường
+ngay sau frozen base. Multi-commit range và merge commit bị từ chối trước QA, nên
+mỗi commit được tích hợp luôn tạo một artifact boundary rõ để Planner đánh giá lại.
+
 ### 6.6. Ví dụ input/output của thao tác claim
 
 Input:
