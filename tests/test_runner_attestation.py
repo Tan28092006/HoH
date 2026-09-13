@@ -1,6 +1,7 @@
 """The test process must prove its own imports and environment after pytest setup."""
 import json
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -89,3 +90,18 @@ def test_pytest_cannot_pass_after_mutating_tracked_candidate_source(tmp_path):
     result = ProjectTestRunner(tmp_path / "evidence").execute(
         [sys.executable, "-I", "-m", "pytest", "-q"], str(root), 30)
     assert result.termination_reason == "artifact_mismatch"
+
+
+@pytest.mark.parametrize("code,truncated,errors,reason", [
+    (0xC0000005, False, (), "native_termination"),
+    (0, True, (), "output_truncated"),
+    (0, False, ("OSError",), "capture_failure"),
+])
+def test_non_pytest_commands_retain_process_failure_classification(tmp_path, monkeypatch, code, truncated, errors, reason):
+    completed = SimpleNamespace(returncode=code, timed_out=False, cancelled=False,
+        stdout="", stderr="", stdout_truncated=truncated, stderr_truncated=False, capture_errors=errors)
+    monkeypatch.setattr("hoh_control_plane.qa_runner.run_managed", lambda *a, **kw: completed)
+    result = ProjectTestRunner(tmp_path).execute(["node", "test.js"], str(tmp_path), 30)
+    assert result.termination_reason == reason
+    assert result.capture_errors == errors
+    assert result.stdout_truncated == truncated
