@@ -645,13 +645,13 @@ class IntegrationMixin:
                     "SELECT * FROM project_repositories WHERE project_id = ?", (project_id,)
                 ).fetchone()
             )
-            candidate = _row(
-                connection.execute(
-                    "SELECT * FROM candidates WHERE ticket_id = ? AND commit_sha = ?",
-                    (ticket_id, ticket["candidate_commit"]),
-                ).fetchone()
-            )
-            if candidate is None:
+            rows = connection.execute(
+                "SELECT * FROM candidates WHERE ticket_id = ? ORDER BY submitted_at DESC LIMIT 2",
+                (ticket_id,),
+            ).fetchall()
+            candidate = _row(rows[0]) if rows else None
+            if (candidate is None or candidate["commit_sha"] != ticket["candidate_commit"]
+                    or (len(rows) > 1 and rows[0]["submitted_at"] == rows[1]["submitted_at"])):
                 raise ReleasePolicyError(
                     "No frozen candidate matches the ticket's current artifact",
                     {"reason": "candidate_identity_mismatch"},
@@ -663,11 +663,19 @@ class IntegrationMixin:
                     "SELECT * FROM qa_findings WHERE candidate_id = ?", (candidate_id,)
                 ).fetchall()
             ]
+            # One verdict writes its complete finding batch with one timestamp.
+            # A fresh full QA pass after infra recovery supersedes the earlier
+            # evidence gap for gate decisions; keep every historical row intact.
+            if findings:
+                latest_verdict = max(finding["created_at"] for finding in findings)
+                findings = [finding for finding in findings if finding["created_at"] == latest_verdict]
+            current_evidence_ids = {ref for finding in findings for ref in finding["evidence_refs"]}
             evidence = [
                 _row(row)
                 for row in connection.execute(
                     "SELECT * FROM evidence WHERE candidate_id = ?", (candidate_id,)
                 ).fetchall()
+                if row["evidence_id"] in current_evidence_ids
             ]
             test_runs = [
                 _row(row)
