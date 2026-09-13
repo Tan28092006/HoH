@@ -44,7 +44,7 @@ def build_kit(output: Path, role: str, server_url: str, token_env: str = "HOH_AG
         f'bearer_token_env_var = {json.dumps(token_env)}\ntool_timeout_sec = 86400\n', encoding="utf-8"
     )
     claude = {"mcpServers": {server_name: {
-        "type": "http", "url": server_url,
+        "type": "http", "url": server_url, "timeout": 86400000,
         "headers": {"Authorization": "Bearer ${" + token_env + "}"},
     }}}
     (output / "mcp.json").write_text(json.dumps(claude, indent=2) + "\n", encoding="utf-8")

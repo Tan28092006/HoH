@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import anyio
 from collections.abc import Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
@@ -340,7 +341,8 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
         @server.tool(name="work.wait_for_event", structured_output=True)
         async def work_wait_for_event(project_id: str, timeout_seconds: int = 43200,
                                       ack_event_id: str | None = None,
-                                      job_kind: str | None = None, job_id: str | None = None) -> dict[str, Any]:
+                                      job_kind: str | None = None, job_id: str | None = None,
+                                      resume_wait_id: str | None = None) -> dict[str, Any]:
             """Keep this GUI chat waiting without model polling until work or a job result arrives.
 
             Register first. Pass ack_event_id from the previous delivery when handled.
@@ -349,14 +351,34 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             resolve current context and claim/poll through the normal role tools.
             Events are hints, never ownership. Stopping/closing the chat ends its wait.
             Client MCP timeout must exceed timeout_seconds (kit config sets 86400).
+            After this same chat reconnects, use event_wait.wait_id from bootstrap
+            as resume_wait_id to replace only that old wait. A superseded result
+            means this request must stop, without retrying or claiming anything.
+            Multiple MCP processes do not prove that multiple chats are working.
             """
             from hoh_control_plane.event_wait import wait_for_event
             arguments = dict(project_id=project_id, timeout_seconds=timeout_seconds,
-                             ack_event_id=ack_event_id, job_kind=job_kind, job_id=job_id)
+                             ack_event_id=ack_event_id, job_kind=job_kind, job_id=job_id,
+                             resume_wait_id=resume_wait_id)
+            context = server.get_context()
+            try:
+                context.request_context
+                has_transport = True
+            except ValueError:
+                has_transport = False  # Direct in-process invocation in tests.
+            started = time.monotonic()
+            async def keepalive():
+                try:
+                    with anyio.fail_after(5):
+                        await context.session.send_ping()
+                        await context.report_progress(time.monotonic() - started, message='Waiting for a HoH event')
+                except Exception as error:
+                    raise ConnectionError('MCP connection lost while waiting; reconnect and bootstrap') from error
             outcome, error_code = 'cancelled', None
             try:
                 with correlation_scope():
-                    result = await wait_for_event(service, actor, **arguments)
+                    result = await wait_for_event(service, actor, **arguments,
+                                                  keepalive=keepalive if has_transport else None)
                 outcome = 'succeeded'
                 return result
             except DomainError as error:
@@ -511,7 +533,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
     if actor.role in {Role.PLANNER, Role.ADMIN}:
 
         @server.tool(name="planner.configure_repository", structured_output=True)
-        def planner_configure_repository(
+        async def planner_configure_repository(
             project_id: str, repository_path: str, workspace_model: str = "colocated"
         ) -> dict[str, Any]:
             """Attach a verified local Git repository so Dev candidates require a bound worktree.
@@ -525,11 +547,9 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
                 "repository_path": repository_path,
                 "workspace_model": workspace_model,
             }
-            return invoke(
-                "planner.configure_repository",
-                arguments,
-                lambda: service.configure_repository(actor, **arguments),
-            )
+            return await anyio.to_thread.run_sync(lambda: invoke(
+                'planner.configure_repository', arguments,
+                lambda: service.configure_repository(actor, **arguments)))
 
         @server.tool(name="planner.configure_test_command", structured_output=True)
         def planner_configure_test_command(

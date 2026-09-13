@@ -38,6 +38,14 @@ def install(kit: Path, home: Path, client: str) -> None:
         parsed = json.loads(text or "{}")
         supplied = json.loads((kit / "mcp.json").read_text(encoding="utf-8"))["mcpServers"][name]
         old = parsed.setdefault("mcpServers", {}).get(name)
+        if old is not None and 'timeout' in supplied:
+            required_timeout = supplied['timeout']
+            old_timeout = old.get('timeout', required_timeout)
+            if (type(old_timeout) is int and old_timeout > 0
+                    and {key: value for key, value in old.items() if key != 'timeout'}
+                    == {key: value for key, value in supplied.items() if key != 'timeout'}):
+                supplied = {**supplied, 'timeout': max(required_timeout, old_timeout)}
+                old = supplied
         if old is not None and old != supplied:
             raise ValueError("Existing HoH MCP configuration differs; review before replacing it")
         parsed["mcpServers"][name] = supplied

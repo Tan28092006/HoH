@@ -52,7 +52,7 @@ def install_profile(root, project, role, instance, client, home, upgrade_skills=
         kit = Path(temp) / 'kit'
         build_kit(kit, role, 'http://127.0.0.1:8931/mcp')
         (kit / 'codex.toml').write_text(f'[mcp_servers.{server}]\ncommand = {json.dumps(command)}\nargs = {json.dumps(arguments)}\ntool_timeout_sec = 86400\n', encoding='utf-8')
-        (kit / 'mcp.json').write_text(json.dumps({'mcpServers': {server: {'type': 'stdio', 'command': command, 'args': arguments}}}), encoding='utf-8')
+        (kit / 'mcp.json').write_text(json.dumps({'mcpServers': {server: {'type': 'stdio', 'command': command, 'args': arguments, 'timeout': 86400000}}}), encoding='utf-8')
         manifest = json.loads((kit / 'manifest.json').read_text(encoding='utf-8'))
         manifest['server_name'], manifest['codex'] = server, codex
         manifest['files'] = {p.relative_to(kit).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()

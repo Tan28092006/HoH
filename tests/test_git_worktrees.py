@@ -49,7 +49,7 @@ def test_git_command_timeout_becomes_a_domain_error(tmp_path: Path) -> None:
     manager = GitWorktreeManager(tmp_path / "worktrees")
 
     with patch(
-        "hoh_control_plane.git_worktrees.subprocess.run",
+        "hoh_control_plane.git_worktrees.run_managed",
         side_effect=subprocess.TimeoutExpired(["git", "status"], 1),
     ):
         with pytest.raises(ValidationError, match="timed out"):

@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from hoh_control_plane.domain import ValidationError
 from hoh_control_plane.resource_lock import exclusive_file_lock
+from hoh_control_plane.managed_process import run_managed
 
 
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
@@ -583,15 +584,11 @@ class GitWorktreeManager:
     @staticmethod
     def _git(path: Path, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         try:
-            completed = subprocess.run(
-                ["git", "-C", str(path), *arguments],
-                check=False,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
-            )
+            command = ['git', '-C', str(path), *arguments]
+            result = run_managed(command, cwd=path, timeout=_GIT_COMMAND_TIMEOUT_SECONDS)
+            if result.timed_out:
+                raise ValidationError('Git operation timed out; its process tree was stopped')
+            completed = subprocess.CompletedProcess(command, result.returncode, result.stdout, result.stderr)
         except subprocess.TimeoutExpired as exc:
             raise ValidationError("Git operation timed out") from exc
         except OSError as exc:
