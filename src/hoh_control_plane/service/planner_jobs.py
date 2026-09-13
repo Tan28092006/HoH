@@ -244,6 +244,35 @@ class PlannerJobMixin:
                         "Poll the active worker to a terminal result before reporting its failure"
                     )
                 source_ref = f"lease:{lease['lease_id']}"
+            existing_job = _row(connection.execute(
+                """
+                SELECT * FROM planner_jobs
+                WHERE ticket_id = ? AND status IN ('READY', 'IN_PROGRESS')
+                """,
+                (ticket_id,),
+            ).fetchone())
+            source_aliases = {source_ref}
+            if job_kind == "qa_test" and job_id is not None:
+                source_aliases.add(f"test_run:{job_id}")
+            if existing_job is not None and source_aliases.intersection(
+                set(existing_job.get("evidence_refs") or [])
+            ):
+                context = (
+                    _row(connection.execute(
+                        "SELECT * FROM context_entries WHERE entry_id = ?",
+                        (existing_job["context_entry_id"],),
+                    ).fetchone())
+                    if existing_job.get("context_entry_id") else None
+                )
+                return {
+                    "ticket": ticket,
+                    "failure_context": context,
+                    "planner_job": self._planner_job(
+                        connection, existing_job["planner_job_id"]
+                    ),
+                    "deduplicated": True,
+                    "next_action": "wait_for_planner_direction",
+                }
             fingerprint = hashlib.sha256(
                 json.dumps(
                     {
