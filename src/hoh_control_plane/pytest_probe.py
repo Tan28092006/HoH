@@ -46,6 +46,18 @@ def main():
 
     facts["candidate_commit"] = git_sha()
 
+    def tracked_clean():
+        try:
+            result = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
+                cwd=root, stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+                creationflags=0x08000000 if os.name == "nt" else 0)
+            return result.returncode == 0 and not result.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
+    facts["tracked_clean_before"] = tracked_clean() if facts["candidate_commit"] else None
+    facts["skipped_tests"] = []
+
     def save():
         target = Path(report)
         temporary = target.with_suffix(".tmp")
@@ -116,6 +128,8 @@ def main():
                     facts["resource_failures"] += 1
             elif report.skipped:
                 facts["test_counts"]["skipped"] += 1
+                if len(facts["skipped_tests"]) < 100:
+                    facts["skipped_tests"].append({"nodeid": report.nodeid[:500], "reason": str(report.longrepr)[-1000:]})
             elif report.when == "call":
                 facts["test_counts"]["passed"] += 1
             save()
@@ -128,7 +142,10 @@ def main():
             facts["pytest_exit_status"] = int(exitstatus)
             facts["resource_after"] = resources.resource_snapshot()
             facts["final_commit"] = git_sha()
-            if facts["final_commit"] != facts["candidate_commit"]:
+            facts["tracked_clean_after"] = tracked_clean() if facts["candidate_commit"] else None
+            if facts["final_commit"] != facts["candidate_commit"] or (
+                facts["candidate_commit"] and (not facts["tracked_clean_before"] or not facts["tracked_clean_after"])
+            ):
                 facts["provenance_status"] = "mismatch"
             save()
 

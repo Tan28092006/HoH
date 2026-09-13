@@ -448,7 +448,10 @@ class QaMixin:
                                                "command_digest": job["command_digest"],
                                                "timeout_seconds": job["timeout_seconds"]}}
                 child = manifest.get("child", {})
-                if child.get("candidate_commit") and child["candidate_commit"] != job["candidate_commit"]:
+                if execution.environment_manifest.get("instrumentation") and (
+                    child.get("candidate_commit") != job["candidate_commit"]
+                    or child.get("final_commit") != job["candidate_commit"]
+                ) and execution.termination_reason == "passed":
                     execution = replace(execution, artifact_mismatch=True, provenance_status="mismatch",
                                         termination_reason="artifact_mismatch")
                 execution = replace(execution, environment_manifest=manifest,

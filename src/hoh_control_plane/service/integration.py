@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from hoh_control_plane import semantic_record
+from hoh_control_plane.service.qa import _INFRASTRUCTURE_OUTCOMES
 from hoh_control_plane.service._common import (
     Actor,
     Any,
@@ -144,6 +145,14 @@ class IntegrationMixin:
                     "candidate verdict; the ticket and lease are unchanged, retry once fixed."
                 )
 
+        if execution is not None and (
+            execution.termination_reason in _INFRASTRUCTURE_OUTCOMES
+            or execution.capture_errors or execution.stdout_truncated or execution.stderr_truncated
+        ):
+            raise ValidationError(
+                f"Integration infrastructure failure: {execution.termination_reason}. "
+                "Preserve the verified candidate and retry after infrastructure recovery; no source rework is requested."
+            )
         gate_passed = execution is None or (not execution.timed_out and execution.exit_code == 0)
         merged = False
         mainline_commit = ""
