@@ -547,6 +547,9 @@ class IntegrationMixin:
                 {"landed_commit": landed_commit, "gated": False, "qa_verified": False},
             )
             self._close_ticket_dispatch(connection, ticket_id, timestamp)
+            # An expired lease is no longer an owner. Leaving it behind lets an
+            # older recovery path put already-landed work back on the queue.
+            connection.execute("DELETE FROM leases WHERE ticket_id = ?", (ticket_id,))
             return {
                 "ticket": self._ticket(connection, ticket_id),
                 "merge_status": "landed_ungated",

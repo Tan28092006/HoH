@@ -64,6 +64,12 @@ class LeaseMixin:
                 ticket = self._ticket(connection, lease["ticket_id"])
                 project_id = self._project_for_ticket(connection, ticket["ticket_id"])
                 require_project(actor, project_id)
+                if not self._lease_owns_ticket_state(lease, ticket):
+                    self._retire_expired_jobs(connection, lease)
+                    connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease["lease_id"],))
+                    self._event(connection, actor, project_id, "lease.orphan_retired", "ticket",
+                                ticket["ticket_id"], ticket["version"], {"state_preserved": ticket["status"]})
+                    continue
                 fallback = (
                     TicketStatus.MERGE_READY
                     if lease["role"] == Role.INTEGRATOR.value
@@ -103,6 +109,15 @@ class LeaseMixin:
                     }
                 )
         return {"count": len(requeued), "requeued": requeued}
+
+    @staticmethod
+    def _lease_owns_ticket_state(lease: dict[str, Any], ticket: dict[str, Any]) -> bool:
+        owned = {
+            Role.DEVELOPER.value: {TicketStatus.DEV_IN_PROGRESS.value},
+            Role.QA.value: {TicketStatus.QA_IN_PROGRESS.value},
+            Role.INTEGRATOR.value: {TicketStatus.MERGE_READY.value},
+        }
+        return ticket["status"] in owned.get(lease["role"], set())
 
     @staticmethod
     def _retire_expired_jobs(connection: Connection, lease: dict[str, Any]) -> None:
@@ -281,6 +296,8 @@ class LeaseMixin:
             self._retire_expired_jobs(connection, dict(lease))
             connection.execute("DELETE FROM leases WHERE ticket_id = ?", (ticket_id,))
             current = self._ticket(connection, ticket_id)
+            if not self._lease_owns_ticket_state(dict(lease), current):
+                return
             fallback = (
                 TicketStatus.MERGE_READY
                 if lease["role"] == Role.INTEGRATOR.value
