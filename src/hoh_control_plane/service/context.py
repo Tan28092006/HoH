@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 from hoh_control_plane.service._common import (
     Actor,
     Any,
@@ -128,10 +130,10 @@ class ContextMixin:
                 for row in connection.execute(
                     """
                     SELECT * FROM context_entries
-                    WHERE ticket_id = ? AND superseded_by IS NULL
+                    WHERE (ticket_id = ? OR (ticket_id IS NULL AND feature_id = ?)) AND superseded_by IS NULL
                     ORDER BY created_at ASC
                     """,
-                    (ticket_id,),
+                    (ticket_id, ticket["feature_id"]),
                 ).fetchall()
             ]
             candidate = _row(
@@ -218,7 +220,13 @@ class ContextMixin:
             "inherited_constraints": inherited,
             "experience": experience,
         }
+        decisions = [entry for entry in contexts if entry["actor_role"] in {"planner", "admin"}
+                     and entry["entry_type"] in {"planner_decision", "planning_decision", "design_decision", "risk", "note"}]
+        latest = decisions[-1] if decisions else None
+        payload["latest_planner_decision"] = ({"entry_id": latest["entry_id"],
+            "context_ref": "ctx:entry:" + latest["entry_id"], "summary": _checkpoint(latest["content"])} if latest else None)
         source_versions = {
+            "planning_revision": self._planning_revision(contexts),
             "ticket_version": ticket["version"],
             "feature_version": feature["version"],
             "candidate_commit": candidate["commit_sha"] if candidate else None,
@@ -381,6 +389,13 @@ class ContextMixin:
             ).fetchall()
         }
         stale: list[str] = []
+        decisions = [dict(row) for row in connection.execute(
+            "SELECT * FROM context_entries WHERE (ticket_id = ? OR (ticket_id IS NULL AND feature_id = ?)) AND superseded_by IS NULL ORDER BY created_at ASC",
+            (ticket_id, ticket["feature_id"])).fetchall()]
+        # Old snapshots did not pin planning decisions. Refresh once at upgrade
+        # instead of allowing a pre-upgrade view to authorize current work.
+        if observed.get("planning_revision") != self._planning_revision(decisions):
+            stale.append("planning_decisions")
         if observed.get("ticket_version") != ticket["version"]:
             stale.append("ticket")
         if observed.get("feature_version") != feature["version"]:
@@ -397,6 +412,12 @@ class ContextMixin:
                 "Refresh this ticket's context before writing: " + ", ".join(stale),
                 {"stale": stale, "ticket_id": ticket_id},
             )
+
+    @staticmethod
+    def _planning_revision(entries):
+        material = [(e["entry_id"], e["entry_type"], e["content"], e["source_ref"]) for e in entries
+                    if e["actor_role"] in {"planner", "admin"}]
+        return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
 
     @staticmethod
     def _project_role_sections(payload: dict[str, Any], actor: Actor) -> None:

@@ -150,7 +150,7 @@ def test_a_stale_response_names_the_sections_to_refresh_and_nothing_else(
 
     details = error.value.details
     assert set(details) == {"stale", "ticket_id"}
-    assert details["stale"] == ["ticket"]
+    assert details["stale"] == ["planning_decisions", "ticket"]
     assert "must not travel" not in str(error.value)
 
 
@@ -246,6 +246,7 @@ def test_a_snapshot_holds_no_narrative_only_versions(service, actors, seeded) ->
     recorded = json.dumps(_recorded(service, snapshot_id))
     assert "sensitive decision" not in recorded
     assert set(json.loads(_recorded(service, snapshot_id)["source_versions"])) == {
+        "planning_revision",
         "ticket_version",
         "feature_version",
         "candidate_commit",

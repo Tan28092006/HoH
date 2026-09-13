@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hoh_control_plane import __version__
 from hoh_control_plane.domain import Actor, Role
 from hoh_control_plane.service._common import _iso, _row, require_project
 
@@ -30,6 +31,9 @@ class SessionMixin:
                 "identity": {"agent_id": actor.agent_id, "role": actor.role.value,
                              "project_ids": sorted(actor.project_ids)},
                 "protocol_version": "0.3.0",
+                "runtime": {"version": __version__, "qa_instrumentation": "pytest-hooks-v1",
+                            "infrastructure_retry": "planner_readiness_required",
+                            "context_policy": "refresh_planning_revision_before_writes"},
                 "capabilities": self.capabilities(actor),
                 "required_skills": ["hoh-control-plane"] + ([] if actor.role == Role.ADMIN else [f"hoh-{actor.role.value}"]),
                 "projects": [{"project_id": p["project_id"], "name": p["name"]} for p in projects[:100]],
