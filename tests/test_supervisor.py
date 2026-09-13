@@ -1,6 +1,23 @@
 from concurrent.futures import Future
 import os
 from pathlib import Path
+
+
+def test_serializes_memory_heavy_jobs_but_keeps_git_worker_capacity(service, monkeypatch):
+    from concurrent.futures import Future
+    from hoh_control_plane.supervisor import Supervisor
+    with Supervisor(service, max_workers=3) as supervisor:
+        monkeypatch.setattr(supervisor, "_pending", lambda: [("qa", "q1"), ("qa", "q2"), ("merge", "m1"), ("provision", "p1")])
+        submitted = []
+        def submit(kind, identifier):
+            submitted.append((kind, identifier))
+            return Future()
+        monkeypatch.setattr(supervisor, "_submit", submit)
+        supervisor.tick()
+        assert submitted == [("qa", "q1"), ("provision", "p1")]
+        # Fake futures have no work to drain at fixture teardown.
+        for future in supervisor.active.values():
+            future.set_result(None)
 import sys
 import subprocess
 import signal
