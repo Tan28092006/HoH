@@ -1228,11 +1228,16 @@ class PlanningMixin:
             if active_lease is not None:
                 raise ConflictError("Recovery requires no active lease on the ticket")
             candidate_rows = connection.execute(
-                "SELECT * FROM candidates WHERE ticket_id = ?", (ticket_id,)
+                "SELECT * FROM candidates WHERE ticket_id = ? ORDER BY submitted_at DESC LIMIT 2",
+                (ticket_id,),
             ).fetchall()
-            if len(candidate_rows) != 1:
+            # A policy refresh may submit the same SHA again with a different
+            # frozen profile. Match QA's current submission, never an older row
+            # selected by SHA or by the caller's preferred evidence reference.
+            if not candidate_rows or (len(candidate_rows) > 1
+                    and candidate_rows[0]["submitted_at"] == candidate_rows[1]["submitted_at"]):
                 raise ValidationError(
-                    "Recovery requires exactly one frozen candidate on this ticket"
+                    "Recovery requires an unambiguous latest frozen candidate on this ticket"
                 )
             candidate = _row(candidate_rows[0])
             if candidate is None or candidate["commit_sha"] != ticket["candidate_commit"]:
