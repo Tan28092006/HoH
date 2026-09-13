@@ -107,6 +107,23 @@ _PASSING_REGRESSION = "raise SystemExit(0)\n"
 _FAILING_REGRESSION = "raise SystemExit('retry still duplicates orders')\n"
 
 
+@pytest.mark.parametrize("reason,code", [("incomplete_evidence", 0), ("resource_exhausted", 1)])
+def test_infrastructure_gate_neither_merges_nor_requests_source_rework(service, actors, seeded, tmp_path, monkeypatch, reason, code):
+    from hoh_control_plane.domain import ValidationError
+    from hoh_control_plane.qa_runner import TestExecution
+    repository, ticket, candidate, claim = _gate_ready_candidate(
+        service, actors, seeded, tmp_path, retry_body=_PASSING_REGRESSION)
+    before = _git(repository, "rev-parse", "main")
+    monkeypatch.setattr(service.project_tests, "execute", lambda *a: TestExecution(
+        command_digest="a" * 64, exit_code=code, timed_out=False, duration_ms=1,
+        stdout="", stderr="", termination_reason=reason))
+    with pytest.raises(ValidationError, match="infrastructure"):
+        service.merge_candidate(actors["integrator"], ticket["ticket_id"],
+            claim["lease"]["lease_id"], claim["ticket"]["version"])
+    assert _git(repository, "rev-parse", "main") == before
+    assert service.get_ticket_context(actors["planner"], ticket["ticket_id"])["ticket"]["status"] == "MERGE_READY"
+
+
 def test_passing_regression_gate_still_fast_forwards_main(
     service, actors, seeded, tmp_path: Path
 ) -> None:

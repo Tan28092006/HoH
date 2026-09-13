@@ -79,3 +79,13 @@ def test_managed_output_reports_truncation_as_data(tmp_path):
     assert result.stdout_truncated is True
     assert result.stderr_truncated is False
     assert result.capture_errors == ()
+
+
+def test_pytest_cannot_pass_after_mutating_tracked_candidate_source(tmp_path):
+    import subprocess
+    root = project(tmp_path, test="__import__('pathlib').Path('src/sample/__init__.py').write_text('value = 8')")
+    for args in [("init",), ("add", "."), ("-c", "user.name=Tests", "-c", "user.email=tests@example.invalid", "commit", "-m", "candidate")]:
+        subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+    result = ProjectTestRunner(tmp_path / "evidence").execute(
+        [sys.executable, "-I", "-m", "pytest", "-q"], str(root), 30)
+    assert result.termination_reason == "artifact_mismatch"
