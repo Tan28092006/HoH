@@ -288,6 +288,16 @@ function renderEvidenceSummary(context, ticket) {
   return parts.join("");
 }
 
+function renderValidationContract(context, ticket) {
+  const contract = ticket.validation_contract || [];
+  if (!contract.length) return `<p class="meta">Legacy ticket: no explicit validation contract.</p>`;
+  const profile = context && !context.unavailable ? context.verification_profile : null;
+  const profileLine = profile
+    ? `<p class="meta">Policy <code>${escapeHtml(profile.quality_policy || "legacy")}</code> · capabilities ${escapeHtml((profile.capabilities || []).join(", ") || "none")}</p>`
+    : "";
+  return `${profileLine}<ul>${contract.map(item => `<li><code>${escapeHtml(item.scenario_ref)}</code> · ${escapeHtml(item.method)}<br>${escapeHtml(item.expected_observation)}<br><span class="meta">Evidence: ${escapeHtml((item.required_evidence_types || []).join(", "))} · equipment: ${escapeHtml((item.required_capabilities || []).join(", ") || "none")}</span></li>`).join("")}</ul>`;
+}
+
 function renderTicketDetail(ticket, context) {
   const owner = ticketOwner(ticket);
   const relatedCalls = (state.activity?.calls || []).filter(call => {
@@ -305,6 +315,7 @@ function renderTicketDetail(ticket, context) {
     <h3>Lease</h3>${renderLease(owner)}
     <h3>Objective</h3><p>${escapeHtml(ticket.objective)}</p>
     <h3>Acceptance gate</h3><ul>${ticket.acceptance_criteria.map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+    <h3>Validation contract</h3>${renderValidationContract(context, ticket)}
     <h3>Preservation constraints</h3><ul>${ticket.preservation_constraints.map(item => `<li>${escapeHtml(item)}</li>`).join("") || "<li>None</li>"}</ul>
     <h3>Write scope</h3><code>${escapeHtml(ticket.file_scope.join(", ") || "Not defined")}</code>
     <h3>Dependencies</h3>${renderDependencies(context)}

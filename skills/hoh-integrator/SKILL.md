@@ -31,6 +31,9 @@ not a raw Git merge, direct service call, SQL or force-push fallback.
 Use the current runtime's policy and fresh ticket context, including Planner holds.
 The protected gate requires independent evidence for every mandatory criterion,
 the registered regression run, verified artifact identity and an unchanged base.
+When a validation contract exists, require its exact scenario and evidence-type
+coverage and preserve the returned evidence bundle with the landed SHA. A green
+aggregate command without the contracted observations is not sufficient.
 When a project has a registered regression command, the current runtime runs it
 in an isolated candidate checkout before fast-forwarding. Preserve that gate;
 an old skill or ticket describing it as future work does not disable it.

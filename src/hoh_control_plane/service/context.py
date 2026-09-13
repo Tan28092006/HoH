@@ -130,6 +130,12 @@ class ContextMixin:
                 "SELECT * FROM features WHERE feature_id = ?",
                 (ticket["feature_id"],),
             )
+            project = self._one(
+                connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+            )
+            verification_profile = project.get("verification_profile") or {
+                "schema_version": "1", "quality_policy": "legacy", "capabilities": []
+            }
             contexts = [
                 _row(row)
                 for row in connection.execute(
@@ -158,6 +164,7 @@ class ContextMixin:
                 ).fetchone()
             )
             failures: list[dict[str, Any]] = []
+            evidence_bundle: dict[str, Any] | None = None
             test_runs: list[dict[str, Any]] = []
             if candidate:
                 test_runs = [
@@ -174,11 +181,12 @@ class ContextMixin:
                 finding_rows = connection.execute(
                     """
                     SELECT * FROM qa_findings
-                    WHERE candidate_id = ? AND status != 'verified'
+                    WHERE candidate_id = ?
                     ORDER BY created_at ASC
                     """,
                     (candidate["candidate_id"],),
                 ).fetchall()
+                all_findings: list[dict[str, Any]] = []
                 for finding_row in finding_rows:
                     finding = _row(finding_row)
                     assert finding is not None
@@ -194,7 +202,33 @@ class ContextMixin:
                             ).fetchall()
                         ]
                     finding["evidence"] = evidence
-                    failures.append(finding)
+                    all_findings.append(finding)
+                    if finding["status"] != "verified":
+                        failures.append(finding)
+                records = [
+                    {
+                        "finding_id": finding["finding_id"],
+                        "criterion": finding["criterion"],
+                        "status": finding["status"],
+                        "observation": finding["observation"],
+                        "evidence_refs": finding["evidence_refs"],
+                        "scenario_refs": sorted({
+                            item["scenario_ref"] for item in finding["evidence"]
+                            if item and item.get("scenario_ref")
+                        }),
+                        "evidence_types": sorted({
+                            item["evidence_type"] for item in finding["evidence"] if item
+                        }),
+                    }
+                    for finding in all_findings
+                ]
+                evidence_bundle = {
+                    "schema_version": "1",
+                    "candidate_id": candidate["candidate_id"],
+                    "candidate_commit": candidate["commit_sha"],
+                    "verified_records": [r for r in records if r["status"] == "verified"],
+                    "gap_records": [r for r in records if r["status"] != "verified"],
+                }
             dependencies = [
                 dict(row)
                 for row in connection.execute(
@@ -214,6 +248,7 @@ class ContextMixin:
             "context_version": ticket["version"],
             "role": actor.role.value,
             "project_id": project_id,
+            "verification_profile": verification_profile,
             "feature": feature,
             "ticket": ticket,
             "dependencies": dependencies,
@@ -222,6 +257,7 @@ class ContextMixin:
             "worktree": worktree,
             "test_runs": test_runs,
             "known_failures": failures,
+            "evidence_bundle": evidence_bundle,
             "inherited_constraints": inherited,
             "experience": experience,
         }

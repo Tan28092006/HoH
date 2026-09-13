@@ -236,6 +236,209 @@ class PlanningMixin:
             )
         return profile
 
+    def configure_verification_profile(
+        self,
+        actor: Actor,
+        project_id: str,
+        capabilities: list[str],
+        quality_policy: str = "claim-evidence-v1",
+    ) -> dict[str, Any]:
+        """Declare the observable equipment available to QA for this project.
+
+        The profile describes capabilities, not machine-local commands. Commands
+        and credentials stay in their dedicated configuration surfaces, while a
+        ticket can state which portable capabilities its evidence plan needs.
+        """
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        require_project(actor, project_id)
+        self._bounded_list(capabilities, "capabilities", 50, 100, required=True)
+        if quality_policy not in {"legacy", "claim-evidence-v1"}:
+            raise ValidationError("quality_policy must be legacy or claim-evidence-v1")
+        normalized = sorted(set(capabilities))
+        if len(normalized) != len(capabilities):
+            raise ValidationError("capabilities cannot contain duplicates")
+        for capability in normalized:
+            if not capability.replace("_", "").replace("-", "").isalnum():
+                raise ValidationError("capabilities must use portable names")
+        profile = {
+            "schema_version": "1",
+            "quality_policy": quality_policy,
+            "capabilities": normalized,
+        }
+        timestamp = _iso()
+        with self.store.connection(immediate=True) as connection:
+            project = self._one(
+                connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+            )
+            if quality_policy == "claim-evidence-v1":
+                proposed_project = {**project, "verification_profile": profile}
+                ready_rows = connection.execute(
+                    """
+                    SELECT t.* FROM tickets t
+                    JOIN features f ON f.feature_id = t.feature_id
+                    WHERE f.project_id = ? AND t.status = ?
+                    """,
+                    (project_id, TicketStatus.READY.value),
+                ).fetchall()
+                for row in ready_rows:
+                    self._assert_quality_ready(proposed_project, _row(row) or {})
+            next_version = project["version"] + 1
+            connection.execute(
+                "UPDATE projects SET verification_profile = ?, version = ?, updated_at = ? "
+                "WHERE project_id = ?",
+                (json.dumps(profile), next_version, timestamp, project_id),
+            )
+            self._event(
+                connection, actor, project_id, "project.verification_profile_configured",
+                "project", project_id, next_version,
+                {"quality_policy": quality_policy, "capabilities": normalized},
+            )
+            return self._one(
+                connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+            )
+
+    def _validated_validation_contract(
+        self, acceptance_criteria: list[str], contract: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        self._bounded_list(
+            contract, "validation_contract", 30, 1, required=True, strings_only=False
+        )
+        allowed_methods = {"black_box", "white_box", "mixed"}
+        normalized: list[dict[str, Any]] = []
+        seen: list[str] = []
+        for index, item in enumerate(contract):
+            if not isinstance(item, dict):
+                raise ValidationError("validation_contract entries must be objects")
+            allowed = {
+                "criterion", "scenario_ref", "method", "expected_observation",
+                "required_evidence_types", "required_capabilities",
+            }
+            unknown = sorted(set(item) - allowed)
+            if unknown:
+                raise ValidationError(
+                    "validation_contract contains unknown fields", {"fields": unknown}
+                )
+            criterion = str(item.get("criterion", "")).strip()
+            scenario_ref = str(item.get("scenario_ref", "")).strip()
+            method = str(item.get("method", "")).strip()
+            expected = str(item.get("expected_observation", "")).strip()
+            evidence_types = item.get("required_evidence_types") or []
+            required_capabilities = item.get("required_capabilities") or []
+            self._bounded_text(criterion, f"validation_contract[{index}].criterion", 2000)
+            self._bounded_text(scenario_ref, f"validation_contract[{index}].scenario_ref", 1000)
+            self._bounded_text(expected, f"validation_contract[{index}].expected_observation", 4000)
+            if method not in allowed_methods:
+                raise ValidationError("validation contract method must be black_box, white_box or mixed")
+            self._bounded_list(
+                evidence_types, f"validation_contract[{index}].required_evidence_types",
+                20, 50, required=True,
+            )
+            self._bounded_list(
+                required_capabilities,
+                f"validation_contract[{index}].required_capabilities", 20, 100,
+            )
+            if len(set(evidence_types)) != len(evidence_types):
+                raise ValidationError("required_evidence_types cannot contain duplicates")
+            seen.append(criterion)
+            normalized.append({
+                "criterion": criterion,
+                "scenario_ref": scenario_ref,
+                "method": method,
+                "expected_observation": expected,
+                "required_evidence_types": sorted(evidence_types),
+                "required_capabilities": sorted(set(required_capabilities)),
+            })
+        if len(seen) != len(set(seen)) or set(seen) != set(acceptance_criteria):
+            raise ValidationError(
+                "validation contract must cover every acceptance criterion exactly once",
+                {"missing_criteria": sorted(set(acceptance_criteria) - set(seen)),
+                 "unknown_criteria": sorted(set(seen) - set(acceptance_criteria))},
+            )
+        return normalized
+
+    def configure_validation_contract(
+        self,
+        actor: Actor,
+        ticket_id: str,
+        expected_version: int,
+        validation_contract: list[dict[str, Any]],
+        reason: str,
+    ) -> dict[str, Any]:
+        """Bind each acceptance criterion to a reproducible QA observation."""
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        self._bounded_text(reason, "reason", 2000)
+        with self.store.connection(immediate=True) as connection:
+            ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._expect_version(ticket, expected_version)
+            if TicketStatus(ticket["status"]) not in {
+                TicketStatus.BACKLOG, TicketStatus.READY, TicketStatus.BLOCKED,
+            }:
+                raise ConflictError("Validation contract cannot change during active work")
+            active_lease = connection.execute(
+                "SELECT 1 FROM leases WHERE ticket_id = ? AND expires_at > ?",
+                (ticket_id, _iso()),
+            ).fetchone()
+            if active_lease is not None:
+                raise ConflictError("Validation contract cannot change while a lease is active")
+            normalized = self._validated_validation_contract(
+                ticket["acceptance_criteria"], validation_contract
+            )
+            if ticket["status"] == TicketStatus.READY.value:
+                project = self._one(
+                    connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+                )
+                self._assert_quality_ready(
+                    project, {**ticket, "validation_contract": normalized}
+                )
+            next_version = ticket["version"] + 1
+            timestamp = _iso()
+            connection.execute(
+                "UPDATE tickets SET validation_contract = ?, version = ?, updated_at = ? "
+                "WHERE ticket_id = ?",
+                (json.dumps(normalized), next_version, timestamp, ticket_id),
+            )
+            entry_id = _id("ctx")
+            connection.execute(
+                """
+                INSERT INTO context_entries
+                    (entry_id, project_id, feature_id, ticket_id, entry_type, content,
+                     actor_id, actor_role, created_at)
+                VALUES (?, ?, ?, ?, 'validation_contract', ?, ?, ?, ?)
+                """,
+                (entry_id, project_id, ticket["feature_id"], ticket_id, reason,
+                 actor.agent_id, actor.role.value, timestamp),
+            )
+            self._event(
+                connection, actor, project_id, "ticket.validation_contract_configured",
+                "ticket", ticket_id, next_version,
+                {"scenario_count": len(normalized), "reason": reason},
+            )
+            return {"ticket": self._ticket(connection, ticket_id), "context_entry_id": entry_id}
+
+    @staticmethod
+    def _assert_quality_ready(project: dict[str, Any], ticket: dict[str, Any]) -> None:
+        profile = project.get("verification_profile") or {}
+        if profile.get("quality_policy") != "claim-evidence-v1":
+            return
+        contract = ticket.get("validation_contract") or []
+        if not contract:
+            raise ValidationError(
+                "A validation contract is required before this ticket can be ready",
+                {"reason": "validation_contract_missing", "ticket_id": ticket["ticket_id"]},
+            )
+        available = set(profile.get("capabilities") or [])
+        required = {
+            capability
+            for scenario in contract
+            for capability in scenario.get("required_capabilities", [])
+        }
+        missing = sorted(required - available)
+        if missing:
+            raise ValidationError(
+                "Project verification profile lacks capabilities required by this ticket",
+                {"reason": "verification_capabilities_missing", "capabilities": missing},
+            )
+
     def configure_skill_policy(
         self,
         actor: Actor,
@@ -432,6 +635,7 @@ class PlanningMixin:
         priority: int = 50,
         parent_ticket_id: str | None = None,
         dependency_ids: list[str] | None = None,
+        validation_contract: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         require_role(actor, Role.PLANNER, Role.ADMIN)
         self._bounded_text(ticket_id, "ticket_id", 100)
@@ -442,6 +646,10 @@ class PlanningMixin:
         self._bounded_list(acceptance_criteria, "acceptance_criteria", 30, 2000, required=True)
         self._bounded_list(preservation_constraints, "preservation_constraints", 30, 2000)
         self._bounded_list(file_scope, "file_scope", 100, 1000)
+        normalized_contract = (
+            self._validated_validation_contract(acceptance_criteria, validation_contract)
+            if validation_contract is not None else []
+        )
         if required_role not in {Role.DEVELOPER, Role.QA, Role.INTEGRATOR}:
             raise ValidationError("Ticket must target an executable role")
         dependency_ids = dependency_ids or []
@@ -452,13 +660,23 @@ class PlanningMixin:
                 project_id = self._project_for_feature(connection, feature_id)
                 require_project(actor, project_id)
                 status = TicketStatus.READY if ready else TicketStatus.BACKLOG
+                project = self._one(
+                    connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+                )
+                planned_ticket = {
+                    "ticket_id": ticket_id,
+                    "validation_contract": normalized_contract,
+                }
+                if ready:
+                    self._assert_quality_ready(project, planned_ticket)
                 connection.execute(
                     """
                     INSERT INTO tickets
                         (ticket_id, feature_id, parent_ticket_id, ticket_type, title,
                          objective, status, priority, required_role, acceptance_criteria,
+                         validation_contract,
                          preservation_constraints, file_scope, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         ticket_id,
@@ -471,6 +689,7 @@ class PlanningMixin:
                         priority,
                         required_role.value,
                         json.dumps(acceptance_criteria),
+                        json.dumps(normalized_contract),
                         json.dumps(preservation_constraints),
                         json.dumps(file_scope),
                         timestamp,
@@ -514,6 +733,10 @@ class PlanningMixin:
             self._expect_version(ticket, expected_version)
             if ticket["status"] not in {TicketStatus.BACKLOG.value, TicketStatus.BLOCKED.value}:
                 raise ConflictError("Only backlog or blocked tickets can be made ready")
+            project = self._one(
+                connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+            )
+            self._assert_quality_ready(project, ticket)
             next_version = ticket["version"] + 1
             timestamp = _iso()
             connection.execute(
@@ -621,6 +844,7 @@ class PlanningMixin:
         objective: str | None = None,
         priority: int | None = None,
         acceptance_criteria: list[str] | None = None,
+        validation_contract: list[dict[str, Any]] | None = None,
         preservation_constraints: list[str] | None = None,
         dependency_ids: list[str] | None = None,
     ) -> dict[str, Any]:
@@ -646,7 +870,7 @@ class PlanningMixin:
         if all(
             value is None
             for value in (
-                title, objective, priority, acceptance_criteria,
+                title, objective, priority, acceptance_criteria, validation_contract,
                 preservation_constraints, dependency_ids,
             )
         ):
@@ -668,6 +892,34 @@ class PlanningMixin:
             if active_lease is not None:
                 raise ConflictError(
                     "Ticket fields cannot change while a ticket has an active lease"
+                )
+
+            normalized_contract = None
+            if validation_contract is not None:
+                normalized_contract = self._validated_validation_contract(
+                    acceptance_criteria or ticket["acceptance_criteria"], validation_contract
+                )
+            elif acceptance_criteria is not None and ticket.get("validation_contract"):
+                raise ValidationError(
+                    "Changing acceptance criteria requires a replacement validation contract"
+                )
+            if ticket["status"] == TicketStatus.READY.value and (
+                acceptance_criteria is not None or normalized_contract is not None
+            ):
+                project = self._one(
+                    connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+                )
+                self._assert_quality_ready(
+                    project,
+                    {
+                        **ticket,
+                        "acceptance_criteria": acceptance_criteria or ticket["acceptance_criteria"],
+                        "validation_contract": (
+                            normalized_contract
+                            if normalized_contract is not None
+                            else ticket.get("validation_contract") or []
+                        ),
+                    },
                 )
 
             if normalized_dependency_ids is not None:
@@ -716,6 +968,10 @@ class PlanningMixin:
                 set_clauses.append("acceptance_criteria = ?")
                 params.append(json.dumps(acceptance_criteria))
                 changed_fields.append("acceptance_criteria")
+            if normalized_contract is not None:
+                set_clauses.append("validation_contract = ?")
+                params.append(json.dumps(normalized_contract))
+                changed_fields.append("validation_contract")
             if preservation_constraints is not None:
                 set_clauses.append("preservation_constraints = ?")
                 params.append(json.dumps(preservation_constraints))

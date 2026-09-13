@@ -213,6 +213,7 @@ CREATE TABLE IF NOT EXISTS projects (
     name TEXT NOT NULL,
     description TEXT NOT NULL,
     default_branch TEXT NOT NULL,
+    verification_profile TEXT NOT NULL DEFAULT '{}',
     version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -259,6 +260,7 @@ CREATE TABLE IF NOT EXISTS tickets (
     priority INTEGER NOT NULL DEFAULT 50,
     required_role TEXT NOT NULL,
     acceptance_criteria TEXT NOT NULL,
+    validation_contract TEXT NOT NULL DEFAULT '[]',
     preservation_constraints TEXT NOT NULL,
     file_scope TEXT NOT NULL,
     blocked_reason TEXT,
@@ -929,6 +931,12 @@ CHECKSUM_CLAIMED = "claimed"
 # Every declaration is valid in both dialects, and every default states what was
 # already true of the rows being migrated rather than inventing a new fact.
 ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    # Quality contracts introduced after the first local releases. Existing
+    # projects remain in legacy mode until a Planner explicitly enables the
+    # claim/evidence gate; existing tickets therefore migrate without invented
+    # test requirements.
+    ("projects", "verification_profile", "TEXT NOT NULL DEFAULT '{}'"),
+    ("tickets", "validation_contract", "TEXT NOT NULL DEFAULT '[]'"),
     # Skill and protocol compatibility, for presence rows written before it.
     ("agent_presence", "skill_manifest", "TEXT NOT NULL DEFAULT '[]'"),
     ("agent_presence", "protocol_version", "TEXT"),

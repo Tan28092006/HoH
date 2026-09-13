@@ -54,6 +54,20 @@ class FeatureCreate(StrictModel):
     priority: int = Field(default=50, ge=0, le=100)
 
 
+class VerificationProfileRequest(StrictModel):
+    capabilities: list[str] = Field(min_length=1, max_length=50)
+    quality_policy: str = Field(default="claim-evidence-v1", pattern=r"^(legacy|claim-evidence-v1)$")
+
+
+class ValidationScenarioInput(StrictModel):
+    criterion: str = Field(min_length=1, max_length=2000)
+    scenario_ref: str = Field(min_length=1, max_length=1000)
+    method: str = Field(pattern=r"^(black_box|white_box|mixed)$")
+    expected_observation: str = Field(min_length=1, max_length=4000)
+    required_evidence_types: list[str] = Field(min_length=1, max_length=20)
+    required_capabilities: list[str] = Field(default_factory=list, max_length=20)
+
+
 class TicketCreate(StrictModel):
     ticket_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9._-]+$")
     title: str = Field(min_length=1, max_length=240)
@@ -66,6 +80,13 @@ class TicketCreate(StrictModel):
     ticket_type: str = Field(default="feature_work", min_length=1, max_length=50)
     priority: int = Field(default=50, ge=0, le=100)
     ready: bool = False
+    validation_contract: list[ValidationScenarioInput] | None = None
+
+
+class ValidationContractRequest(StrictModel):
+    expected_version: int = Field(ge=1)
+    reason: str = Field(min_length=1, max_length=2000)
+    validation_contract: list[ValidationScenarioInput] = Field(min_length=1, max_length=30)
 
 
 class ClaimRequest(StrictModel):
@@ -91,6 +112,9 @@ class EvidenceInput(StrictModel):
     type: str = Field(min_length=1, max_length=50)
     observation: str = Field(min_length=1, max_length=8000)
     storage_ref: str = Field(min_length=1, max_length=1000)
+    scenario_ref: str | None = Field(default=None, max_length=1000)
+    environment_digest: str | None = Field(default=None, max_length=128)
+    storage_checksum: str | None = Field(default=None, max_length=128)
 
 
 class FindingInput(StrictModel):
@@ -302,6 +326,16 @@ def create_app(
             )
         }
 
+    @app.put("/api/v1/projects/{project_id}/verification-profile")
+    def configure_verification_profile(
+        project_id: str,
+        payload: VerificationProfileRequest,
+        actor: Actor = Depends(actor_dependency),
+    ) -> dict[str, Any]:
+        return {"data": service.configure_verification_profile(
+            actor, project_id=project_id, **payload.model_dump()
+        )}
+
     @app.post("/api/v1/projects/{project_id}/features", status_code=201)
     def create_feature(
         project_id: str,
@@ -363,6 +397,16 @@ def create_app(
         ticket_id: str, actor: Actor = Depends(actor_dependency)
     ) -> dict[str, Any]:
         return {"data": service.get_ticket_context(actor, ticket_id)}
+
+    @app.put("/api/v1/tickets/{ticket_id}/validation-contract")
+    def configure_validation_contract(
+        ticket_id: str,
+        payload: ValidationContractRequest,
+        actor: Actor = Depends(actor_dependency),
+    ) -> dict[str, Any]:
+        return {"data": service.configure_validation_contract(
+            actor, ticket_id=ticket_id, **payload.model_dump()
+        )}
 
     @app.post("/api/v1/tickets/{ticket_id}/leases", status_code=201)
     def claim(

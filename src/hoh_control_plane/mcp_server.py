@@ -592,6 +592,23 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
                 lambda: service.configure_skill_policy(actor, **arguments),
             )
 
+        @server.tool(name="planner.configure_verification_profile", structured_output=True)
+        def planner_configure_verification_profile(
+            project_id: str,
+            capabilities: list[str],
+            quality_policy: str = "claim-evidence-v1",
+        ) -> dict[str, Any]:
+            """Declare the project's portable QA equipment and evidence policy."""
+            arguments = {
+                "project_id": project_id,
+                "capabilities": capabilities,
+                "quality_policy": quality_policy,
+            }
+            return invoke(
+                "planner.configure_verification_profile", arguments,
+                lambda: service.configure_verification_profile(actor, **arguments),
+            )
+
         @server.tool(name="planner.create_project", structured_output=True)
         def planner_create_project(
             project_id: str,
@@ -652,6 +669,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             ticket_type: str = "feature_work",
             priority: int = 50,
             parent_ticket_id: str | None = None,
+            validation_contract: list[dict[str, Any]] | None = None,
             idempotency_key: str | None = None,
         ) -> dict[str, Any]:
             """Create a bounded backlog ticket for Developer, QA or Integrator work."""
@@ -668,6 +686,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
                 "ticket_type": ticket_type,
                 "priority": priority,
                 "parent_ticket_id": parent_ticket_id,
+                "validation_contract": validation_contract,
             }
             return invoke(
                 "planner.create_ticket",
@@ -686,6 +705,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
                     ticket_type=ticket_type,
                     priority=priority,
                     parent_ticket_id=parent_ticket_id,
+                    validation_contract=validation_contract,
                 ),
                 idempotency_key,
             )
@@ -699,6 +719,27 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             return invoke(
                 "planner.set_ticket_ready", arguments,
                 lambda: service.set_ticket_ready(actor, **arguments),
+                idempotency_key,
+            )
+
+        @server.tool(name="planner.configure_validation_contract", structured_output=True)
+        def planner_configure_validation_contract(
+            ticket_id: str,
+            expected_version: int,
+            validation_contract: list[dict[str, Any]],
+            reason: str,
+            idempotency_key: str | None = None,
+        ) -> dict[str, Any]:
+            """Bind every criterion to a scenario, observation and required evidence."""
+            arguments = {
+                "ticket_id": ticket_id,
+                "expected_version": expected_version,
+                "validation_contract": validation_contract,
+                "reason": reason,
+            }
+            return invoke(
+                "planner.configure_validation_contract", arguments,
+                lambda: service.configure_validation_contract(actor, **arguments),
                 idempotency_key,
             )
 
@@ -840,6 +881,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             objective: str | None = None,
             priority: int | None = None,
             acceptance_criteria: list[str] | None = None,
+            validation_contract: list[dict[str, Any]] | None = None,
             preservation_constraints: list[str] | None = None,
             dependency_ids: list[str] | None = None,
             idempotency_key: str | None = None,
@@ -853,6 +895,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
                 "objective": objective,
                 "priority": priority,
                 "acceptance_criteria": acceptance_criteria,
+                "validation_contract": validation_contract,
                 "preservation_constraints": preservation_constraints,
                 "dependency_ids": dependency_ids,
             }

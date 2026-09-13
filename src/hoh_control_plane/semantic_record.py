@@ -82,6 +82,16 @@ def render(
     lines.append("\n## What it had to satisfy\n\n")
     lines.append(_bullets(ticket.get("acceptance_criteria"), "No acceptance criteria recorded."))
 
+    contract = ticket.get("validation_contract") or []
+    if contract:
+        lines.append("\n## How it was verified\n\n")
+        for scenario in contract:
+            evidence_types = ", ".join(scenario.get("required_evidence_types") or [])
+            lines.append(
+                f"- `{scenario.get('scenario_ref', '')}` ({scenario.get('method', '')}): "
+                f"{scenario.get('expected_observation', '')}; evidence: {evidence_types}\n"
+            )
+
     constraints = ticket.get("preservation_constraints")
     if constraints:
         lines.append("\n## What it had to leave working\n\n")

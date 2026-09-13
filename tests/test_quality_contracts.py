@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from hoh_control_plane.domain import ValidationError
+from hoh_control_plane.domain import Role, ValidationError
 
 from tests.test_evidence_provenance import _candidate_waiting_for_qa
 
@@ -27,16 +27,27 @@ def _contract(criteria: list[str]) -> list[dict[str, object]]:
 def test_strict_project_refuses_ready_without_a_validation_contract(
     service, actors, seeded
 ) -> None:
+    seeded_ticket = seeded["ticket"]
+    service.configure_validation_contract(
+        actors["planner"], seeded_ticket["ticket_id"], seeded_ticket["version"],
+        _contract(seeded_ticket["acceptance_criteria"]), "Migrate existing ready work.",
+    )
     service.configure_verification_profile(
         actors["planner"],
         "project-1",
         capabilities=CAPABILITIES,
         quality_policy="claim-evidence-v1",
     )
+    ticket = service.create_ticket(
+        actors["planner"], feature_id="payment-retry", ticket_id="DEV-143",
+        title="A ticket without an evidence plan", objective="Demonstrate the gate",
+        required_role=Role.DEVELOPER, acceptance_criteria=["Observable result"],
+        preservation_constraints=[], file_scope=["src/new/**"],
+    )
 
     with pytest.raises(ValidationError, match="validation contract"):
         service.set_ticket_ready(
-            actors["planner"], seeded["ticket"]["ticket_id"], seeded["ticket"]["version"]
+            actors["planner"], ticket["ticket_id"], ticket["version"]
         )
 
 
@@ -63,7 +74,22 @@ def test_planner_contract_is_exact_and_reaches_every_role_context(
 def test_contract_rejects_missing_criteria_and_unavailable_capabilities(
     service, actors, seeded
 ) -> None:
-    ticket = seeded["ticket"]
+    seeded_ticket = seeded["ticket"]
+    existing_contract = _contract(seeded_ticket["acceptance_criteria"])
+    for scenario in existing_contract:
+        scenario["required_evidence_types"] = ["source_snapshot"]
+        scenario["required_capabilities"] = ["source_inspection"]
+    service.configure_validation_contract(
+        actors["planner"], seeded_ticket["ticket_id"], seeded_ticket["version"],
+        existing_contract, "Migrate existing ready work.",
+    )
+    ticket = service.create_ticket(
+        actors["planner"], feature_id="payment-retry", ticket_id="DEV-144",
+        title="Runtime capability gate", objective="Require declared QA equipment",
+        required_role=Role.DEVELOPER,
+        acceptance_criteria=seeded["ticket"]["acceptance_criteria"],
+        preservation_constraints=[], file_scope=["src/capability/**"],
+    )
     with pytest.raises(ValidationError, match="exactly once"):
         service.configure_validation_contract(
             actors["planner"],
@@ -74,9 +100,7 @@ def test_contract_rejects_missing_criteria_and_unavailable_capabilities(
         )
 
     service.configure_verification_profile(
-        actors["planner"],
-        "project-1",
-        capabilities=["source_inspection"],
+        actors["planner"], "project-1", capabilities=["source_inspection"],
         quality_policy="claim-evidence-v1",
     )
     configured = service.configure_validation_contract(

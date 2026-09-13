@@ -18,6 +18,21 @@ Every executable ticket must define:
 - Dependencies.
 - Write scope when the ticket changes code.
 
+Treat this ticket packet as the development document shared by Developer and
+QA, not as a summary of the Planner chat. For a new project, inventory the real
+verification equipment and call `planner.configure_verification_profile` before
+releasing work. Use portable capability names such as `build_execution`,
+`source_inspection`, `runtime_trace`, `browser_interaction`, `screenshot`,
+`audio_observation` or a domain adapter.
+
+Before `planner.set_ticket_ready`, call `planner.configure_validation_contract`.
+Cover every acceptance criterion exactly once. Each entry names a stable
+`scenario_ref`, `black_box`/`white_box`/`mixed` method, expected observable result,
+required evidence types and required capabilities. Keep at most three active
+priorities in one coherent increment when practical. A missing runner, browser,
+fixture, asset tool or runtime tracer is an infrastructure gap to provision or
+schedule; it must not silently reduce the acceptance contract.
+
 Prioritize build blockers, regressions and insufficient evidence before unrelated feature expansion. Split work by coherent observable behavior, not by file count. Do not prescribe implementation details unless they are an established project constraint.
 
 When a `BACKLOG` or `BLOCKED` ticket has incorrect write scope metadata, use

@@ -644,7 +644,40 @@ class QaMixin:
             )
             if candidate["commit_sha"] != ticket["candidate_commit"]:
                 raise ConflictError("Candidate does not match the frozen ticket artifact")
+            contract = {
+                item["criterion"]: item for item in (ticket.get("validation_contract") or [])
+            }
+            if contract:
+                for finding_data in findings:
+                    criterion = str(finding_data.get("criterion", ""))
+                    scenario = contract.get(criterion)
+                    if scenario is None:
+                        raise ValidationError(
+                            "QA finding is not bound to the ticket validation contract",
+                            {"criterion": criterion},
+                        )
+                    evidence_items = finding_data.get("evidence") or []
+                    wrong_scenarios = [
+                        item.get("scenario_ref")
+                        for item in evidence_items
+                        if item.get("scenario_ref") != scenario["scenario_ref"]
+                    ]
+                    if wrong_scenarios:
+                        raise ValidationError(
+                            "Evidence scenario_ref does not match the validation contract",
+                            {"criterion": criterion, "expected": scenario["scenario_ref"]},
+                        )
+                    supplied_types = {str(item.get("type", "")) for item in evidence_items}
+                    missing_types = sorted(
+                        set(scenario["required_evidence_types"]) - supplied_types
+                    )
+                    if missing_types:
+                        raise ValidationError(
+                            "Evidence types do not satisfy the validation contract",
+                            {"criterion": criterion, "missing_evidence_types": missing_types},
+                        )
             verified_criteria: set[str] = set()
+            evidence_records: list[dict[str, Any]] = []
             timestamp = _iso()
             for finding_data in findings:
                 evidence_items = finding_data.get("evidence") or []
@@ -723,6 +756,17 @@ class QaMixin:
                         timestamp,
                     ),
                 )
+                evidence_records.append({
+                    "finding_id": finding_id,
+                    "criterion": criterion,
+                    "status": status,
+                    "observation": finding_data.get("observation", ""),
+                    "evidence_refs": evidence_ids,
+                    "scenario_ref": (
+                        contract[criterion]["scenario_ref"] if criterion in contract
+                        else f"criterion:{criterion}"
+                    ),
+                })
             if verdict == "passed":
                 missing = set(ticket["acceptance_criteria"]) - verified_criteria
                 if missing:
@@ -824,4 +868,31 @@ class QaMixin:
                 "candidate": candidate,
                 "verdict": verdict,
                 "planner_job": planner_job,
+                "evidence_bundle": {
+                    "schema_version": "1",
+                    "candidate_id": candidate_id,
+                    "candidate_commit": candidate["commit_sha"],
+                    "verified_records": [
+                        record for record in evidence_records if record["status"] == "verified"
+                    ],
+                    "gap_records": [
+                        record for record in evidence_records if record["status"] != "verified"
+                    ],
+                    "planner_handoff": {
+                        "preservation_constraints": [
+                            record["criterion"] for record in evidence_records
+                            if record["status"] == "verified"
+                        ],
+                        "update_targets": [
+                            record["criterion"] for record in evidence_records
+                            if record["status"] != "verified"
+                        ],
+                        "validation_requirements": [
+                            contract[record["criterion"]]
+                            for record in evidence_records
+                            if record["status"] != "verified"
+                            and record["criterion"] in contract
+                        ],
+                    },
+                },
             }

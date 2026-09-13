@@ -305,6 +305,8 @@ class DiscoveryMixin:
                 "candidate:requeue",
                 "repository:configure",
                 "test_command:configure",
+                "verification_profile:configure",
+                "validation_contract:configure",
                 "skill_policy:configure",
             ],
             Role.DEVELOPER: [

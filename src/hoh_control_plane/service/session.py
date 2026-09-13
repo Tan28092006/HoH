@@ -33,7 +33,8 @@ class SessionMixin:
                 "protocol_version": "0.3.0",
                 "runtime": {"version": __version__, "qa_instrumentation": "pytest-hooks-v1",
                             "infrastructure_retry": "planner_readiness_required",
-                            "context_policy": "refresh_planning_revision_before_writes"},
+                            "context_policy": "refresh_planning_revision_before_writes",
+                            "quality_contract": "claim-evidence-v1"},
                 "capabilities": self.capabilities(actor),
                 "required_skills": ["hoh-control-plane"] + ([] if actor.role == Role.ADMIN else [f"hoh-{actor.role.value}"]),
                 "projects": [{"project_id": p["project_id"], "name": p["name"]} for p in projects[:100]],
@@ -45,6 +46,9 @@ class SessionMixin:
             if selected is None:
                 return result
             selected_id = selected["project_id"]
+            result["verification_profile"] = selected.get("verification_profile") or {
+                "schema_version": "1", "quality_policy": "legacy", "capabilities": []
+            }
             waiting = _row(connection.execute(
                 'SELECT wait_id,state,updated_at,expires_at FROM agent_event_waiters '
                 'WHERE agent_id=? AND project_id=? AND role=?',

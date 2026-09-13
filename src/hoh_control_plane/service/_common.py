@@ -50,6 +50,8 @@ _SAFE_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 JSON_FIELDS = {
     "acceptance_criteria",
+    "validation_contract",
+    "verification_profile",
     "preservation_constraints",
     "file_scope",
     "developer_claims",
@@ -135,7 +137,7 @@ GENERAL_CONTEXT_ENTRY_TYPE = "note"
 
 # Artifact identity and open findings stay in every packet, so these sections
 # are compacted to essentials rather than omitted.
-_PROTECTED_SECTIONS = frozenset({"ticket", "candidate", "known_failures"})
+_PROTECTED_SECTIONS = frozenset({"ticket", "candidate", "known_failures", "verification_profile"})
 
 # What each role cannot act safely without: a Developer that lost its branch and
 # base commit, or QA that lost the worktree it must execute in, would do damage
@@ -144,7 +146,7 @@ _ROLE_REQUIRED_SECTIONS: dict[Role, frozenset[str]] = {
     Role.DEVELOPER: frozenset({"worktree"}),
     Role.QA: frozenset({"worktree", "test_runs"}),
     Role.PLANNER: frozenset({"feature", "dependencies"}),
-    Role.INTEGRATOR: frozenset({"test_runs"}),
+    Role.INTEGRATOR: frozenset({"test_runs", "evidence_bundle"}),
 }
 
 # Least important last: compaction walks each list in reverse.
