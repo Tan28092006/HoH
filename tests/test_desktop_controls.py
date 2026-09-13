@@ -269,7 +269,25 @@ def test_gui_wait_profiles_have_long_timeout_and_unique_instances(desktop, tmp_p
     assert 'status=superseded' in prompt
     assert '--instance codex-1' in prompt
     assert result['server_name'] in prompt
+    expected_python = str(root / '.venv' / 'Scripts' / 'python.exe')
+    assert f"& '{expected_python}' -I" in prompt
+    assert str(root) + r'\\.venv' not in prompt
+    assert 'Thoát hoàn toàn Codex desktop' in prompt
+    assert 'reload task/renderer không nạp lại inventory MCP' in prompt
+    assert 'không thử MCP mặc định' in prompt
     assert client.get('/local/agents?project_id=shop').json() == {'agents': []}
+
+
+def test_desktop_host_launcher_escapes_the_calling_process_job():
+    """Restarting Codex must not tear down a HoH host launched during setup."""
+    launcher = (
+        Path(__file__).resolve().parents[1] / 'deploy' / 'desktop' / 'start-host.ps1'
+    ).read_text(encoding='utf-8')
+    assert 'Invoke-CimMethod' in launcher
+    assert 'Win32_Process' in launcher
+    assert '-WindowStyle Hidden' in launcher
+    assert 'OPENBLAS_NUM_THREADS' in launcher
+    assert 'OMP_NUM_THREADS' in launcher
 
 
 def test_claude_profile_upgrade_handles_idle_timeout_and_preserves_higher_override(desktop, tmp_path):

@@ -104,7 +104,9 @@ def install_profile(root, project, role, instance, client, home, upgrade_skills=
 
 
 def make_prompts(root, project, instance='primary'):
-    root = str(root)
+    root_path = Path(root)
+    root = str(root_path)
+    python = str(root_path / '.venv' / 'Scripts' / 'python.exe')
     role_work = {
         'planner': 'Đọc spec và context; nếu repository/test command chưa cấu hình, xác minh đường dẫn Git, default branch, workspace model và lệnh test với người dùng trước khi configure_repository/configure_test_command. Khai báo verification profile của project và validation contract claim→scenario→evidence cho từng criterion trước khi READY. Không tự coi thư mục chat là repo dự án. Không implement, QA hay merge.',
         'developer': 'Nhận một ticket Developer có lease hợp lệ. Đọc validation contract, tạo public runtime records cần cho QA nhưng không tự chứng nhận acceptance. Với colocated, chỉ sửa worktree do dev.prepare_worktree trả về; với agent_workspace, dùng clone/worktree riêng và bảo đảm SHA được chuyển tới service repo. Giữ dirty work, kiểm tra baseline, branch và scope. Submit candidate một lần rồi poll job đến terminal; không tự QA hoặc merge.',
@@ -117,10 +119,10 @@ def make_prompts(root, project, instance='primary'):
 Vai trò: {role}. Project ID bắt buộc: {project}. Instance: {instance}.
 Tôi cho phép cài/cập nhật đúng skill HoH base + {role} và thêm MCP profile này; sao lưu skill HoH cũ, giữ nguyên mọi cấu hình khác.
 
-1. Xác định client là Codex hay Claude Code. Dùng shell PowerShell chạy:
-& '{root}\\.venv\\Scripts\\python.exe' -I -m hoh_control_plane.local_agent setup --root '{root}' --project '{project}' --role {role} --instance {instance} --client codex --upgrade-skills --transport shared-http
+1. Xác định client là Codex hay Claude Code. Dùng shell PowerShell chạy đúng đường dẫn này, không tự dò hay ghép lại:
+& '{python}' -I -m hoh_control_plane.local_agent setup --root '{root}' --project '{project}' --role {role} --instance {instance} --client codex --upgrade-skills --transport shared-http
 Nếu là Claude Code, thay giá trị --client bằng claude-code. Không cài cả hai client nếu không cần.
-2. Load $hoh-control-plane và $hoh-{role}. MCP server cần dùng là hoh-{actor.agent_id}. Nếu công cụ mới chưa xuất hiện, báo cần reload MCP/restart client rồi tiếp tục; không giả vờ đã kết nối hoặc dùng server role/project khác.
+2. Load $hoh-control-plane và $hoh-{role}. MCP server cần dùng là hoh-{actor.agent_id}. Nếu server chính xác này chưa xuất hiện sau setup thì không thử MCP mặc định, không dùng server role/project khác và không chạy setup lặp lại. Với Codex: giữ HoH đang chạy, Thoát hoàn toàn Codex desktop rồi mở lại; reload task/renderer không nạp lại inventory MCP của app-server. Với Claude Code: reload cửa sổ VS Code/extension host. Sau khi client mở lại, tiếp tục ngay từ bước 3.
 3. Gọi session.bootstrap(project_id="{project}") trên đúng MCP đó. Xác minh identity.role="{role}", identity.agent_id="{actor.agent_id}", identity.project_ids chỉ chứa "{project}" và selected_project_id="{project}". Sai bất kỳ mục nào thì dừng trước khi ghi/claim.
 4. Resume lease/job hiện có trước khi nhận việc khác. Đăng ký đúng role/skills, capacity=1, kiểm tra inbox và lọc discovery theo project này. Không tự tạo lại project đã có. Nếu chính chat này đang tiếp tục sau restart/Stop/timeout thì giữ instance {instance}: lấy wait_id trong event_wait của bootstrap và truyền resume_wait_id khi gọi work.wait_for_event, kèm job_kind/job_id nếu đang nối lại job. Chỉ lệnh chờ cũ bị thay; lease, job và worktree giữ nguyên. Nếu wait đã đổi, bootstrap lại một lần; xung đột lặp lại thì báo rõ thay vì tranh giành. Khi nhận status=superseded, dừng yêu cầu cũ và không tự retry. Không kết luận có nhiều chat làm việc chỉ từ số process MCP. Chỉ một chat khác cùng role đang thực sự làm việc song song mới cần instance riêng.
 5. {role_work[role]}
@@ -128,7 +130,7 @@ Nếu là Claude Code, thay giá trị --client bằng claude-code. Không cài 
 
 7. Chế độ GUI nhận sự kiện, không cron: khi hết việc sẵn sàng, thông báo ngắn rồi gọi work.wait_for_event(project_id="{project}", timeout_seconds=43200) và để chat chờ tool. Không kết thúc lượt chỉ vì inbox rỗng, không lặp polling bằng lượt model. Khi có event, resolve context hiện tại và claim theo đúng role; event không cấp lease. Giữ event_id, truyền ack_event_id ở lần wait tiếp theo sau khi đã xử lý hoặc xác định event hết hiệu lực. Khi queue job provision/submission/qa/merge, dùng work.wait_for_event với job_kind và job_id tương ứng, sau đó gọi poll_tool trong kết quả đúng một lần để lấy trạng thái. HoH duy trì lease hợp lệ của job trong lúc tool đang chờ. Nếu cần bạn trả lời thì báo rõ và dừng; không giấu câu hỏi trong một lần chờ 12 giờ. Nếu timeout/mất kết nối, kiểm tra lại host và bootstrap; không tự tạo cron. Đóng chat, bấm Stop, sleep máy hoặc tắt HoH sẽ ngắt chờ. Cách này giữ chính chat Codex app/Claude extension; không tạo phiên CLI thay thế.
 
-Cấu hình này dùng MCP HTTP chung tại loopback, không tạo thêm Python server theo từng chat. Setup tự cấp credential riêng cho identity/project và lưu trong cấu hình client; không chép token vào chat. Mở HoH bằng icon Desktop trước khi kết nối; profile HTTP không tự bật host đã tắt. Sau khi chuyển từ stdio, reload MCP/restart client một lần. Máy khác cần bộ cấu hình HTTP riêng và đường mạng đã được cấp quyền.'''
+Cấu hình này dùng MCP HTTP chung tại loopback, không tạo thêm Python server theo từng chat. Setup tự cấp credential riêng cho identity/project và lưu trong cấu hình client; không chép token vào chat. Mở HoH bằng icon Desktop trước khi kết nối và phải để HoH chạy trong lúc restart client; profile HTTP không tự bật host đã tắt. Máy khác cần bộ cấu hình HTTP riêng và đường mạng đã được cấp quyền.'''
     return prompts
 
 
