@@ -73,6 +73,41 @@ def test_a_commit_really_on_the_branch_can_be_recorded(service, actors, landed) 
     assert result["gated"] is False
 
 
+def test_expired_lease_cannot_resurrect_recorded_landing(service, actors, landed):
+    from hoh_control_plane.domain import Actor
+    ticket = landed["ticket"]
+    claim = service.claim_ticket(actors["developer"], ticket["ticket_id"], ticket["version"], 900)
+    with service.store.connection() as connection:
+        connection.execute("UPDATE leases SET expires_at = '2000-01-01T00:00:00Z'")
+    result = _record(service, actors["integrator"], landed, version=claim["ticket"]["version"])
+    service.sweep_expired_leases(Actor("maintenance", Role.ADMIN, frozenset({"project-1"})))
+    current = service.get_ticket_context(actors["planner"], ticket["ticket_id"])["ticket"]
+    assert current["status"] == "DONE"
+    assert current["version"] == result["ticket"]["version"]
+
+
+@pytest.mark.parametrize("terminal", ["DONE", "CANCELLED", "SUPERSEDED", "BLOCKED"])
+@pytest.mark.parametrize("method", ["sweep", "claim"])
+def test_stale_lease_cannot_override_a_later_lifecycle_decision(
+    service, actors, seeded, terminal, method,
+):
+    from hoh_control_plane.domain import Actor
+    ticket = seeded["ticket"]
+    service.claim_ticket(actors["developer"], ticket["ticket_id"], ticket["version"], 900)
+    # Simulate an older server's orphaned lease in a disposable test database.
+    with service.store.connection() as connection:
+        connection.execute("UPDATE leases SET expires_at = '2000-01-01T00:00:00Z'")
+        connection.execute("UPDATE tickets SET status = ?, version = version + 1", (terminal,))
+    if method == "sweep":
+        service.sweep_expired_leases(Actor("maintenance", Role.ADMIN, frozenset({"project-1"})))
+    else:
+        with service.store.connection(immediate=True) as connection:
+            service._expire_lease(connection, ticket["ticket_id"])
+    current = service.get_ticket_context(actors["planner"], ticket["ticket_id"])["ticket"]
+    assert current["status"] == terminal
+    assert current["version"] == 3
+
+
 def test_a_commit_that_never_landed_is_refused(service, actors, landed) -> None:
     """The caller's claim that something shipped is exactly what must be checked."""
     with pytest.raises(ValidationError) as error:
