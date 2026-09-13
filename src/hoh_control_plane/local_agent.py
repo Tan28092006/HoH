@@ -105,8 +105,12 @@ def install_profile(root, project, role, instance, client, home, upgrade_skills=
 
 def make_prompts(root, project, instance='primary'):
     root_path = Path(root)
-    root = str(root_path)
-    python = str(root_path / '.venv' / 'Scripts' / 'python.exe')
+    # Forward slashes are accepted by PowerShell on Windows and survive being
+    # copied through Markdown/LLM clients.  In particular, avoid ``\.venv``:
+    # some clients normalize ``\.`` as an escape and silently turn
+    # ``HoH-service\.venv`` into the nonexistent ``HoH-service.venv``.
+    root = root_path.as_posix()
+    python = (root_path / '.venv' / 'Scripts' / 'python.exe').as_posix()
     role_work = {
         'planner': 'Đầu mỗi session, trước khi READY và sau delivery_completed, gọi planner.sync_repository để fetch toàn bộ upstream refs và so sánh local/upstream SHA cùng branch_updates; không git pull vào shared integration checkout. Nếu behind/diverged, đọc incoming diff và docs, phân loại requirement/API/schema/config/production/test/source impact rồi cập nhật requirement, dependency, validation contract và ticket lifecycle bằng bằng chứng Git mới nhất. Chỉ nạp diff chi tiết của shared branch khi branch đó gắn với ticket/candidate đang hoạt động. Nếu repository/test command chưa cấu hình, xác minh đường dẫn Git, default branch, workspace model và lệnh test với người dùng trước khi configure_repository/configure_test_command. Project verification profile chỉ là catalog cho phép. Với QA mới đăng ký execution_capabilities, kiểm tra public preflight record của đúng máy/toolchain rồi dùng planner.configure_agent_capability_profile duyệt subset có evidence refs; không duyệt từ self-report. Khi nhận planner_work loại delivery_completed, đọc đúng ticket/candidate/mainline refs, cập nhật feature/dependency/progress cần thiết, chọn increment tiếp theo rồi resolve Planner job để khép kín iteration. Remote commit không tự là QA evidence hay trạng thái DONE. Không tự coi thư mục chat là repo dự án. Không implement, QA hay merge.',
         'developer': 'Nhận một ticket Developer có lease hợp lệ. Đọc validation contract, tạo public runtime records cần cho QA nhưng không tự chứng nhận acceptance. Với colocated, chỉ sửa worktree do dev.prepare_worktree trả về; với agent_workspace, dùng clone/worktree riêng và bảo đảm SHA được chuyển tới service repo. Giữ dirty work, kiểm tra baseline, branch và scope. Ngay trước submit phải gọi ticket.get_context lại; snapshot trước work.claim đã stale vì claim tăng ticket version. Nếu submit vẫn bị context_stale, refresh packet và chỉ retry đúng một lần khi server xác nhận chưa có job/candidate và ticket, lease, worktree, SHA, contract, dependency, repository_state không đổi; dùng cùng idempotency key. Submit thành công thì poll job đến terminal; không tự QA hoặc merge.',
@@ -119,7 +123,7 @@ def make_prompts(root, project, instance='primary'):
 Vai trò: {role}. Project ID bắt buộc: {project}. Instance: {instance}.
 Tôi cho phép cài/cập nhật đúng skill HoH base + {role} và thêm MCP profile này; sao lưu skill HoH cũ, giữ nguyên mọi cấu hình khác.
 
-1. Xác định client là Codex hay Claude Code. Dùng shell PowerShell chạy đúng đường dẫn này, không tự dò hay ghép lại:
+1. Xác định client là Codex hay Claude Code. Dùng shell PowerShell chạy đúng đường dẫn này, không tự dò hay ghép lại. Dấu `/` trong đường dẫn là chủ ý và PowerShell trên Windows hỗ trợ trực tiếp:
 & '{python}' -I -m hoh_control_plane.local_agent setup --root '{root}' --project '{project}' --role {role} --instance {instance} --client codex --upgrade-skills --transport shared-http
 Nếu là Claude Code, thay giá trị --client bằng claude-code. Không cài cả hai client nếu không cần.
 2. Load $hoh-control-plane và $hoh-{role}. MCP server cần dùng là hoh-{actor.agent_id}. Nếu server chính xác này chưa xuất hiện sau setup thì không thử MCP mặc định, không dùng server role/project khác và không chạy setup lặp lại. Với Codex: giữ HoH đang chạy, Thoát hoàn toàn Codex desktop rồi mở lại; reload task/renderer không nạp lại inventory MCP của app-server. Với Claude Code: reload cửa sổ VS Code/extension host. Sau khi client mở lại, tiếp tục ngay từ bước 3.

@@ -274,9 +274,11 @@ def test_gui_wait_profiles_have_long_timeout_and_unique_instances(desktop, tmp_p
     assert 'status=superseded' in prompt
     assert '--instance codex-1' in prompt
     assert result['server_name'] in prompt
-    expected_python = str(root / '.venv' / 'Scripts' / 'python.exe')
+    expected_python = (root / '.venv' / 'Scripts' / 'python.exe').as_posix()
     assert f"& '{expected_python}' -I" in prompt
-    assert str(root) + r'\\.venv' not in prompt
+    assert f"--root '{root.as_posix()}'" in prompt
+    assert r'\.venv' not in prompt
+    assert 'Dấu `/` trong đường dẫn là chủ ý' in prompt
     assert 'Thoát hoàn toàn Codex desktop' in prompt
     assert 'reload task/renderer không nạp lại inventory MCP' in prompt
     assert 'không thử MCP mặc định' in prompt
