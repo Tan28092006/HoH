@@ -1164,6 +1164,11 @@ class IntegrationMixin:
         with self.store.connection() as connection:
             job = self._merge_job(connection, merge_job_id)
             intent = _row(connection.execute('SELECT * FROM merge_intents WHERE merge_job_id = ?', (merge_job_id,)).fetchone())
+            retirement = _row(connection.execute(
+                """SELECT * FROM ticket_retirement_requests
+                   WHERE ticket_id = ? AND status = 'PENDING'""",
+                (job["ticket_id"],),
+            ).fetchone())
         if job['status'] != 'RUNNING' or intent is None:
             return job
         repository, project, candidate = self._merge_git_inputs(merge_job_id)
@@ -1174,7 +1179,7 @@ class IntegrationMixin:
             return self._merge_needs_attention(merge_job_id, 'Repository or candidate configuration changed')
         from pathlib import Path
         path = Path(intent['repository_path'])
-        if self.git_worktrees._git(path, 'status', '--porcelain').stdout.strip():
+        if retirement is None and self.git_worktrees._git(path, 'status', '--porcelain').stdout.strip():
             return self._merge_needs_attention(merge_job_id, 'Repository has uncommitted work; it was preserved')
         head = self.git_worktrees._resolve_commit(path, 'refs/heads/' + intent['default_branch'])
         if self.git_worktrees.commit_is_on_branch(repository_path=str(path), default_branch=intent['default_branch'], commit=intent['candidate_commit']):
@@ -1186,6 +1191,12 @@ class IntegrationMixin:
                 return self._complete_queued_merge(merge_job_id, True, intent['candidate_commit'], recovered=True)
             except DomainError as error:
                 return self._merge_needs_attention(merge_job_id, str(error))
+        if retirement is not None:
+            return self.fail_queued_merge(
+                merge_job_id,
+                "Planner retired the ticket before its candidate reached the default branch; "
+                f"observed mainline remains {head}.",
+            )
         if head == intent['base_commit']:
             reason = job['error_message']
             if reason:
@@ -1221,7 +1232,13 @@ class IntegrationMixin:
                 return job
             actor = Actor(job["requested_by"], Role.INTEGRATOR, frozenset({job["project_id"]}))
             ticket = self._ticket(connection, job["ticket_id"])
-            self._require_repository_reconciled(connection, job["project_id"])
+            retirement_pending = connection.execute(
+                """SELECT 1 FROM ticket_retirement_requests
+                   WHERE ticket_id = ? AND status = 'PENDING'""",
+                (job["ticket_id"],),
+            ).fetchone() is not None
+            if not (recovered and retirement_pending):
+                self._require_repository_reconciled(connection, job["project_id"])
             if ticket["status"] != TicketStatus.MERGE_READY.value:
                 raise ConflictError("Ticket changed while the merge worker ran")
             self._expect_version(ticket, job["expected_version"])
@@ -1366,10 +1383,87 @@ class IntegrationMixin:
             )
             actor = Actor(job["requested_by"], Role.INTEGRATOR, frozenset({job["project_id"]}))
             ticket = self._ticket(connection, job["ticket_id"])
+            retirement_pending = connection.execute(
+                "SELECT 1 FROM ticket_retirement_requests "
+                "WHERE ticket_id = ? AND status = 'PENDING'",
+                (job["ticket_id"],),
+            ).fetchone() is not None
             self._event(
                 connection, actor, job["project_id"], "integration.merge_failed", "ticket",
                 job["ticket_id"], ticket["version"], {"merge_job_id": merge_job_id},
             )
+            if not retirement_pending and ticket["status"] not in {
+                TicketStatus.DONE.value,
+                TicketStatus.CANCELLED.value,
+                TicketStatus.SUPERSEDED.value,
+            }:
+                timestamp = _iso()
+                entry_id = _id("ctx")
+                connection.execute(
+                    """
+                    INSERT INTO context_entries
+                        (entry_id, project_id, feature_id, ticket_id, entry_type,
+                         content, source_ref, artifact_commit, actor_id, actor_role, created_at)
+                    VALUES (?, ?, ?, ?, 'risk', ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        entry_id,
+                        job["project_id"],
+                        ticket["feature_id"],
+                        ticket["ticket_id"],
+                        f"integration infrastructure failure: {error_message}",
+                        f"merge_job:{merge_job_id}",
+                        ticket.get("candidate_commit") or ticket.get("base_commit"),
+                        actor.agent_id,
+                        actor.role.value,
+                        timestamp,
+                    ),
+                )
+                self._close_ticket_dispatch(connection, ticket["ticket_id"], timestamp)
+                connection.execute(
+                    "DELETE FROM worktree_ownership WHERE ticket_id = ?", (ticket["ticket_id"],)
+                )
+                connection.execute(
+                    "DELETE FROM leases WHERE ticket_id = ?", (ticket["ticket_id"],)
+                )
+                next_version = int(ticket["version"]) + 1
+                connection.execute(
+                    """
+                    UPDATE tickets SET status = 'BLOCKED', blocked_reason = ?,
+                        version = ?, updated_at = ? WHERE ticket_id = ?
+                    """,
+                    (error_message, next_version, timestamp, ticket["ticket_id"]),
+                )
+                blocked = self._ticket(connection, ticket["ticket_id"])
+                self._event(
+                    connection,
+                    actor,
+                    job["project_id"],
+                    "ticket.execution_failure_reported",
+                    "ticket",
+                    ticket["ticket_id"],
+                    next_version,
+                    {
+                        "context_ref": f"ctx:entry:{entry_id}",
+                        "failure_class": "infrastructure",
+                        "merge_job_id": merge_job_id,
+                    },
+                )
+                self._open_planner_job(
+                    connection,
+                    actor,
+                    job["project_id"],
+                    blocked,
+                    job_type=PlannerJobType.INTEGRATION_CONFLICT,
+                    summary=error_message,
+                    evidence_refs=[
+                        f"context:{entry_id}",
+                        f"merge_job:{merge_job_id}",
+                    ],
+                    candidate_id=job.get("candidate_id"),
+                    context_entry_id=entry_id,
+                    artifact_commit=ticket.get("candidate_commit") or ticket.get("base_commit"),
+                )
             return self._merge_job(connection, merge_job_id)
 
     def reconcile_delivery_report(self, actor: Actor, merge_job_id: str) -> dict[str, Any]:

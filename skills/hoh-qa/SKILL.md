@@ -30,6 +30,13 @@ that the candidate ID and commit SHA remain unchanged throughout the run.
 
 Start the Planner-frozen command with `qa.run_project_tests`; it returns a durable `test_run_id` immediately. Poll `qa.get_project_test_run` or use the owned-job event wait until completion. A running-job poll renews the lease. A terminal infrastructure result can return a `BLOCKED` ticket and `lease: null`: the server has parked the unchanged candidate and notified Planner. Read the evidence reference, report the gap and stop lease/verdict writes. Do not repair HoH, change the frozen command or submit another candidate from a QA session. Planner records readiness before the same-candidate retry.
 
+QA verdicts and recognized runner infrastructure failures already create one
+Planner job; do not duplicate them. For another durable terminal QA worker/tool
+failure that returns no Planner job, call `work.report_failure` once with
+`job_kind=qa_test` and the run/evidence refs before waiting. Do not report every
+failed scenario separately: the evidence-bearing verdict is the single feedback
+unit Planner should assess.
+
 Derive checks from public requirements, acceptance criteria and preservation constraints. Use black-box observations for user-visible behavior and white-box evidence for diagnosis when appropriate.
 
 Do not read, enumerate, infer from or summarize hidden tests, benchmark scores,

@@ -294,6 +294,29 @@ CREATE TABLE IF NOT EXISTS tickets (
     updated_at TEXT NOT NULL
 );
 
+-- Planner may discover that a ticket is obsolete while an execution worker is
+-- still alive. The request is durable so authority can be revoked immediately,
+-- while a possibly-started Git merge is reconciled before the terminal ticket
+-- state is published.
+CREATE TABLE IF NOT EXISTS ticket_retirement_requests (
+    request_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
+    reconciliation_id TEXT NOT NULL REFERENCES repository_reconciliations(reconciliation_id),
+    target_status TEXT NOT NULL CHECK (target_status IN ('CANCELLED', 'SUPERSEDED')),
+    replacement_ticket_id TEXT REFERENCES tickets(ticket_id),
+    reason TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('PENDING', 'APPLIED', 'LANDED', 'FAILED')),
+    requested_at TEXT NOT NULL,
+    completed_at TEXT,
+    outcome TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ticket_retirement_one_pending
+    ON ticket_retirement_requests(ticket_id) WHERE status = 'PENDING';
+CREATE INDEX IF NOT EXISTS ticket_retirement_project_status
+    ON ticket_retirement_requests(project_id, status, requested_at);
+
 CREATE TABLE IF NOT EXISTS ticket_dependencies (
     ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
     depends_on_ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),

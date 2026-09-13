@@ -24,7 +24,7 @@ For each work item:
 9. Append concise checkpoints with `dev.append_progress` when they help a replacement agent continue. Ordinary progress, polling and a queued submission are not Planner wakeups.
 10. Verify the submitted commit/worktree is clean and within scope. Immediately before submission, call `ticket.get_context` again and use this new packet's version and `context_snapshot_id`; the snapshot used before `work.claim` is stale by construction because claiming advances the ticket version. Reconfirm lease/worktree/base/SHA, contract, dependencies and `repository_state`. Submit a real SHA with `dev.submit_candidate` once per attempt. Include a compact criterion-to-change map, commands/results/test refs, runtime traces or media manifests required by the validation contract, risks and explicitly untested paths. Retain the submission ID while detached validation/freezing continues. These Developer records enable QA observation; they never establish acceptance.
 11. While the submission is `QUEUED` or `RUNNING`, poll `dev.get_candidate_submission` with that submission ID. Polling also renews the Developer lease, so continue until the job reaches `COMPLETED` or `FAILED`.
-12. On `COMPLETED`, confirm the ticket is `QA_READY` and stop Developer work. On `FAILED`, preserve the exact worker error and current commit identity; only start a new attempt after resolving that specific failure within the ticket scope.
+12. On `COMPLETED`, confirm the ticket is `QA_READY` and stop Developer work. On `FAILED`, preserve the exact worker error and current commit identity. If it is durable and no existing response already contains a Planner job, call `work.report_failure` once with `job_kind=candidate_submission` before waiting. Only start a new attempt after resolving that specific failure within the ticket scope or receiving Planner direction.
 
 If `dev.submit_candidate` errors, is interrupted, or does not return a submission ID: record the exact error code/message verbatim (e.g. via `dev.append_progress` or directly to the user) and do not retry blindly. Re-read ticket/candidate and submission state first, since the first attempt may have queued successfully. For `context_stale` only, obtain a fresh ticket packet and compare ticket version, lease owner, assigned worktree/branch/base, candidate SHA, validation contract, dependencies and `repository_state`. If no candidate or submission job exists and none of those material inputs changed, retry exactly once with the new snapshot ID and the same idempotency key. If a job exists, resume it; if any input changed or repository freshness is unresolved, stop and route the new fact to Planner. A slow `QUEUED` or `RUNNING` job is not a blocker; keep polling it and renewing the lease.
 
@@ -42,6 +42,12 @@ the preserved worktree is evidence/recovery material and no longer authorizes a
 candidate.
 
 Do not mark your own candidate as QA-passed, modify acceptance criteria, merge a protected branch, or continue after losing the lease. Call `dev.report_blocker` only after confirming a durable failure — not a single transient error, a busy dependency, or an infra hiccup that might clear on its own; when in doubt, surface the blocker to the user instead of releasing the lease speculatively. `dev.report_blocker` releases the lease, retains exact context and returns the ticket to Planner. Never perform QA, Planner or Integrator/merge actions yourself, and do not invent a completion claim.
+
+A failed worktree provision uses `work.report_failure` with
+`job_kind=worktree_provision`. Use `dev.report_blocker` for a durable source,
+scope or contract decision while the lease is live. Do not send both routes for
+the same fact. Before any idle wait, confirm that a durable unresolved error has
+either a returned `planner_job` or exactly one failure report.
 
 If this chat becomes idle and is later resumed, call `work.inbox` again before choosing work — this is what surfaces an existing active lease for the resume check in step 3. An MCP server can queue work but cannot itself wake a stopped chat; use the host's scheduling or notification adapter when push wakeups are needed.
 

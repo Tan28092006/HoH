@@ -36,11 +36,16 @@ each exactly one evidenced disposition:
 - `rework` when current code or evidence contradicts the planned behavior.
 
 Create bounded fix, adoption or regression tickets for new gaps and list their
-IDs in the reconciliation decision. If stale work already owns a lease, use
-`planner.stop_ticket_for_reconciliation`; it revokes execution authority but
-preserves the worktree and frozen candidate. Then update or retire it. A frozen
-candidate can be cancelled/superseded only by naming the pending reconciliation,
-so ordinary cleanup cannot erase an artifact from the live lifecycle. Finish by
+IDs in the reconciliation decision. When a ticket is obsolete in any phase, use
+`planner.retire_ticket_for_reconciliation` with the pending reconciliation and
+choose `CANCELLED` or `SUPERSEDED`; name the replacement for `SUPERSEDED`. This
+revokes non-merge execution immediately and preserves the worktree, candidate and
+evidence. A RUNNING merge remains a durable `PENDING` retirement until HoH checks
+whether its SHA reached the default branch. Read it with
+`planner.get_ticket_retirement`: `APPLIED` means retired, while `LANDED` means the
+code actually landed and Planner must assess a bounded revert instead of calling
+it cancelled. Use `planner.stop_ticket_for_reconciliation` only when work remains
+valid but must pause for revision. Finish by
 calling `planner.resolve_repository_reconciliation`; the service verifies the
 decision covers every ticket that was open when the commit was observed. Never
 resolve merely to unblock the queue.
@@ -189,6 +194,17 @@ while preserving the candidate, ambiguous behavior to a Planner contract decisio
 and drift to integration/rebase. A green suite with unchecked criteria is incomplete.
 Inspect primary evidence when summaries disagree or justify an exception. Never
 waive QA merely to clear the queue or rewrite an active candidate's acceptance.
+
+Treat `developer_blocker`, `qa_failure` and `integration_conflict` Planner jobs as
+feedback into this same control cycle. Claim the job, resolve the current ticket
+packet and its narrow evidence refs, then check current Git diff and affected
+docs/spec before deciding. Retire obsolete work through the reconciliation path;
+revise its bounded contract/dependencies when needed; or call
+`planner.resume_ticket_after_failure` to atomically close the Planner job and
+route the unchanged ticket to `developer`, `qa` or `integrator`. QA/Integrator
+resume requires the current frozen candidate, and Integrator resume also requires
+existing QA verification for that candidate. Do not resolve the Planner job and
+leave a fixable ticket stranded in `BLOCKED`.
 
 For `blocked_reason` beginning `qa.infrastructure/`, retain the frozen candidate.
 After remediation is actually validated, append a `planner_decision` on that

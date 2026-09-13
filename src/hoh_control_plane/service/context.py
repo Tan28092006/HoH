@@ -141,6 +141,13 @@ class ContextMixin:
                 ).fetchone()
             )
             planning_barrier = self._repository_reconciliation_state(connection, project_id)
+            retirement = _row(connection.execute(
+                """
+                SELECT * FROM ticket_retirement_requests
+                WHERE ticket_id = ? ORDER BY requested_at DESC LIMIT 1
+                """,
+                (ticket_id,),
+            ).fetchone())
             verification_profile = project.get("verification_profile") or {
                 "schema_version": "1", "quality_policy": "legacy", "capabilities": []
             }
@@ -261,6 +268,18 @@ class ContextMixin:
                 self._relevant_branch_refs(candidate, worktree),
             ),
             "planning_barrier": planning_barrier,
+            "retirement": (
+                {
+                    "request_id": retirement["request_id"],
+                    "status": retirement["status"],
+                    "target_status": retirement["target_status"],
+                    "replacement_ticket_id": retirement.get("replacement_ticket_id"),
+                    "reason": _checkpoint(retirement["reason"]),
+                    "outcome": _checkpoint(retirement["outcome"])
+                    if retirement.get("outcome") else None,
+                }
+                if retirement else None
+            ),
             "verification_profile": verification_profile,
             "feature": feature,
             "ticket": ticket,
@@ -283,6 +302,14 @@ class ContextMixin:
             "repository_reconciliation_refs": [
                 item["observation_ref"] for item in planning_barrier["pending"]
             ],
+            "retirement": (
+                {
+                    "request_id": retirement["request_id"],
+                    "status": retirement["status"],
+                    "target_status": retirement["target_status"],
+                }
+                if retirement else None
+            ),
             "ticket_version": ticket["version"],
             "feature_version": feature["version"],
             "candidate_commit": candidate["commit_sha"] if candidate else None,
@@ -480,6 +507,23 @@ class ContextMixin:
         ]
         if observed.get("repository_reconciliation_refs", []) != current_reconciliation_refs:
             stale.append("planning_barrier")
+        retirement = _row(connection.execute(
+            """
+            SELECT * FROM ticket_retirement_requests
+            WHERE ticket_id = ? ORDER BY requested_at DESC LIMIT 1
+            """,
+            (ticket_id,),
+        ).fetchone())
+        current_retirement = (
+            {
+                "request_id": retirement["request_id"],
+                "status": retirement["status"],
+                "target_status": retirement["target_status"],
+            }
+            if retirement else None
+        )
+        if observed.get("retirement") != current_retirement:
+            stale.append("retirement")
         if observed.get("ticket_version") != ticket["version"]:
             stale.append("ticket")
         if observed.get("feature_version") != feature["version"]:

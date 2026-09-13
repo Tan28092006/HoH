@@ -88,6 +88,14 @@ polling, queued submissions, ordinary rework and the same unresolved blocker do
 not raise another. Materially new evidence updates the existing request and
 makes it eligible for one more delivery.
 
+Before becoming idle, Developer, QA or Integrator calls `work.report_failure`
+only when a durable error has no Planner job yet. The service requires the
+caller's live lease or its own terminal failed worker job, fingerprints the
+report, blocks unsafe execution and stores only a compact context/evidence
+pointer. Empty inboxes, stale context, lease/state conflicts, running jobs and a
+first transient timeout are not failure feedback. QA verdict/runner failures and
+terminal merge failures already open their Planner job automatically.
+
 `python -m hoh_control_plane.planner_wakeup --database <path>` delivers pending
 requests, and `scripts/start-scheduler.ps1` already runs it on each sweep.
 Delivery is at-least-once and acknowledges **delivery only**: the Planner job

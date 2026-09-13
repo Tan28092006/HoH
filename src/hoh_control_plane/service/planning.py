@@ -1949,6 +1949,365 @@ class PlanningMixin:
             reconciliation_id=reconciliation_id,
         )
 
+    def retire_ticket_for_reconciliation(
+        self,
+        actor: Actor,
+        ticket_id: str,
+        expected_version: int,
+        reconciliation_id: str,
+        reason: str,
+        target_status: str = TicketStatus.CANCELLED.value,
+        replacement_ticket_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Fence obsolete work in any phase and retire it after Git is certain.
+
+        Non-merge workers can be revoked immediately because they reauthorize
+        before publishing. A RUNNING merge may already have moved the default
+        branch, so its retirement remains PENDING until the supervisor reconciles
+        the durable merge intent. Artifacts and worktrees are never deleted.
+        """
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        self._bounded_text(reason, "reason", 2000)
+        if target_status not in {
+            TicketStatus.CANCELLED.value,
+            TicketStatus.SUPERSEDED.value,
+        }:
+            raise ValidationError("target_status must be CANCELLED or SUPERSEDED")
+        if target_status == TicketStatus.SUPERSEDED.value and not replacement_ticket_id:
+            raise ValidationError("SUPERSEDED retirement requires replacement_ticket_id")
+        if target_status == TicketStatus.CANCELLED.value and replacement_ticket_id is not None:
+            raise ValidationError("CANCELLED retirement cannot name a replacement ticket")
+        with self.store.connection(immediate=True) as connection:
+            ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._expect_version(ticket, expected_version)
+            reconciliation = self._require_pending_reconciliation(
+                connection, project_id, reconciliation_id
+            )
+            if ticket["status"] in {
+                TicketStatus.DONE.value,
+                TicketStatus.CANCELLED.value,
+                TicketStatus.SUPERSEDED.value,
+            }:
+                raise ConflictError("A terminal ticket cannot start a retirement request")
+            self._retirement_replacement(
+                connection, ticket_id, project_id, replacement_ticket_id
+            )
+            existing = _row(
+                connection.execute(
+                    """
+                    SELECT * FROM ticket_retirement_requests
+                    WHERE ticket_id = ? AND status = 'PENDING'
+                    """,
+                    (ticket_id,),
+                ).fetchone()
+            )
+            if existing is not None:
+                same = (
+                    existing["reconciliation_id"] == reconciliation_id
+                    and existing["target_status"] == target_status
+                    and existing.get("replacement_ticket_id") == replacement_ticket_id
+                    and existing["reason"] == reason
+                )
+                if not same:
+                    raise ConflictError("Ticket already has a different pending retirement")
+                return {
+                    "retirement": existing,
+                    "ticket": ticket,
+                    "pending_merge_reconciliation": self._ticket_has_running_merge(
+                        connection, ticket_id
+                    ),
+                }
+            timestamp = _iso()
+            request_id = _id("retire")
+            connection.execute(
+                """
+                INSERT INTO ticket_retirement_requests
+                    (request_id, project_id, ticket_id, reconciliation_id, target_status,
+                     replacement_ticket_id, reason, requested_by, status, requested_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)
+                """,
+                (
+                    request_id,
+                    project_id,
+                    ticket_id,
+                    reconciliation_id,
+                    target_status,
+                    replacement_ticket_id,
+                    reason,
+                    actor.agent_id,
+                    timestamp,
+                ),
+            )
+            self._close_ticket_dispatch(connection, ticket_id, timestamp)
+            self._fence_ticket_for_retirement(connection, ticket_id, request_id, timestamp)
+            self._event(
+                connection,
+                actor,
+                project_id,
+                "ticket.retirement_requested",
+                "ticket",
+                ticket_id,
+                ticket["version"],
+                {
+                    "request_id": request_id,
+                    "reconciliation_id": reconciliation["reconciliation_id"],
+                    "target_status": target_status,
+                    "previous_status": ticket["status"],
+                },
+            )
+        self.finalize_pending_ticket_retirements(
+            Actor("retirement-finalizer", Role.ADMIN, frozenset({"*"})),
+            request_id=request_id,
+        )
+        return self.get_ticket_retirement(actor, request_id)
+
+    def get_ticket_retirement(self, actor: Actor, request_id: str) -> dict[str, Any]:
+        """Read one retirement request and opportunistically settle it."""
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        with self.store.connection() as connection:
+            request = self._one(
+                connection,
+                "SELECT * FROM ticket_retirement_requests WHERE request_id = ?",
+                (request_id,),
+            )
+            require_project(actor, request["project_id"])
+        if request["status"] == "PENDING":
+            self.finalize_pending_ticket_retirements(
+                Actor("retirement-finalizer", Role.ADMIN, frozenset({"*"})),
+                request_id=request_id,
+            )
+        with self.store.connection() as connection:
+            request = self._one(
+                connection,
+                "SELECT * FROM ticket_retirement_requests WHERE request_id = ?",
+                (request_id,),
+            )
+            return {
+                "retirement": request,
+                "ticket": self._ticket(connection, request["ticket_id"]),
+                "pending_merge_reconciliation": self._ticket_has_running_merge(
+                    connection, request["ticket_id"]
+                ),
+            }
+
+    def finalize_pending_ticket_retirements(
+        self, actor: Actor, request_id: str | None = None
+    ) -> dict[str, Any]:
+        """Supervisor/operator settlement after every possibly-running merge stops."""
+        require_role(actor, Role.ADMIN)
+        settled: list[dict[str, Any]] = []
+        with self.store.connection(immediate=True) as connection:
+            parameters: tuple[Any, ...] = ()
+            where = "status = 'PENDING'"
+            if request_id is not None:
+                where += " AND request_id = ?"
+                parameters = (request_id,)
+            requests = [
+                _row(row) or {}
+                for row in connection.execute(
+                    f"""
+                    SELECT * FROM ticket_retirement_requests
+                    WHERE {where} ORDER BY requested_at ASC LIMIT 100
+                    """,
+                    parameters,
+                ).fetchall()
+            ]
+            for request in requests:
+                ticket_id = request["ticket_id"]
+                if self._ticket_has_running_merge(connection, ticket_id):
+                    continue
+                ticket = self._ticket(connection, ticket_id)
+                timestamp = _iso()
+                if ticket["status"] == TicketStatus.DONE.value:
+                    outcome = (
+                        "The merge reached the default branch before cancellation completed; "
+                        "the ticket remains DONE and Planner must decide whether a revert is needed."
+                    )
+                    connection.execute(
+                        """
+                        UPDATE ticket_retirement_requests
+                        SET status = 'LANDED', completed_at = ?, outcome = ?
+                        WHERE request_id = ?
+                        """,
+                        (timestamp, outcome, request["request_id"]),
+                    )
+                    self._event(
+                        connection, actor, request["project_id"],
+                        "ticket.retirement_landed", "ticket", ticket_id,
+                        ticket["version"], {"request_id": request["request_id"]},
+                    )
+                    settled.append(self._one(
+                        connection,
+                        "SELECT * FROM ticket_retirement_requests WHERE request_id = ?",
+                        (request["request_id"],),
+                    ))
+                    continue
+                if ticket["status"] in {
+                    TicketStatus.CANCELLED.value,
+                    TicketStatus.SUPERSEDED.value,
+                }:
+                    final_status = (
+                        "APPLIED" if ticket["status"] == request["target_status"] else "FAILED"
+                    )
+                    connection.execute(
+                        """
+                        UPDATE ticket_retirement_requests
+                        SET status = ?, completed_at = ?, outcome = ? WHERE request_id = ?
+                        """,
+                        (
+                            final_status,
+                            timestamp,
+                            f"Ticket was already terminal as {ticket['status']}.",
+                            request["request_id"],
+                        ),
+                    )
+                    settled.append(self._one(
+                        connection,
+                        "SELECT * FROM ticket_retirement_requests WHERE request_id = ?",
+                        (request["request_id"],),
+                    ))
+                    continue
+                self._fence_ticket_for_retirement(
+                    connection, ticket_id, request["request_id"], timestamp
+                )
+                next_version = int(ticket["version"]) + 1
+                connection.execute(
+                    """
+                    UPDATE tickets
+                    SET status = ?, blocked_reason = NULL, version = ?, updated_at = ?
+                    WHERE ticket_id = ?
+                    """,
+                    (request["target_status"], next_version, timestamp, ticket_id),
+                )
+                entry_id = _id("ctx")
+                connection.execute(
+                    """
+                    INSERT INTO context_entries
+                        (entry_id, project_id, feature_id, ticket_id, entry_type,
+                         content, source_ref, artifact_commit, actor_id, actor_role, created_at)
+                    VALUES (?, ?, ?, ?, 'planner_decision', ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        entry_id,
+                        request["project_id"],
+                        ticket["feature_id"],
+                        ticket_id,
+                        (
+                            request["reason"]
+                            + (
+                                f" Replacement ticket: {request['replacement_ticket_id']}."
+                                if request.get("replacement_ticket_id") else ""
+                            )
+                        ),
+                        f"retirement:{request['request_id']}",
+                        ticket.get("candidate_commit") or ticket.get("base_commit"),
+                        request["requested_by"],
+                        Role.PLANNER.value,
+                        timestamp,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE ticket_retirement_requests
+                    SET status = 'APPLIED', completed_at = ?, outcome = ?
+                    WHERE request_id = ?
+                    """,
+                    (
+                        timestamp,
+                        f"Ticket retired as {request['target_status']}; mutable artifacts were preserved.",
+                        request["request_id"],
+                    ),
+                )
+                open_planner_jobs = [
+                    str(row["planner_job_id"])
+                    for row in connection.execute(
+                        """
+                        SELECT planner_job_id FROM planner_jobs
+                        WHERE ticket_id = ? AND status IN ('READY', 'IN_PROGRESS')
+                        """,
+                        (ticket_id,),
+                    ).fetchall()
+                ]
+                if open_planner_jobs:
+                    placeholders = ",".join("?" for _ in open_planner_jobs)
+                    connection.execute(
+                        f"DELETE FROM planner_job_leases WHERE planner_job_id IN ({placeholders})",
+                        tuple(open_planner_jobs),
+                    )
+                    connection.execute(
+                        f"""
+                        UPDATE planner_jobs SET status = 'RESOLVED', resolution = ?,
+                            resolved_by = ?, resolved_at = ?, updated_at = ?
+                        WHERE planner_job_id IN ({placeholders})
+                        """,
+                        (
+                            f"Ticket retired by {request['request_id']}.",
+                            request["requested_by"],
+                            timestamp,
+                            timestamp,
+                            *open_planner_jobs,
+                        ),
+                    )
+                self._event(
+                    connection,
+                    actor,
+                    request["project_id"],
+                    "ticket.retirement_applied",
+                    "ticket",
+                    ticket_id,
+                    next_version,
+                    {
+                        "request_id": request["request_id"],
+                        "target_status": request["target_status"],
+                        "context_ref": f"ctx:entry:{entry_id}",
+                        "resolved_planner_jobs": open_planner_jobs,
+                    },
+                )
+                settled.append(self._one(
+                    connection,
+                    "SELECT * FROM ticket_retirement_requests WHERE request_id = ?",
+                    (request["request_id"],),
+                ))
+        return {"settled": settled, "count": len(settled)}
+
+    @staticmethod
+    def _ticket_has_running_merge(connection: Connection, ticket_id: str) -> bool:
+        return connection.execute(
+            "SELECT 1 FROM merge_jobs WHERE ticket_id = ? AND status = 'RUNNING'",
+            (ticket_id,),
+        ).fetchone() is not None
+
+    def _fence_ticket_for_retirement(
+        self, connection: Connection, ticket_id: str, request_id: str, timestamp: str
+    ) -> None:
+        message = (
+            f"Planner retirement {request_id} revoked execution; mutable artifacts remain preserved."
+        )
+        for table in ("worktree_provision_jobs", "candidate_submission_jobs"):
+            connection.execute(
+                f"""
+                UPDATE {table} SET status = 'FAILED', completed_at = ?, error_message = ?
+                WHERE ticket_id = ? AND status IN ('QUEUED', 'RUNNING')
+                """,
+                (timestamp, message, ticket_id),
+            )
+        connection.execute(
+            """
+            UPDATE qa_test_jobs SET status = 'STALE', completed_at = ?, error_message = ?
+            WHERE ticket_id = ? AND status IN ('QUEUED', 'RUNNING')
+            """,
+            (timestamp, message, ticket_id),
+        )
+        connection.execute(
+            """
+            UPDATE merge_jobs SET status = 'FAILED', completed_at = ?, error_message = ?
+            WHERE ticket_id = ? AND status = 'QUEUED'
+            """,
+            (timestamp, message, ticket_id),
+        )
+        connection.execute("DELETE FROM worktree_ownership WHERE ticket_id = ?", (ticket_id,))
+        connection.execute("DELETE FROM leases WHERE ticket_id = ?", (ticket_id,))
+
     def supersede_ticket(
         self,
         actor: Actor,

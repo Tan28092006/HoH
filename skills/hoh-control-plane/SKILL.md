@@ -5,7 +5,7 @@ description: Use a Harness Control Plane MCP to discover role-appropriate engine
 
 # Harness Control Plane
 
-Protocol revision: 2026-09-13. Load this base and only the assigned role skill.
+Protocol revision: 2026-09-14. Load this base and only the assigned role skill.
 Read conditional references only when applicable. Server capabilities and gates
 remain authoritative; skill guidance does not create runtime enforcement.
 
@@ -103,8 +103,20 @@ Queue submission/test/merge once and retain its ID. In event mode, wait on that
 job with `work.wait_for_event`, then retrieve its result once through the named
 poll tool. For older servers without event waiting, honor retry hints and space
 polls roughly 10-30 seconds within the lease-renewal window.
+Before an execution role enters an idle `work.wait_for_event`, it must report one
+unresolved durable execution failure through `work.report_failure` if no existing
+role tool already returned a Planner job. Report terminal/reproducible source,
+contract, infrastructure, dependency, integration, security/data failures with
+their failed job and evidence references. Do not report an empty inbox,
+`context_stale`, lease/state conflict, a first transient transport timeout, a job
+that is still running, or each assertion in a QA batch separately. Identical
+reports deduplicate to one compact context pointer and one open Planner job.
 Presence heartbeat is not a ticket heartbeat. If acknowledgment is lost, reconcile
 ticket/candidate/job state before retrying. Reuse an idempotency key only where the
 schema supports it. Never invent tools or repair state with direct SQL.
 Report stalled work with job ID, last progress and error; elapsed time alone does
 not prove failure. Refresh after conflicts, candidate changes or lease expiry.
+If the packet contains a pending or applied `retirement`, stop immediately. A
+Planner retirement revokes execution authority in every phase while preserving
+the worktree, candidate and evidence for audit; an agent must never recreate its
+lease or resubmit that artifact.

@@ -19,7 +19,7 @@ single-machine benchmark setup.
 | Claim -> observe -> assess; verified and gap sets are disjoint | Verdict validation requires every contracted criterion and evidence type. Findings use verified, failed, flaky or insufficient-evidence status and materialize `verified_records` and `gap_records`. | Enforced |
 | Preserve public execution records, runtime identity and traces | The runner records command digest, actual child manifest, resolved source, candidate commit, exit/timeout/duration, capture/termination status, environment digest, storage reference and checksum. Large logs/media stay in evidence storage. | Enforced for the registered runner; exploratory domain tools attach records through evidence references |
 | Equip QA with project/build/runtime/domain/visual/task-specific tools | The project verification profile declares intended equipment. Every QA session registers what it checked, while Planner/operator independently approves the subset backed by public preflight evidence. Strict tickets are neither offered nor claimable unless required capabilities are both declared and approved. UI contracts can require browser trace, screenshot and interaction capabilities. | Enforced routing, approval and claim gates; adapters remain project-specific |
-| Return compact evidence to the next Planner | QA handoff carries preservation constraints, update targets and validation requirements. A successful gated merge now creates exactly one durable `delivery_completed` Planner report; recovery is idempotent. | Enforced |
+| Return compact evidence to the next Planner | QA handoff carries preservation constraints, update targets and validation requirements. Successful delivery and durable Developer/QA/Integrator failures create deduplicated Planner jobs containing typed evidence pointers; they do not copy full logs into context. | Enforced |
 | Re-plan from the real artifact at every iteration boundary | Every newly observed commit opens a durable repository reconciliation. Planner reviews each commit and classifies every ticket that was open at observation time before READY, claim, Developer submission or integration can continue. | Enforced by runtime barrier; semantic dispositions remain Planner judgement |
 | Emit one artifact commit per Developer iteration | Candidate Git verification accepts only one ordinary commit whose parent is the frozen base or the previously assessed rework candidate; multi-commit ranges and merge commits fail before QA. QA rejection and integration completion/failure atomically open the next Planner barrier. | Enforced |
 | Keep evaluator-only information outside the development loop | Role contracts forbid hidden tests, scores, private rubrics/formulas and evaluator rationale in tickets or evidence. | Contracted; a general-purpose service cannot automatically classify arbitrary pasted text |
@@ -38,6 +38,9 @@ and machines work concurrently:
 - authenticated shared HTTP and event waits for GUI sessions;
 - repository observations for every remote branch without pulling or changing
   the shared integration checkout.
+- a durable, filtered failure return path from every execution role to Planner;
+- reconciliation-bound retirement that revokes stale work in any phase and
+  checks an already-running merge before recording the terminal disposition.
 
 The Planner fetches all remote branch heads at session start, before READY, and
 after a delivery report. Detailed branch diffs enter a ticket only when that

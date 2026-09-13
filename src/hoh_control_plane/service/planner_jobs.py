@@ -5,11 +5,14 @@ from hoh_control_plane.service._common import (
     Any,
     AuthorizationError,
     ConflictError,
+    CLOSED_TICKET_STATUSES,
+    hashlib,
     InterventionSeverity,
     InterventionStatus,
     PlannerJobStatus,
     PlannerJobType,
     Role,
+    TicketStatus,
     ValidationError,
     _id,
     _iso,
@@ -134,6 +137,386 @@ class PlannerJobMixin:
             artifact_commit=artifact_commit,
         )
         return opened
+
+    def report_execution_failure(
+        self,
+        actor: Actor,
+        project_id: str,
+        ticket_id: str,
+        failure_class: str,
+        summary: str,
+        evidence_refs: list[str] | None = None,
+        job_kind: str | None = None,
+        job_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Escalate one durable execution failure before an agent becomes idle.
+
+        Expected conflicts, stale context, empty inboxes and first transient
+        errors do not belong here. A report needs either the caller's live lease
+        or a terminal worker job owned by the caller. Identical reports reuse one
+        context pointer and one open Planner job.
+        """
+        require_role(actor, Role.DEVELOPER, Role.QA, Role.INTEGRATOR)
+        require_project(actor, project_id)
+        allowed_classes = {
+            "source_or_contract",
+            "infrastructure",
+            "dependency",
+            "integration_conflict",
+            "security_or_data",
+            "unknown_durable",
+        }
+        if failure_class not in allowed_classes:
+            raise ValidationError(
+                "failure_class must identify a durable source/contract, infrastructure, "
+                "dependency, integration, security/data or unknown failure"
+            )
+        self._bounded_text(summary, "summary", 4000)
+        evidence_refs = evidence_refs or []
+        self._bounded_list(evidence_refs, "evidence_refs", 50, 1000)
+        if (job_kind is None) != (job_id is None):
+            raise ValidationError("job_kind and job_id must be supplied together")
+        with self.store.connection(immediate=True) as connection:
+            ticket, actual_project_id = self._authorized_ticket(connection, actor, ticket_id)
+            if actual_project_id != project_id:
+                raise ValidationError("Ticket does not belong to project_id")
+            if connection.execute(
+                "SELECT 1 FROM ticket_retirement_requests "
+                "WHERE ticket_id = ? AND status = 'PENDING'",
+                (ticket_id,),
+            ).fetchone() is not None:
+                raise ConflictError("Planner retirement is already handling this ticket")
+            source_ref: str
+            if job_kind is not None and job_id is not None:
+                jobs = {
+                    "worktree_provision": ("worktree_provision_jobs", "provision_id", {"FAILED"}),
+                    "candidate_submission": ("candidate_submission_jobs", "submission_id", {"FAILED"}),
+                    "qa_test": ("qa_test_jobs", "test_run_id", {"FAILED", "STALE"}),
+                    "merge": ("merge_jobs", "merge_job_id", {"FAILED"}),
+                }
+                selected = jobs.get(job_kind)
+                if selected is None:
+                    raise ValidationError(
+                        "job_kind must be worktree_provision, candidate_submission, qa_test or merge"
+                    )
+                table, key, terminal = selected
+                job = _row(connection.execute(
+                    f"SELECT * FROM {table} WHERE {key} = ?", (job_id,)
+                ).fetchone())
+                if (
+                    job is None
+                    or job["ticket_id"] != ticket_id
+                    or job["project_id"] != project_id
+                    or job["requested_by"] != actor.agent_id
+                ):
+                    raise AuthorizationError("Failure job does not belong to this agent and ticket")
+                if job["status"] not in terminal:
+                    raise ConflictError("Only a terminal failed worker job can be reported")
+                if "planner retir" in str(job.get("error_message") or "").lower():
+                    raise ConflictError("Planner-requested retirement is not an execution failure")
+                source_ref = f"{job_kind}_job:{job_id}"
+            else:
+                lease = _row(connection.execute(
+                    """
+                    SELECT * FROM leases
+                    WHERE ticket_id = ? AND agent_id = ? AND role = ? AND expires_at > ?
+                    """,
+                    (ticket_id, actor.agent_id, actor.role.value, _iso()),
+                ).fetchone())
+                if lease is None:
+                    raise ConflictError(
+                        "A failure without a terminal job requires this agent's live ticket lease"
+                    )
+                active_worker = any(
+                    connection.execute(
+                        f"SELECT 1 FROM {table} WHERE ticket_id = ? AND status IN ('QUEUED', 'RUNNING')",
+                        (ticket_id,),
+                    ).fetchone() is not None
+                    for table in (
+                        "worktree_provision_jobs",
+                        "candidate_submission_jobs",
+                        "qa_test_jobs",
+                        "merge_jobs",
+                    )
+                )
+                if active_worker:
+                    raise ConflictError(
+                        "Poll the active worker to a terminal result before reporting its failure"
+                    )
+                source_ref = f"lease:{lease['lease_id']}"
+            fingerprint = hashlib.sha256(
+                json.dumps(
+                    {
+                        "project_id": project_id,
+                        "ticket_id": ticket_id,
+                        "role": actor.role.value,
+                        "failure_class": failure_class,
+                        "summary": " ".join(summary.split()),
+                    },
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+            failure_ref = f"failure:{fingerprint}"
+            context = _row(connection.execute(
+                """
+                SELECT * FROM context_entries
+                WHERE ticket_id = ? AND entry_type = 'risk' AND source_ref = ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (ticket_id, failure_ref),
+            ).fetchone())
+            deduplicated = context is not None
+            timestamp = _iso()
+            if context is None:
+                if TicketStatus(ticket["status"]) in CLOSED_TICKET_STATUSES or (
+                    ticket["status"] == TicketStatus.DONE.value
+                ):
+                    raise ConflictError("A terminal ticket cannot receive an execution failure")
+                entry_id = _id("ctx")
+                connection.execute(
+                    """
+                    INSERT INTO context_entries
+                        (entry_id, project_id, feature_id, ticket_id, entry_type,
+                         content, source_ref, artifact_commit, actor_id, actor_role, created_at)
+                    VALUES (?, ?, ?, ?, 'risk', ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        entry_id, project_id, ticket["feature_id"], ticket_id,
+                        f"{failure_class}: {summary}", failure_ref,
+                        ticket.get("candidate_commit") or ticket.get("base_commit"),
+                        actor.agent_id, actor.role.value, timestamp,
+                    ),
+                )
+                context = self._one(
+                    connection, "SELECT * FROM context_entries WHERE entry_id = ?", (entry_id,)
+                )
+                if ticket["status"] not in {
+                    TicketStatus.BLOCKED.value,
+                    TicketStatus.REWORK.value,
+                }:
+                    self._close_ticket_dispatch(connection, ticket_id, timestamp)
+                    connection.execute("DELETE FROM worktree_ownership WHERE ticket_id = ?", (ticket_id,))
+                    connection.execute("DELETE FROM leases WHERE ticket_id = ?", (ticket_id,))
+                    next_version = int(ticket["version"]) + 1
+                    connection.execute(
+                        """
+                        UPDATE tickets SET status = 'BLOCKED', blocked_reason = ?,
+                            version = ?, updated_at = ? WHERE ticket_id = ?
+                        """,
+                        (summary, next_version, timestamp, ticket_id),
+                    )
+                    ticket = self._ticket(connection, ticket_id)
+                    self._event(
+                        connection, actor, project_id, "ticket.execution_failure_reported",
+                        "ticket", ticket_id, next_version,
+                        {"context_ref": f"ctx:entry:{entry_id}", "failure_class": failure_class},
+                    )
+            job_type = {
+                Role.DEVELOPER: PlannerJobType.DEVELOPER_BLOCKER,
+                Role.QA: PlannerJobType.QA_FAILURE,
+                Role.INTEGRATOR: PlannerJobType.INTEGRATION_CONFLICT,
+            }[actor.role]
+            planner_job = self._open_planner_job(
+                connection,
+                actor,
+                project_id,
+                self._ticket(connection, ticket_id),
+                job_type=job_type,
+                summary=summary,
+                evidence_refs=list(dict.fromkeys([
+                    f"context:{context['entry_id']}", source_ref, *evidence_refs
+                ])),
+                context_entry_id=context["entry_id"],
+                severity=(
+                    InterventionSeverity.HIGH
+                    if failure_class in {
+                        "source_or_contract", "integration_conflict", "security_or_data"
+                    }
+                    else InterventionSeverity.NORMAL
+                ),
+                artifact_commit=ticket.get("candidate_commit") or ticket.get("base_commit"),
+            )
+            return {
+                "ticket": self._ticket(connection, ticket_id),
+                "failure_context": context,
+                "planner_job": planner_job,
+                "deduplicated": deduplicated,
+                "next_action": "wait_for_planner_direction",
+            }
+
+    def resume_ticket_after_failure(
+        self,
+        actor: Actor,
+        planner_job_id: str,
+        lease_id: str,
+        expected_version: int,
+        resume_role: str,
+        resolution: str,
+    ) -> dict[str, Any]:
+        """Resolve one failure decision and requeue the ticket to the chosen role.
+
+        The Planner chooses the next role only after reconciling current Git,
+        specifications and the failure evidence. The existing immutable candidate
+        is retained for QA or Integrator recovery; routing back to Developer marks
+        the ticket REWORK when such a candidate exists.
+        """
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        self._bounded_text(resolution, "resolution", 4000)
+        try:
+            target_role = Role(resume_role)
+        except ValueError as error:
+            raise ValidationError(
+                "resume_role must be developer, qa or integrator"
+            ) from error
+        if target_role not in {Role.DEVELOPER, Role.QA, Role.INTEGRATOR}:
+            raise ValidationError("resume_role must be developer, qa or integrator")
+        with self.store.connection(immediate=True) as connection:
+            job = self._planner_job(connection, planner_job_id)
+            require_project(actor, job["project_id"])
+            if job["job_type"] == PlannerJobType.DELIVERY_COMPLETED.value:
+                raise ConflictError("A delivery-completed review cannot resume execution")
+            planner_lease = self._one(
+                connection,
+                "SELECT * FROM planner_job_leases WHERE lease_id = ?",
+                (lease_id,),
+            )
+            if planner_lease["planner_job_id"] != planner_job_id:
+                raise AuthorizationError("Lease does not cover this Planner job")
+            if planner_lease["agent_id"] != actor.agent_id:
+                raise AuthorizationError("Planner job lease belongs to another actor")
+            if datetime.fromisoformat(
+                planner_lease["expires_at"].replace("Z", "+00:00")
+            ) <= _now():
+                raise ConflictError("Planner job lease has expired")
+
+            ticket = self._ticket(connection, job["ticket_id"])
+            self._expect_version(ticket, expected_version)
+            if ticket["status"] not in {
+                TicketStatus.BLOCKED.value,
+                TicketStatus.REWORK.value,
+            }:
+                raise ConflictError("Only BLOCKED or REWORK work can be resumed after failure")
+            if connection.execute(
+                "SELECT 1 FROM ticket_retirement_requests "
+                "WHERE ticket_id = ? AND status = 'PENDING'",
+                (ticket["ticket_id"],),
+            ).fetchone() is not None:
+                raise ConflictError("Ticket has a pending Planner retirement")
+            if connection.execute(
+                "SELECT 1 FROM leases WHERE ticket_id = ?",
+                (ticket["ticket_id"],),
+            ).fetchone() is not None:
+                raise ConflictError("Ticket still has an active execution lease")
+            for table in (
+                "worktree_provision_jobs",
+                "candidate_submission_jobs",
+                "qa_test_jobs",
+                "merge_jobs",
+            ):
+                if connection.execute(
+                    f"SELECT 1 FROM {table} WHERE ticket_id = ? "
+                    "AND status IN ('QUEUED', 'RUNNING')",
+                    (ticket["ticket_id"],),
+                ).fetchone() is not None:
+                    raise ConflictError("Ticket still has an active worker job")
+
+            candidate = _row(connection.execute(
+                "SELECT * FROM candidates WHERE ticket_id = ? "
+                "ORDER BY submitted_at DESC LIMIT 1",
+                (ticket["ticket_id"],),
+            ).fetchone())
+            if target_role is Role.DEVELOPER:
+                next_status = (
+                    TicketStatus.REWORK if candidate is not None else TicketStatus.READY
+                )
+            elif target_role is Role.QA:
+                if candidate is None or candidate["commit_sha"] != ticket.get("candidate_commit"):
+                    raise ConflictError(
+                        "QA recovery requires the ticket's current immutable candidate"
+                    )
+                next_status = TicketStatus.QA_READY
+            else:
+                if candidate is None or candidate["commit_sha"] != ticket.get("candidate_commit"):
+                    raise ConflictError(
+                        "Integrator recovery requires the ticket's current immutable candidate"
+                    )
+                verified = connection.execute(
+                    "SELECT 1 FROM audit_events WHERE aggregate_id = ? "
+                    "AND event_type = 'ticket.verified' AND payload LIKE ?",
+                    (ticket["ticket_id"], f'%"{candidate["candidate_id"]}"%'),
+                ).fetchone()
+                if verified is None:
+                    raise ConflictError(
+                        "Integrator recovery requires QA verification for the current candidate"
+                    )
+                next_status = TicketStatus.VERIFIED
+
+            timestamp = _iso()
+            next_version = int(ticket["version"]) + 1
+            entry_id = _id("ctx")
+            connection.execute(
+                """
+                INSERT INTO context_entries
+                    (entry_id, project_id, feature_id, ticket_id, entry_type,
+                     content, source_ref, artifact_commit, actor_id, actor_role, created_at)
+                VALUES (?, ?, ?, ?, 'planner_decision', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry_id,
+                    job["project_id"],
+                    ticket["feature_id"],
+                    ticket["ticket_id"],
+                    (
+                        f"Planner resumed ticket for {target_role.value} after failure review: "
+                        f"{resolution}"
+                    ),
+                    f"planner_job:{planner_job_id}",
+                    ticket.get("candidate_commit") or ticket.get("base_commit"),
+                    actor.agent_id,
+                    actor.role.value,
+                    timestamp,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE tickets SET status = ?, blocked_reason = NULL,
+                    version = ?, updated_at = ? WHERE ticket_id = ?
+                """,
+                (next_status.value, next_version, timestamp, ticket["ticket_id"]),
+            )
+            connection.execute(
+                """
+                UPDATE planner_jobs
+                SET status = 'RESOLVED', resolution = ?, resolved_by = ?,
+                    resolved_at = ?, updated_at = ? WHERE planner_job_id = ?
+                """,
+                (resolution, actor.agent_id, timestamp, timestamp, planner_job_id),
+            )
+            connection.execute(
+                "DELETE FROM planner_job_leases WHERE lease_id = ?", (lease_id,)
+            )
+            self._event(
+                connection,
+                actor,
+                job["project_id"],
+                "ticket.failure_resolved",
+                "ticket",
+                ticket["ticket_id"],
+                next_version,
+                {
+                    "planner_job_id": planner_job_id,
+                    "resume_role": target_role.value,
+                    "context_ref": f"ctx:entry:{entry_id}",
+                },
+            )
+            resumed = self._ticket(connection, ticket["ticket_id"])
+            self._queue_ticket(connection, actor, job["project_id"], resumed)
+            return {
+                "ticket": resumed,
+                "planner_job": self._planner_job(connection, planner_job_id),
+                "context_ref": f"ctx:entry:{entry_id}",
+                "resume_role": target_role.value,
+            }
 
     def _report_delivery_completed(
         self,

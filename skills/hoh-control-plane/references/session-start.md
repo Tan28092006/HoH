@@ -48,6 +48,14 @@ merely because the inbox is empty. This is an ordinary asynchronous MCP tool,
 usable from Codex app and Claude Code's VS Code extension without creating a
 separate CLI conversation or a recurring model task.
 
+Immediately before an execution role waits, inspect its last terminal operation.
+If a durable/reproducible error still has no Planner job, call
+`work.report_failure` once with its failed job and narrow evidence references.
+Do not report normal control flow (`context_stale`, lease/state conflict, empty
+inbox), a still-running job or the first transient timeout. Existing QA verdict,
+runner-infrastructure and merge-failure paths already notify Planner and must not
+be duplicated.
+
 The host sends a wake hint after a committed change. The open tool resolves
 authorized durable work, reserves one notification recipient, and returns a
 small event. The event is not ownership: refresh context, validate readiness,

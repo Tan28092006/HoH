@@ -33,6 +33,10 @@ seconds and pass the previous `ack_event_id` after handling an event. At a
 queued provisioning, candidate submission, QA or merge job, specify `job_kind`
 and `job_id`. The host waits for that owned job and renews its still-valid
 lease while the connection remains alive; the client reads the final job once.
+Before an execution role enters the idle wait, any durable terminal failure that
+has not already produced a Planner job is sent once with `work.report_failure`.
+Normal conflicts, empty queues, transient timeouts and running jobs do not create
+failure context or wake Planner.
 
 The local **Phiên agent** dialog shows waiting, notified, timed-out and expired
 connections. It reports HoH-observed connection state, not undocumented internal

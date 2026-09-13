@@ -144,7 +144,14 @@ GENERAL_CONTEXT_ENTRY_TYPE = "note"
 # Artifact identity and open findings stay in every packet, so these sections
 # are compacted to essentials rather than omitted.
 _PROTECTED_SECTIONS = frozenset(
-    {"ticket", "candidate", "known_failures", "verification_profile", "planning_barrier"}
+    {
+        "ticket",
+        "candidate",
+        "known_failures",
+        "verification_profile",
+        "planning_barrier",
+        "retirement",
+    }
 )
 
 # What each role cannot act safely without: a Developer that lost its branch and

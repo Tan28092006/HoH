@@ -190,11 +190,13 @@ class Supervisor:
                 self.service.reconcile_merge_job(ADMIN, identifier)
             elif job and (job['status'] == 'RUNNING' or (job['status'] == 'QUEUED' and outcome != 'exit 0')):
                 getattr(self.service, JOBS[kind][3])(identifier, 'Worker stopped before publishing a result: ' + outcome)
+            self.service.finalize_pending_ticket_retirements(ADMIN)
             with self.service.store.connection(immediate=True) as db:
                 db.execute("UPDATE worker_executions SET status = 'FINISHED', completed_at = ?, outcome = ? WHERE execution_id = ?",
                            (now(), outcome, execution_id))
 
     def tick(self):
+        self.service.finalize_pending_ticket_retirements(ADMIN)
         for key, future in list(self.active.items()):
             if future.done():
                 # State survives worker errors; a failure must not kill the dispatcher.

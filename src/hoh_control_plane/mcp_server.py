@@ -403,6 +403,41 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
                     project_id=project_id, input_summary=_safe_input_summary(arguments),
                     outcome=outcome, error_code=error_code)
 
+    if actor.role in {Role.DEVELOPER, Role.QA, Role.INTEGRATOR}:
+        @server.tool(name="work.report_failure", structured_output=True)
+        def work_report_failure(
+            project_id: str,
+            ticket_id: str,
+            failure_class: str,
+            summary: str,
+            evidence_refs: list[str] | None = None,
+            job_kind: str | None = None,
+            job_id: str | None = None,
+            idempotency_key: str | None = None,
+        ) -> dict[str, Any]:
+            """Report one durable execution failure to Planner before becoming idle.
+
+            Use this only after a repeatable or terminal error. Do not report an
+            empty inbox, stale context, lease/state conflict or first transient
+            transport timeout. Supply a failed worker job when the error came
+            from provision, submission, QA execution or merge.
+            """
+            arguments = {
+                "project_id": project_id,
+                "ticket_id": ticket_id,
+                "failure_class": failure_class,
+                "summary": summary,
+                "evidence_refs": evidence_refs,
+                "job_kind": job_kind,
+                "job_id": job_id,
+            }
+            return invoke(
+                "work.report_failure",
+                arguments,
+                lambda: service.report_execution_failure(actor, **arguments),
+                idempotency_key,
+            )
+
     @server.tool(name="work.discover", structured_output=True)
     def work_discover(
         project_id: str,
@@ -1006,6 +1041,70 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
                 arguments,
                 lambda: service.stop_ticket_for_reconciliation(actor, **arguments),
                 idempotency_key,
+            )
+
+        @server.tool(name="planner.resume_ticket_after_failure", structured_output=True)
+        def planner_resume_ticket_after_failure(
+            planner_job_id: str,
+            lease_id: str,
+            expected_version: int,
+            resume_role: str,
+            resolution: str,
+            idempotency_key: str | None = None,
+        ) -> dict[str, Any]:
+            """Resolve one failure review and requeue its ticket to the chosen role."""
+            arguments = {
+                "planner_job_id": planner_job_id,
+                "lease_id": lease_id,
+                "expected_version": expected_version,
+                "resume_role": resume_role,
+                "resolution": resolution,
+            }
+            return invoke(
+                "planner.resume_ticket_after_failure",
+                arguments,
+                lambda: service.resume_ticket_after_failure(actor, **arguments),
+                idempotency_key,
+            )
+
+        @server.tool(name="planner.retire_ticket_for_reconciliation", structured_output=True)
+        def planner_retire_ticket_for_reconciliation(
+            ticket_id: str,
+            expected_version: int,
+            reconciliation_id: str,
+            reason: str,
+            target_status: str = "CANCELLED",
+            replacement_ticket_id: str | None = None,
+            idempotency_key: str | None = None,
+        ) -> dict[str, Any]:
+            """Retire obsolete work from any phase while preserving its artifacts.
+
+            Running non-merge workers lose authority immediately. A merge that may
+            have touched Git is reconciled first and returns a durable request to poll.
+            """
+            arguments = {
+                "ticket_id": ticket_id,
+                "expected_version": expected_version,
+                "reconciliation_id": reconciliation_id,
+                "reason": reason,
+                "target_status": target_status,
+                "replacement_ticket_id": replacement_ticket_id,
+            }
+            return invoke(
+                "planner.retire_ticket_for_reconciliation",
+                arguments,
+                lambda: service.retire_ticket_for_reconciliation(actor, **arguments),
+                idempotency_key,
+            )
+
+        @server.tool(name="planner.get_ticket_retirement", structured_output=True)
+        def planner_get_ticket_retirement(request_id: str) -> dict[str, Any]:
+            """Poll an in-flight retirement whose merge side effect needed reconciliation."""
+            arguments = {"request_id": request_id}
+            return invoke(
+                "planner.get_ticket_retirement",
+                arguments,
+                lambda: service.get_ticket_retirement(actor, request_id),
             )
 
         @server.tool(name="planner.update_ticket", structured_output=True)

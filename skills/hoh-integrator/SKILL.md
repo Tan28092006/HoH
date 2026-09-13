@@ -40,6 +40,14 @@ ticket state and actual mainline SHA. Lost acknowledgment requires reconciliatio
 before retry. Missing async tools or stalled workers go to Planner with evidence,
 not a raw Git merge, direct service call, SQL or force-push fallback.
 
+A terminal merge failure now blocks the ticket and opens a Planner job
+automatically. If another durable Integrator/tool failure has no returned Planner
+job, call `work.report_failure` once with `job_kind=merge` when applicable before
+waiting. Do not report drift/conflict twice when the integration path already
+created its Planner job. If Planner retires the ticket during a merge, stop; HoH
+will reconcile whether the candidate actually reached main and preserve the
+truthful `LANDED` or retired outcome.
+
 Use the current runtime's policy and fresh ticket context, including Planner holds.
 The protected gate requires independent evidence for every mandatory criterion,
 the registered regression run, verified artifact identity and an unchanged base.

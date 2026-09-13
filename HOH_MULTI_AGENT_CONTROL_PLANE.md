@@ -67,9 +67,12 @@ hủy, thay thế, hoàn thành hoặc rework. Runtime không phát READY, khôn
 không nhận Developer candidate và không merge khi reconciliation còn mở.
 
 Ticket lỗi thời không bị xóa vật lý. `CANCELLED` và `SUPERSEDED` loại nó khỏi
-dispatch nhưng giữ history, candidate và evidence. Nếu plan cũ đang có lease,
-Planner được thu hồi quyền thực thi theo đúng reconciliation; worktree và artifact
-vẫn được bảo toàn. Commit ngoài control plane không tự là QA evidence: branch code
+dispatch nhưng giữ history, candidate và evidence. Nếu ticket lỗi thời đang ở
+Developer, QA hoặc Integration, Planner tạo một retirement gắn với reconciliation:
+quyền thực thi và worker thường bị thu hồi ngay; riêng merge đã RUNNING được đối
+soát SHA trên default branch trước khi ticket thành `CANCELLED`/`SUPERSEDED`.
+Nếu SHA đã vào main, request là `LANDED` và Planner phải đánh giá revert thay vì
+ghi sai lịch sử. Commit ngoài control plane không tự là QA evidence: branch code
 phải đi qua adoption/QA/integration, còn code đã vào default branch phải được
 Integrator xác minh và ghi external landing trước khi ticket thành DONE.
 
@@ -476,6 +479,7 @@ Tên dưới đây là tên server thực sự đăng ký. Các công cụ đọ
 - `skill.get_compatibility` — trạng thái tương thích skill/protocol của project.
 - `events.list` và `spec.digest` — digest thay đổi theo cursor/typed reference.
 - `work.wait_for_event` — long-poll có ACK/resume, đánh thức GUI chat đang chờ mà không tạo model polling turn.
+- `work.report_failure` — execution role gửi đúng một lỗi durable có job/evidence refs cho Planner trước khi idle; lỗi điều khiển và transient bị loại khỏi luồng này.
 
 `work.inbox` chỉ có cho execution role (Developer, QA, Integrator); Planner không nhận offer từ hàng đợi thực thi mà dùng `planner.claim_job`.
 
@@ -502,8 +506,10 @@ Vòng đời và phục hồi:
 
 - `planner.cancel_ticket`
 - `planner.supersede_ticket`
+- `planner.retire_ticket_for_reconciliation` và `planner.get_ticket_retirement` — thu hồi ticket lỗi thời ở mọi phase, có đối soát merge đang chạy
 - `planner.requeue_candidate` — QA_READY bị base drift trả về Developer
 - `planner.recover_candidate_for_qa` — candidate bị từ chối vì lệch artifact hạ tầng quay lại QA, giữ nguyên candidate
+- `planner.resume_ticket_after_failure` — đóng Planner failure job và trả cùng ticket/candidate về đúng Developer, QA hoặc Integrator
 
 Cấu hình project:
 
