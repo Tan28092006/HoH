@@ -57,6 +57,19 @@ def test_the_same_unchanged_context_records_one_snapshot_not_many(
     assert count == 1
 
 
+def test_new_planner_decision_invalidates_a_snapshot_even_without_ticket_version_change(service, actors, seeded):
+    ticket = seeded["ticket"]
+    before = service.get_ticket_context(actors["developer"], ticket["ticket_id"])
+    decision = service.append_planner_context(actors["planner"], ticket_id=ticket["ticket_id"],
+        entry_type="planner_decision", content="Stop: installed runtime is ahead of this source baseline.",
+        source_ref="release:0.3.5")
+    with pytest.raises(ContextStaleError):
+        service.claim_ticket(actors["developer"], ticket["ticket_id"], ticket["version"], 900,
+                             context_snapshot_id=before["context_snapshot_id"])
+    current = service.get_ticket_context(actors["developer"], ticket["ticket_id"])
+    assert current["latest_planner_decision"]["entry_id"] == decision["entry_id"]
+
+
 def test_a_snapshot_records_what_each_role_actually_saw(service, actors, seeded) -> None:
     """Packets differ per role, so their snapshots must be distinguishable."""
     ticket = seeded["ticket"]
