@@ -96,6 +96,7 @@ class ProjectTestRunner:
                 artifact_mismatch=True,
                 environment_digest=self.environment_digest(command, resolved_source),
             )
+        completed = None
         try:
             completed = run_managed(
                 command,
@@ -119,6 +120,20 @@ class ProjectTestRunner:
         except OSError as error:
             raise ValidationError("Registered project test command cannot be executed") from error
         duration_ms = round((time.perf_counter() - started) * 1000)
+        capture_errors = getattr(completed, "capture_errors", ())
+        stdout_truncated = getattr(completed, "stdout_truncated", False) or len(stdout) > _MAX_OUTPUT_CHARS
+        stderr_truncated = getattr(completed, "stderr_truncated", False) or len(stderr) > _MAX_OUTPUT_CHARS
+        reason = "passed" if exit_code == 0 else "test_failure"
+        if getattr(completed, "cancelled", False):
+            reason = "cancelled"
+        elif timed_out:
+            reason = "timeout"
+        elif capture_errors:
+            reason = "capture_failure"
+        elif stdout_truncated or stderr_truncated:
+            reason = "output_truncated"
+        elif exit_code is not None and (exit_code < 0 or exit_code > 255):
+            reason = "native_termination"
         return TestExecution(
             command_digest=command_digest,
             exit_code=exit_code,
@@ -128,6 +143,8 @@ class ProjectTestRunner:
             stderr=self._truncate(stderr),
             resolved_source=resolved_source,
             environment_digest=self.environment_digest(command, resolved_source),
+            termination_reason=reason, capture_errors=capture_errors,
+            stdout_truncated=stdout_truncated, stderr_truncated=stderr_truncated,
         )
 
     @staticmethod

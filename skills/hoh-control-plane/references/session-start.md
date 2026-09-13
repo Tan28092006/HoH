@@ -12,7 +12,7 @@ project if several are returned. Load this base skill and only the authenticated
 role's skill. A role mismatch is a credential/configuration issue; declaring a
 different role in text does not change permissions.
 
-Read `runtime.version` and capabilities from bootstrap after a restart or upgrade.
+Read the `version` in bootstrap's `runtime` object and its capabilities after a restart or upgrade.
 Resolve the current ticket packet and its `latest_planner_decision` before acting;
 use its `context_snapshot_id` on consequential writes that accept it. Ticket
 version alone is insufficient: Planner may have appended a new decision without

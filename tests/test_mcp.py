@@ -959,19 +959,11 @@ async def test_planner_mcp_recovers_a_blocked_candidate_for_a_fresh_qa_claim(
             ],
         },
     )
-    _, re_claim = await developer_server.call_tool(
-        "work.claim",
-        {"ticket_id": ticket["ticket_id"], "expected_version": rejected["ticket"]["version"]},
-    )
-    _, blocked = await developer_server.call_tool(
-        "dev.report_blocker",
-        {
-            "ticket_id": ticket["ticket_id"],
-            "lease_id": re_claim["lease"]["lease_id"],
-            "expected_version": re_claim["ticket"]["version"],
-            "reason": "Infrastructure-only rejection per standing Planner policy.",
-        },
-    )
+    blocked = rejected
+    assert blocked["ticket"]["status"] == "BLOCKED"
+    with pytest.raises(ToolError, match="BLOCKED"):
+        await developer_server.call_tool("work.claim", {
+            "ticket_id": ticket["ticket_id"], "expected_version": blocked["ticket"]["version"]})
     with service.store.connection() as connection:
         finding_id = connection.execute(
             "SELECT finding_id FROM qa_findings WHERE candidate_id = ? LIMIT 1",
@@ -983,12 +975,22 @@ async def test_planner_mcp_recovers_a_blocked_candidate_for_a_fresh_qa_claim(
     assert "planner.recover_candidate_for_qa" in planner_names
     assert "planner.recover_candidate_for_qa" not in developer_names
 
+    with pytest.raises(ToolError, match="readiness"):
+        await planner_server.call_tool("planner.recover_candidate_for_qa", {
+            "ticket_id": ticket["ticket_id"], "expected_version": blocked["ticket"]["version"],
+            "evidence_reference": finding_id})
+    _, readiness = await planner_server.call_tool("planner.append_context", {
+        "ticket_id": ticket["ticket_id"], "entry_type": "planner_decision",
+        "content": "The runner now resolves the frozen candidate's source.",
+        "source_ref": "evidence://operations/runner-readiness.json"})
+
     _, recovered = await planner_server.call_tool(
         "planner.recover_candidate_for_qa",
         {
             "ticket_id": ticket["ticket_id"],
             "expected_version": blocked["ticket"]["version"],
             "evidence_reference": finding_id,
+            "readiness_reference": readiness["entry_id"],
         },
     )
 
