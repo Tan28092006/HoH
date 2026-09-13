@@ -1,4 +1,4 @@
-# Windows desktop operator controls (0.3.1)
+# Windows desktop operator controls (0.3.3)
 
 These launcher files describe the existing single-user installation at
 `D:\HoH-service`; they are not a universal Windows installer. The Python package
@@ -37,6 +37,11 @@ unrelated client settings, refuses conflicting MCP entries, and can explicitly
 back up and upgrade only HoH base/role skills. A profile has a stable identity
 derived from project, role and instance; its stdio server scope contains exactly
 that project. A second concurrent agent in the same role needs its own instance.
+A normal restart of the same chat keeps its existing instance: bootstrap exposes
+`event_wait.wait_id`, and the next `work.wait_for_event` resumes that wait with
+`resume_wait_id`. This atomically fences the old request; it does not create a
+second worker or alter any lease, job or worktree. A genuinely concurrent chat
+still needs a different instance.
 
 Each prompt requires `session.bootstrap(project_id=...)` on the named server and
 checks identity role, identity ID, allowed project IDs and selected project ID.
@@ -46,6 +51,13 @@ New profiles refuse automatic restart after operator shutdown and exit when
 the host finishes stopping. Legacy stdio clients need to reconnect using these
 profiles to get that lifecycle behavior; direct old MCP processes are not owned
 by this host.
+
+Codex profiles allow a 24-hour MCP tool timeout. Claude Code profiles use a
+24-hour per-server timeout and preserve a longer configured value. HoH emits
+transport progress during its 20-second recovery heartbeat so a supported GUI
+client does not treat an otherwise healthy wait as silent. Stopping a chat,
+sleeping the machine or stopping HoH still ends that chat's wait; a stopped GUI
+conversation cannot be reopened by MCP.
 
 These profiles are for sessions running under this Windows account on this
 machine. They use OS access, not remote bearer tokens. Creating a project does
@@ -58,10 +70,13 @@ loopback-only. Do not expose the local operator UI directly to a network.
 The desktop tests use disposable databases and client homes. They exercise
 project persistence, four bound prompts, role/project enforcement over real
 stdio MCP, CSRF/Host checks, shutdown drain/reopen, explicit-stop reconnect,
-skill upgrade backup/rollback and SQLite connection closure. Browser tests
-exercise project creation, all role prompts and cancellation/confirmation at
-desktop/tablet/mobile widths. Existing API, agent kit, bootstrap and supervisor
-tests cover compatibility, including a pause arriving during queue scanning.
+skill upgrade backup/rollback, same-chat wait replacement and SQLite connection
+closure. Git validation runs outside the MCP event loop with detached stdin,
+bounded output and a Windows process-tree timeout; partial Git output is never
+accepted as repository evidence. Browser tests exercise project creation, all
+role prompts and cancellation/confirmation at desktop/tablet/mobile widths.
+Existing API, agent kit, bootstrap and supervisor tests cover compatibility,
+including a pause arriving during queue scanning.
 
 The local wrapper only permits its two explicit POST actions; the underlying
 REST mutation routes remain unavailable through the desktop listener. Writes
