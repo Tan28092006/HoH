@@ -209,6 +209,8 @@ def test_gui_wait_profiles_have_long_timeout_and_unique_instances(desktop, tmp_p
     assert tomllib.loads(config.read_text())['mcp_servers'][result['server_name']]['tool_timeout_sec'] == 86400
     prompt = make_prompts(root, 'shop', instance='codex-1')['developer']
     assert 'work.wait_for_event' in prompt
+    assert 'resume_wait_id' in prompt
+    assert 'status=superseded' in prompt
     assert '--instance codex-1' in prompt
     assert result['server_name'] in prompt
     assert client.get('/local/agents?project_id=shop').json() == {'agents': []}
