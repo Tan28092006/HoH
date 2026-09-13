@@ -7,6 +7,16 @@ from hoh_control_plane.qa_runner import TestExecution as Execution
 from test_qa_runner import _candidate_waiting_for_qa
 
 
+def test_failed_worker_parks_owned_candidate_for_planner_recovery(service, actors, seeded, tmp_path):
+    ticket, candidate, claim = _candidate_waiting_for_qa(
+        service, actors, seeded, tmp_path, [sys.executable, "-c", "print('passed')"])
+    queued = service.queue_project_tests(actors["qa"], ticket["ticket_id"], claim["lease"]["lease_id"])
+    service.fail_queued_project_test(queued["test_run"]["test_run_id"], "Worker was lost before execution completed")
+    result = service.get_project_test_run(actors["qa"], ticket["ticket_id"], claim["lease"]["lease_id"], queued["test_run"]["test_run_id"])
+    assert result["ticket"]["status"] == "BLOCKED"
+    assert result["lease"] is None
+
+
 def test_infrastructure_execution_parks_same_candidate_and_remains_pollable(service, actors, seeded, tmp_path, monkeypatch):
     ticket, candidate, claim = _candidate_waiting_for_qa(
         service, actors, seeded, tmp_path, [sys.executable, "-c", "print('passed')"])
