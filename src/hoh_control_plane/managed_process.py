@@ -56,6 +56,9 @@ class ProcessResult:
     stderr: str
     timed_out: bool = False
     cancelled: bool = False
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+    capture_errors: tuple[str, ...] = ()
 
 
 class _WindowsJob:
@@ -125,14 +128,18 @@ def run_managed(command: list[str], *, cwd: str | Path, timeout: float,
     job = None
     buffers = [bytearray(), bytearray()]
     truncated = [False, False]
+    capture_errors = []
     threads = []
     timed_out = cancelled = False
     def drain(stream, index):
-        while chunk := stream.read(8192):
-            remaining = max(0, output_limit - len(buffers[index]))
-            buffers[index].extend(chunk[:remaining])
-            if len(chunk) > remaining:
-                truncated[index] = True
+        try:
+            while chunk := stream.read(8192):
+                remaining = max(0, output_limit - len(buffers[index]))
+                buffers[index].extend(chunk[:remaining])
+                if len(chunk) > remaining:
+                    truncated[index] = True
+        except (OSError, ValueError) as error:
+            capture_errors.append(f'{index}:{type(error).__name__}')
     def stop_tree():
         if job is not None:
             job.stop()
@@ -173,10 +180,12 @@ def run_managed(command: list[str], *, cwd: str | Path, timeout: float,
             job.close()
         for thread in threads:
             thread.join(timeout=10)
+            if thread.is_alive():
+                capture_errors.append('reader_did_not_finish')
         process.stdout.close()
         process.stderr.close()
     output = [data.decode('utf-8', errors='replace') + ('\n[output truncated]' if clipped else '')
               for data, clipped in zip(buffers, truncated)]
     if cancelled:
         output[1] += '\n[hoh:cancelled] Execution authority was revoked or unavailable.'
-    return ProcessResult(process.returncode, *output, timed_out, cancelled)
+    return ProcessResult(process.returncode, *output, timed_out, cancelled, *truncated, tuple(capture_errors))

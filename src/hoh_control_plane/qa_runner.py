@@ -7,12 +7,16 @@ import platform
 import subprocess
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+import re
+import tempfile
+import tomllib
 
 from hoh_control_plane.domain import ValidationError
 from hoh_control_plane.managed_process import run_managed
+from hoh_control_plane.resource_probe import resource_snapshot
 
 
 _MAX_OUTPUT_CHARS = 200_000
@@ -50,6 +54,12 @@ class TestExecution:
     # import instead). A mismatch is an infrastructure fault, not a candidate verdict:
     # the command below is never run, so exit_code/stdout/stderr carry no test result.
     artifact_mismatch: bool = False
+    provenance_status: str = "unverified"
+    termination_reason: str = "unclassified"
+    environment_manifest: dict = field(default_factory=dict)
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+    capture_errors: tuple[str, ...] = ()
 
 
 class ProjectTestRunner:
@@ -64,6 +74,8 @@ class ProjectTestRunner:
         command_digest = hashlib.sha256("\0".join(command).encode()).hexdigest()
         started = time.perf_counter()
         environment = self._build_environment(worktree_path)
+        if self._pytest_arguments(command) is not None:
+            return self._execute_pytest(command, worktree_path, timeout_seconds, environment)
         resolved_source = self._resolve_candidate_source(command, worktree_path, environment)
         if resolved_source is not None and not self._within_worktree(
             resolved_source, worktree_path
@@ -172,7 +184,8 @@ class ProjectTestRunner:
         # for hostile code: removing env vars is not a filesystem boundary.
         for key in list(environment):
             if (key.upper().startswith(("HOH_", "COV_CORE", "COVERAGE"))
-                    or key.upper() in {'PYTHONPATH', 'PYTHONHOME', 'VIRTUAL_ENV'}):
+                    or key.upper() in {'PYTHONPATH', 'PYTHONHOME', 'VIRTUAL_ENV',
+                                       'PYTEST_ADDOPTS', 'PYTEST_PLUGINS', 'PYTHONSTARTUP'}):
                 environment.pop(key)
         for key in (
             "COVERAGE_PROCESS_START",
@@ -192,6 +205,116 @@ class ProjectTestRunner:
             environment['PYTHONPATH'] = str(source_root.resolve())
         environment['PYTHONNOUSERSITE'] = '1'
         return environment
+
+    @classmethod
+    def _pytest_arguments(cls, command):
+        if not command or not cls._looks_like_python_interpreter(command[0]):
+            return None
+        try:
+            index = command.index("-m")
+        except ValueError:
+            return None
+        return (command[1:index], command[index + 2:]) if command[index + 1:index + 2] == ["pytest"] else None
+
+    @staticmethod
+    def _provenance_modules(worktree):
+        """Explicit frozen project config, then wheel packages, then src packages."""
+        root = Path(worktree)
+        path = root / "pyproject.toml"
+        document = tomllib.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        tool = document.get("tool", {})
+        modules = tool.get("hoh", {}).get("qa", {}).get("provenance_modules")
+        if modules is None:
+            packages = tool.get("hatch", {}).get("build", {}).get("targets", {}).get("wheel", {}).get("packages", [])
+            modules = [Path(p).name for p in packages]
+        if not modules and (root / "src").is_dir():
+            modules = sorted(p.parent.name for p in (root / "src").glob("*/__init__.py"))
+        if not isinstance(modules, list) or len(modules) > 64 or any(
+            not isinstance(m, str) or not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", m) for m in modules
+        ):
+            raise ValidationError("Invalid frozen project provenance_modules configuration")
+        return modules
+
+    def _execute_pytest(self, command, worktree, timeout, environment):
+        flags, arguments = self._pytest_arguments(command)
+        started = time.perf_counter()
+        digest = hashlib.sha256("\0".join(command).encode()).hexdigest()
+        modules = self._provenance_modules(worktree)
+        resources = resource_snapshot()
+        manifest = {"schema_version": 1, "command": command, "command_digest": digest,
+                    "provenance_modules": modules, "host_resources": resources,
+                    "environment_inputs": {k: environment[k] for k in
+                        ("PYTHONPATH", "PYTHONNOUSERSITE", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS") if k in environment}}
+        def result(reason, *, child=None, completed=None):
+            child = child or {}
+            manifest["child"] = child
+            paths = [v["path"] for v in child.get("source_modules", {}).values()]
+            provenance = child.get("provenance_status", "unverified")
+            material = json.dumps(manifest, sort_keys=True).encode()
+            return TestExecution(command_digest=digest,
+                exit_code=(None if completed is None or completed.timed_out else completed.returncode),
+                timed_out=bool(completed and completed.timed_out),
+                duration_ms=round((time.perf_counter() - started) * 1000),
+                stdout=completed.stdout if completed else "", stderr=completed.stderr if completed else reason,
+                resolved_source=paths[0] if paths else None, environment_digest=hashlib.sha256(material).hexdigest(),
+                artifact_mismatch=provenance in {"mismatch", "unresolved"}, provenance_status=provenance,
+                termination_reason=reason, environment_manifest=manifest,
+                stdout_truncated=bool(completed and completed.stdout_truncated),
+                stderr_truncated=bool(completed and completed.stderr_truncated),
+                capture_errors=completed.capture_errors if completed else ())
+        # This is an admission floor, not a promise that every test fits. Retain
+        # the measured facts so a later allocation failure is diagnosable.
+        if resources.get("available_physical_bytes", 2**63) < 256 * 1024**2 or resources.get(
+            "available_commit_bytes", 2**63) < 512 * 1024**2:
+            return result("resource_unready")
+        probe = Path(__file__).with_name("pytest_probe.py").resolve()
+        helper = Path(__file__).with_name("resource_probe.py").resolve()
+        manifest["instrumentation"] = {"protocol": "pytest-hooks-v1",
+            "probe_sha256": hashlib.sha256(probe.read_bytes()).hexdigest(),
+            "resource_probe_sha256": hashlib.sha256(helper.read_bytes()).hexdigest(),
+            "python_flags": flags, "pytest_arguments": arguments}
+        # Temporary evidence is outside the candidate. The wrapper invokes the
+        # original pytest args with an observer plugin and preserves Python flags.
+        with tempfile.TemporaryDirectory(prefix="hoh-pytest-") as temporary:
+            report = Path(temporary) / "child.json"
+            config = Path(temporary) / "config.json"
+            config.write_text(json.dumps({"modules": modules}), encoding="utf-8")
+            invocation = [command[0], *flags, str(probe), str(report), str(config), *arguments]
+            manifest["instrumentation"]["entrypoint"] = str(probe)
+            try:
+                completed = run_managed(invocation, cwd=worktree, env=environment, timeout=timeout)
+            except (OSError, subprocess.TimeoutExpired):
+                return result("launch_failure")
+            child = {}
+            if report.is_file() and report.stat().st_size <= 2_000_000:
+                try:
+                    child = json.loads(report.read_text(encoding="utf-8"))
+                except (ValueError, OSError):
+                    pass
+            reason = "passed"
+            if completed.cancelled:
+                reason = "cancelled"
+            elif completed.timed_out:
+                reason = "timeout"
+            elif completed.capture_errors:
+                reason = "capture_failure"
+            elif completed.stdout_truncated or completed.stderr_truncated:
+                reason = "output_truncated"
+            elif completed.returncode == 127 and "[hoh:exec-error]" in completed.stderr:
+                reason = "launch_failure"
+            elif completed.returncode < 0 or completed.returncode > 255:
+                reason = "native_termination"
+            elif child.get("provenance_status") in {"mismatch", "unresolved"}:
+                reason = "artifact_mismatch"
+            elif child.get("phase") != "session_finished":
+                reason = "incomplete_evidence"
+            elif child.get("resource_failures"):
+                reason = "resource_exhausted"
+            elif completed.returncode != 0:
+                reason = "test_failure" if completed.returncode in (1, 2) else "test_configuration_error"
+            elif child.get("provenance_status") not in {"verified", "not_applicable"}:
+                reason = "incomplete_evidence"
+            return result(reason, child=child, completed=completed)
 
     def _resolve_candidate_source(
         self, command: list[str], worktree_path: str, environment: dict[str, str]

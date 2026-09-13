@@ -1,0 +1,139 @@
+"""Trusted pytest instrumentation, launched by absolute path in the candidate Python.
+
+The original Python flags and pytest arguments are retained. This file and its
+resource helper are shipped with the runner, never copied into candidate source.
+"""
+import hashlib
+import importlib
+import importlib.metadata
+import importlib.util
+import json
+import os
+from pathlib import Path
+import platform
+import subprocess
+import sys
+
+
+def main():
+    report, settings_path, *arguments = sys.argv[1:]
+    settings = json.loads(Path(settings_path).read_text(encoding="utf-8"))
+    root = Path.cwd().resolve()
+    # Match `python -m pytest`: isolated mode omits cwd, ordinary mode includes it.
+    if not sys.flags.isolated:
+        sys.path.insert(0, str(root))
+    spec = importlib.util.spec_from_file_location("_hoh_resources", Path(__file__).with_name("resource_probe.py"))
+    resources = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(resources)
+    facts = {
+        "executable": str(Path(sys.executable).resolve()), "python_version": platform.python_version(),
+        "implementation": platform.python_implementation(), "platform": platform.system(),
+        "isolated": bool(sys.flags.isolated), "phase": "starting", "provenance_status": "unverified",
+        "source_modules": {}, "test_counts": {"passed": 0, "failed": 0, "skipped": 0, "collection_errors": 0},
+        "resource_failures": 0, "resource_before": resources.resource_snapshot(),
+        "dependencies": {d.metadata["Name"]: d.version for d in importlib.metadata.distributions()
+                         if d.metadata.get("Name")},
+    }
+
+    def git_sha():
+        try:
+            p = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, stdin=subprocess.DEVNULL,
+                capture_output=True, text=True, timeout=10, creationflags=0x08000000 if os.name == "nt" else 0)
+            value = p.stdout.strip()
+            return value if p.returncode == 0 and len(value) == 40 else None
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    facts["candidate_commit"] = git_sha()
+
+    def save():
+        target = Path(report)
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(json.dumps(facts, sort_keys=True), encoding="utf-8")
+        os.replace(temporary, target)
+
+    save()
+    import pytest
+
+    def verify_sources():
+        names = settings["modules"]
+        if not names:
+            facts["provenance_status"] = "not_applicable"
+            return
+        for name in names:
+            try:
+                importlib.import_module(name)
+            except Exception as error:
+                facts["provenance_status"] = "unresolved"
+                facts["provenance_error"] = type(error).__name__
+                save()
+                pytest.exit("HoH: candidate source could not be resolved", returncode=4)
+        for name, module in tuple(sys.modules.items()):
+            if not any(name == n or name.startswith(n + ".") for n in names):
+                continue
+            origin = getattr(module, "__file__", None)
+            if not origin:
+                paths = list(getattr(module, "__path__", []))
+                if paths and all(Path(p).resolve().is_relative_to(root) for p in paths):
+                    continue
+                facts["provenance_status"] = "unresolved"
+                save()
+                pytest.exit("HoH: candidate module has no verifiable source", returncode=4)
+            source = Path(origin).resolve()
+            facts["source_modules"][name] = {"path": str(source)}
+            if not source.is_relative_to(root):
+                facts["provenance_status"] = "mismatch"
+                save()
+                pytest.exit("HoH: imported candidate source is outside the frozen worktree", returncode=4)
+        facts["provenance_status"] = "verified"
+        save()
+
+    class Probe:
+        @pytest.hookimpl(trylast=True)
+        def pytest_sessionstart(self, session):
+            facts["phase"] = "session_started"
+            verify_sources()
+
+        @pytest.hookimpl(trylast=True)
+        def pytest_collection_finish(self, session):
+            facts["phase"] = "collection_finished"
+            facts["collected"] = len(session.items)
+            verify_sources()
+
+        def pytest_collectreport(self, report):
+            if report.failed:
+                facts["test_counts"]["collection_errors"] += 1
+                save()
+
+        @pytest.hookimpl(hookwrapper=True)
+        def pytest_runtest_makereport(self, item, call):
+            outcome = yield
+            report = outcome.get_result()
+            if report.failed:
+                facts["test_counts"]["failed"] += 1
+                if call.excinfo and any(c.__name__ in {"MemoryError", "ArrowMemoryError"}
+                                       for c in type(call.excinfo.value).__mro__):
+                    facts["resource_failures"] += 1
+            elif report.skipped:
+                facts["test_counts"]["skipped"] += 1
+            elif report.when == "call":
+                facts["test_counts"]["passed"] += 1
+            save()
+
+        @pytest.hookimpl(trylast=True)
+        def pytest_sessionfinish(self, session, exitstatus):
+            if facts["provenance_status"] in {"verified", "not_applicable"}:
+                verify_sources()
+            facts["phase"] = "session_finished"
+            facts["pytest_exit_status"] = int(exitstatus)
+            facts["resource_after"] = resources.resource_snapshot()
+            facts["final_commit"] = git_sha()
+            if facts["final_commit"] != facts["candidate_commit"]:
+                facts["provenance_status"] = "mismatch"
+            save()
+
+    return int(pytest.main(arguments, plugins=[Probe()]))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
