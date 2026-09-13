@@ -26,6 +26,9 @@ For operator-requested event-driven GUI work, read
 `work.wait_for_event` to keep the current turn waiting without model polling.
 Do not create a scheduled task for this mode. Each simultaneous chat needs its
 own instance. A closed/stopped chat cannot be restarted by this MCP wait.
+For this same chat resuming after Stop, timeout or application restart, keep its
+instance and follow the wait recovery in `references/session-start.md`. Count
+active work ownership, not OS MCP processes, when diagnosing duplicate agents.
 For a timer-based unattended Codex or Claude Code execution worker, read
 [`references/wakeup.md`](references/wakeup.md) before enabling a heartbeat or
 loop.

@@ -16,6 +16,8 @@ Register presence and check compatibility as required by the project. Then inspe
 bootstrap assignments and the role inbox. A new chat can resume the same identity
 only after the earlier session has stopped. Two concurrent workers need different
 credentials/identities; HoH leases are keyed by identity, not chat/session ID.
+Several MCP processes for one profile can be normal client setup; their count
+alone does not establish that multiple chats are doing work as that identity.
 
 ## Event-driven GUI sessions
 
@@ -33,6 +35,18 @@ then claim with the normal role tool. Keep `event_id`; acknowledge it using
 `ack_event_id` on the next wait once handled or found obsolete. A disconnected
 delivery is replayed until acknowledged; stale claimed offers are suppressed.
 
+When this same chat resumes after Stop, timeout or restart, keep its original
+instance. Inspect bootstrap assignments first. If `event_wait` is present in
+`session.bootstrap`, pass its `wait_id` as `resume_wait_id` on the next
+`work.wait_for_event`, including the owned job parameters when resuming a job.
+This atomically replaces only that previously observed wait; it does not change
+any ticket lease, job, worktree or identity. No separate permission is needed to
+resume the operator's same chat. If the wait changed in the meantime, refresh
+bootstrap once; repeated contention means stop and report actual concurrent use.
+A `superseded` response means this old request must stop without retrying,
+claiming or instructing the user to close the replacement chat. A different
+simultaneous worker still needs its own instance.
+
 For a durable worker job, replace repeated model polling with this same tool:
 pass `job_kind` (`provision`, `submission`, `qa`, or `merge`) and `job_id`.
 The host validates ownership and maintains the job's existing valid ticket
@@ -41,11 +55,14 @@ the authoritative result. Resume the correct assignment/worktree afterward.
 Do not call an idle-work wait while holding unrelated unfinished work.
 
 Codex's configured MCP tool timeout must exceed the wait; generated profiles
-set 86400 seconds. Claude's documented default is about 28 hours; check shorter
-client overrides. Server maintenance and transport waits consume no model
+set 86400 seconds. Claude profiles set per-server `timeout` to 86400000 ms:
+its separate idle limit otherwise aborts silent stdio calls after 30 minutes.
+HoH sends MCP progress and checks the transport while waiting. These protocol
+messages and server maintenance consume no model
 polling turns. Timeout/reconnection can require a new turn; this is not an
 unlimited background agent. Stop, closing the chat, sleeping the machine or
-stopping HoH ends the wait. A dead process's presence expires within 90 seconds.
+stopping HoH interrupts the connection; recover a stranded wait as described
+above. A dead process's presence expires within 90 seconds.
 Ordinary MCP cannot restart a stopped chat. Ask and stop when human input is
 needed instead of hiding a question inside a long wait.
 
