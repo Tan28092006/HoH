@@ -306,7 +306,7 @@ def test_recovery_refuses_an_active_project_test_run(
         )
 
 
-def test_recovery_refuses_a_ticket_with_more_than_one_frozen_candidate(
+def test_recovery_refuses_ambiguous_latest_submissions(
     service, actors, seeded, tmp_path: Path
 ) -> None:
     ticket, _candidate, blocked_ticket, finding_ids = _blocked_candidate_with_insufficient_evidence(
@@ -323,11 +323,55 @@ def test_recovery_refuses_a_ticket_with_more_than_one_frozen_candidate(
             """,
             (ticket["ticket_id"], "a" * 40, "b" * 40),
         )
+        connection.execute("UPDATE candidates SET submitted_at = '2026-01-01T00:00:00Z' WHERE ticket_id = ?",
+                           (ticket["ticket_id"],))
 
-    with pytest.raises(ValidationError, match="exactly one frozen candidate"):
+    with pytest.raises(ValidationError, match="unambiguous latest"):
         service.recover_candidate_for_qa(
             actors["planner"], ticket["ticket_id"], blocked_ticket["version"], finding_ids[0]
         )
+
+
+@pytest.mark.parametrize("same_sha", [True, False])
+def test_recovery_preserves_current_candidate_after_an_older_submission(
+    service, actors, seeded, tmp_path, same_sha
+):
+    ticket, candidate, blocked, finding_ids = _blocked_candidate_with_insufficient_evidence(
+        service, actors, seeded, tmp_path)
+    with service.store.connection(immediate=True) as connection:
+        connection.execute("""INSERT INTO candidates
+            (candidate_id,ticket_id,base_commit,commit_sha,branch_ref,developer_claims,
+             submitted_by,submitted_at,frozen_at)
+            SELECT 'cand_historical',ticket_id,base_commit,?,branch_ref,developer_claims,
+                   submitted_by,'2025-01-01T00:00:00Z','2025-01-01T00:00:00Z'
+            FROM candidates WHERE candidate_id=?""",
+            (candidate['commit_sha'] if same_sha else 'b'*40, candidate['candidate_id']))
+        original_profile = dict(connection.execute(
+            'SELECT * FROM candidate_test_profiles WHERE candidate_id=?', (candidate['candidate_id'],)).fetchone())
+    recovered = service.recover_candidate_for_qa(actors['planner'],ticket['ticket_id'],blocked['version'],finding_ids[0])
+    assert recovered['candidate']['candidate_id'] == candidate['candidate_id']
+    claim = service.claim_qa(actors['qa'],ticket['ticket_id'],recovered['ticket']['version'],900)
+    queued = service.queue_project_tests(actors['qa'],ticket['ticket_id'],claim['lease']['lease_id'])
+    assert queued['test_run']['candidate_id'] == candidate['candidate_id']
+    with service.store.connection() as connection:
+        assert dict(connection.execute('SELECT * FROM candidate_test_profiles WHERE candidate_id=?',
+                    (candidate['candidate_id'],)).fetchone()) == original_profile
+        assert connection.execute('SELECT COUNT(*) FROM candidates WHERE ticket_id=?',
+                                  (ticket['ticket_id'],)).fetchone()[0] == 2
+
+
+def test_recovery_does_not_use_an_older_candidates_evidence(service, actors, seeded, tmp_path):
+    ticket, candidate, blocked, finding_ids = _blocked_candidate_with_insufficient_evidence(
+        service, actors, seeded, tmp_path)
+    with service.store.connection(immediate=True) as connection:
+        connection.execute("""INSERT INTO candidates
+            (candidate_id,ticket_id,base_commit,commit_sha,branch_ref,developer_claims,
+             submitted_by,submitted_at,frozen_at)
+            SELECT 'cand_new_profile',ticket_id,base_commit,commit_sha,branch_ref,developer_claims,
+                   submitted_by,'2099-01-01T00:00:00Z','2099-01-01T00:00:00Z'
+            FROM candidates WHERE candidate_id=?""", (candidate['candidate_id'],))
+    with pytest.raises(ValidationError,match='does not belong'):
+        service.recover_candidate_for_qa(actors['planner'],ticket['ticket_id'],blocked['version'],finding_ids[0])
 
 
 def test_recovery_refuses_an_unrecognized_evidence_reference(
