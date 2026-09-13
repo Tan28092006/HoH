@@ -103,13 +103,84 @@ import subprocess, sys
 from pathlib import Path
 from unittest.mock import patch
 from hoh_control_plane.git_worktrees import GitWorktreeManager
+from hoh_control_plane.managed_process import run_managed
 real_run = subprocess.run
 def child(command, **kwargs):
     return real_run([sys.executable, '-c', 'import sys; print(repr(sys.stdin.read()))'], **kwargs)
-with patch('hoh_control_plane.git_worktrees.subprocess.run', side_effect=child):
+def managed_child(command, **kwargs):
+    return run_managed([sys.executable, '-c', 'import sys; print(repr(sys.stdin.read()))'], **kwargs)
+with patch('hoh_control_plane.git_worktrees.subprocess.run', side_effect=child), patch('hoh_control_plane.git_worktrees.run_managed', side_effect=managed_child, create=True):
     result = GitWorktreeManager._git(Path.cwd(), 'rev-parse', '--show-toplevel')
     print(result.stdout.strip())
 '''
     result = subprocess.run([sys.executable, '-c', script], input='{"jsonrpc":"2.0","id":7}\n',
                             text=True, capture_output=True, timeout=8, check=True)
     assert result.stdout.strip() == "''", 'Git inherited and consumed MCP protocol input'
+
+
+def test_git_timeout_reaps_descendants_holding_its_output_pipe(tmp_path, monkeypatch):
+    import time
+    from unittest.mock import patch
+    from hoh_control_plane.domain import ValidationError
+    from hoh_control_plane.git_worktrees import GitWorktreeManager
+    from hoh_control_plane.managed_process import run_managed
+    escaped = tmp_path / 'escaped'
+    descendant = f"import time,pathlib;time.sleep(.9);pathlib.Path({str(escaped)!r}).touch()"
+    command = [sys.executable, '-c', f"import subprocess,sys,time;subprocess.Popen([sys.executable,'-c',{descendant!r}]);time.sleep(20)"]
+    real_run = subprocess.run
+    monkeypatch.setattr('hoh_control_plane.git_worktrees._GIT_COMMAND_TIMEOUT_SECONDS', .3)
+    with patch('hoh_control_plane.git_worktrees.subprocess.run', side_effect=lambda args, **kw: real_run(command, **kw)), \
+         patch('hoh_control_plane.git_worktrees.run_managed', side_effect=lambda args, **kw: run_managed(command, **kw), create=True):
+        with pytest.raises(ValidationError, match='timed out'):
+            GitWorktreeManager._git(tmp_path, 'rev-parse', '--show-toplevel')
+    time.sleep(1)
+    assert not escaped.exists(), 'Git timeout left a descendant running and holding MCP output'
+
+
+def test_mcp_wait_supports_resume_and_emits_transport_progress(service, actors, monkeypatch):
+    from mcp.shared.memory import create_connected_server_and_client_session
+    from hoh_control_plane.mcp_server import create_mcp_server
+    from hoh_control_plane.event_wait import wait_for_event
+    monkeypatch.setattr('hoh_control_plane.event_wait.RECOVERY_SECONDS', .05)
+    actor = actors['qa']
+    service.register_agent(actor, skills=['qa'], capacity=1)
+    async def scenario():
+        previous = asyncio.create_task(wait_for_event(service, actor, 'project-1', timeout_seconds=5))
+        progress = []
+        async def on_progress(value, total, message):
+            progress.append(value)
+        try:
+            await asyncio.sleep(.04)
+            resume = service.session_bootstrap(actor, 'project-1')['event_wait']['wait_id']
+            async with create_connected_server_and_client_session(create_mcp_server(service, actor)) as client:
+                result = await client.call_tool('work.wait_for_event', {
+                    'project_id':'project-1','timeout_seconds':1,'resume_wait_id':resume},
+                    progress_callback=on_progress)
+                assert not result.isError, result
+                assert result.structuredContent['status'] == 'timeout'
+                assert len(progress) >= 2, 'Silent waits trip the GUI client idle timeout'
+                assert progress == sorted(progress)
+            assert (await previous)['status'] == 'superseded'
+        finally:
+            previous.cancel()
+            await asyncio.gather(previous, return_exceptions=True)
+    asyncio.run(scenario())
+
+
+def test_configuring_repository_does_not_block_mcp_transport(service, actors, monkeypatch):
+    import time
+    from hoh_control_plane.mcp_server import create_mcp_server
+    def slow_check(*args, **kwargs):
+        time.sleep(.2)
+        return {'configured':True}
+    monkeypatch.setattr(service, 'configure_repository', slow_check)
+    server = create_mcp_server(service, actors['planner'])
+    async def scenario():
+        configuring = asyncio.create_task(server.call_tool('planner.configure_repository',
+            {'project_id':'project-1','repository_path':'unused-test-path'}))
+        await asyncio.sleep(.02)
+        assert not configuring.done(), 'Git blocked the event loop until its synchronous call finished'
+        _, bootstrap = await server.call_tool('session.bootstrap', {'project_id':'project-1'})
+        assert bootstrap['selected_project_id'] == 'project-1'
+        await configuring
+    asyncio.run(scenario())

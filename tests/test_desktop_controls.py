@@ -212,3 +212,27 @@ def test_gui_wait_profiles_have_long_timeout_and_unique_instances(desktop, tmp_p
     assert '--instance codex-1' in prompt
     assert result['server_name'] in prompt
     assert client.get('/local/agents?project_id=shop').json() == {'agents': []}
+
+
+def test_claude_profile_upgrade_handles_idle_timeout_and_preserves_higher_override(desktop, tmp_path):
+    from hoh_control_plane.local_agent import install_profile
+    client, root = desktop
+    client.post('/local/projects', json={'project_id':'shop','name':'Shop'}, headers=headers(client))
+    home = tmp_path / 'claude-home'
+    result = install_profile(root, 'shop', 'qa', 'primary', 'claude-code', home)
+    path = home / '.claude.json'
+    data = json.loads(path.read_text())
+    name = result['server_name']
+    assert data['mcpServers'][name]['timeout'] == 86400000
+    data['mcpServers'][name].pop('timeout')
+    data['unrelated'] = {'keep':True}
+    path.write_text(json.dumps(data))
+    install_profile(root, 'shop', 'qa', 'primary', 'claude-code', home)
+    upgraded = json.loads(path.read_text())
+    assert upgraded['mcpServers'][name]['timeout'] == 86400000
+    upgraded['mcpServers'][name]['timeout'] = 90000000
+    path.write_text(json.dumps(upgraded))
+    install_profile(root, 'shop', 'qa', 'primary', 'claude-code', home)
+    preserved = json.loads(path.read_text())
+    assert preserved['mcpServers'][name]['timeout'] == 90000000
+    assert preserved['unrelated'] == {'keep':True}
