@@ -890,12 +890,14 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             ticket_id: str,
             expected_version: int,
             evidence_reference: str,
+            readiness_reference: str | None = None,
         ) -> dict[str, Any]:
             """Requeue a frozen candidate for QA after an infrastructure-only rejection."""
             arguments = {
                 "ticket_id": ticket_id,
                 "expected_version": expected_version,
                 "evidence_reference": evidence_reference,
+                "readiness_reference": readiness_reference,
             }
             return invoke(
                 "planner.recover_candidate_for_qa",

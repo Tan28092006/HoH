@@ -112,20 +112,13 @@ def _blocked_candidate_with_insufficient_evidence(service, actors, seeded, tmp_p
                 (candidate_id,),
             ).fetchall()
         ]
-    re_claim = service.claim_ticket(
-        actors["developer"], ticket["ticket_id"], rejected["ticket"]["version"], 900
-    )
-    blocked = service.report_blocker(
-        actors["developer"],
-        ticket["ticket_id"],
-        re_claim["lease"]["lease_id"],
-        re_claim["ticket"]["version"],
-        (
-            "QA rejection was an infrastructure artifact mismatch, not a logic defect; "
-            "per standing Planner policy this candidate must not be altered or resubmitted."
-        ),
-    )
-    return ticket, candidate["candidate"], blocked["ticket"], finding_ids
+    assert rejected["ticket"]["status"] == "BLOCKED"
+    # Compatibility fixture for pre-0.3.5 records whose BLOCKED reason predated
+    # explicit readiness gates. Modern routing is covered separately.
+    with service.store.connection() as connection:
+        connection.execute("UPDATE tickets SET blocked_reason = ? WHERE ticket_id = ?",
+                           ("Legacy infrastructure artifact mismatch", ticket["ticket_id"]))
+    return ticket, candidate["candidate"], rejected["ticket"], finding_ids
 
 
 def test_recovery_reopens_a_blocked_ticket_for_an_independent_fresh_qa_verdict(

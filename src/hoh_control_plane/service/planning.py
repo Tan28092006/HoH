@@ -1194,6 +1194,7 @@ class PlanningMixin:
         ticket_id: str,
         expected_version: int,
         evidence_reference: str,
+        readiness_reference: str | None = None,
     ) -> dict[str, Any]:
         """Requeue a frozen candidate for independent QA after an infra-only rejection.
 
@@ -1205,12 +1206,22 @@ class PlanningMixin:
         """
         require_role(actor, Role.PLANNER, Role.ADMIN)
         self._bounded_text(evidence_reference, "evidence_reference", 200)
+        if readiness_reference is not None:
+            self._bounded_text(readiness_reference, "readiness_reference", 200)
         with self.store.connection(immediate=True) as connection:
             self._expire_lease(connection, ticket_id)
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             self._expect_version(ticket, expected_version)
             if TicketStatus(ticket["status"]) not in {TicketStatus.BLOCKED, TicketStatus.REWORK}:
                 raise ConflictError("Only a BLOCKED or REWORK ticket can be recovered for QA")
+            if (ticket.get("blocked_reason") or "").startswith("qa.infrastructure/"):
+                readiness = _row(connection.execute(
+                    "SELECT * FROM context_entries WHERE entry_id = ? AND ticket_id = ? AND superseded_by IS NULL",
+                    (readiness_reference, ticket_id)).fetchone())
+                if (readiness is None or readiness["actor_role"] not in {"planner", "admin"}
+                        or readiness["entry_type"] not in {"planner_decision", "planning_decision"}
+                        or not readiness["source_ref"] or readiness["created_at"] < ticket["updated_at"]):
+                    raise ValidationError("Infrastructure recovery requires a current Planner readiness entry with an evidence source")
             active_lease = connection.execute(
                 "SELECT 1 FROM leases WHERE ticket_id = ?", (ticket_id,)
             ).fetchone()
@@ -1269,6 +1280,7 @@ class PlanningMixin:
                         f"candidate logic failure: {provenance}. Recovered from ticket version "
                         f"{expected_version}; the immutable candidate was not edited, "
                         "duplicated, or resubmitted."
+                        + (f" Readiness evidence: {readiness_reference}." if readiness_reference else "")
                     ),
                     evidence_reference,
                     candidate["commit_sha"],
@@ -1324,9 +1336,12 @@ class PlanningMixin:
                 raise ValidationError(
                     "Evidence reference does not belong to this candidate's project test runs"
                 )
-            if job["status"] != "FAILED" or "candidate_artifact_mismatch" not in (
+            recorded_infrastructure = connection.execute(
+                "SELECT 1 FROM audit_events WHERE aggregate_id = ? AND event_type = 'qa.infrastructure_blocked' AND payload LIKE ?",
+                (job["ticket_id"], '%' + evidence_reference + '%')).fetchone()
+            if recorded_infrastructure is None and (job["status"] != "FAILED" or "candidate_artifact_mismatch" not in (
                 job["error_message"] or ""
-            ):
+            )):
                 raise ValidationError(
                     "Evidence reference does not show a candidate_artifact_mismatch"
                 )

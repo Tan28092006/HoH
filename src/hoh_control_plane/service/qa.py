@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
+_INFRASTRUCTURE_OUTCOMES = frozenset({
+    "resource_unready", "resource_exhausted", "native_termination", "timeout", "cancelled",
+    "capture_failure", "output_truncated", "launch_failure", "incomplete_evidence",
+    "artifact_mismatch", "test_configuration_error",
+})
+
 from hoh_control_plane.service._common import (
     CHECKSUM_ARTIFACT,
     CHECKSUM_CLAIMED,
@@ -297,6 +305,12 @@ class QaMixin:
             raise ValidationError("Lease duration must be between 30 and 3600 seconds")
         with self.store.connection(immediate=True) as connection:
             ticket, _project_id = self._authorized_ticket(connection, actor, ticket_id)
+            job = self._qa_test_job(connection, test_run_id)
+            if (job["ticket_id"] != ticket_id or job["lease_id"] != lease_id
+                    or job["requested_by"] != actor.agent_id):
+                raise AuthorizationError("Project test run does not belong to this QA lease")
+            if job["status"] in {"COMPLETED", "FAILED", "STALE"} and ticket["status"] != TicketStatus.QA_IN_PROGRESS.value:
+                return {"ticket": ticket, "lease": None, "test_run": job}
             if ticket["status"] != TicketStatus.QA_IN_PROGRESS.value:
                 raise ConflictError("Ticket is not in QA")
             self._require_active_lease(connection, actor, ticket_id, lease_id)
@@ -355,7 +369,7 @@ class QaMixin:
                 with self.git_worktrees.qa_checkout(repository_path=repository["repository_path"],
                         test_run_id=test_run_id, candidate_commit=job["candidate_commit"]) as path:
                     execution = self.project_tests.execute(job["test_command"], path, job["timeout_seconds"])
-                    if execution.artifact_mismatch:
+                    if execution.artifact_mismatch and execution.termination_reason == "unclassified":
                         return self._fail_with_artifact_mismatch(test_run_id, job, execution)
                     return self._complete_queued_project_test(test_run_id, execution)
             worktree_path = self.git_worktrees.verify_frozen_candidate(
@@ -364,7 +378,7 @@ class QaMixin:
             execution = self.project_tests.execute(
                 job["test_command"], worktree_path, job["timeout_seconds"]
             )
-            if execution.artifact_mismatch:
+            if execution.artifact_mismatch and execution.termination_reason == "unclassified":
                 return self._fail_with_artifact_mismatch(test_run_id, job, execution)
             return self._complete_queued_project_test(test_run_id, execution)
         except (DomainError, OSError) as error:
@@ -426,6 +440,19 @@ class QaMixin:
                 )
                 if candidate["commit_sha"] != job["candidate_commit"]:
                     raise ConflictError("Candidate changed while project tests were running")
+                profile = self._one(connection, "SELECT * FROM candidate_test_profiles WHERE candidate_id = ?",
+                                    (job["candidate_id"],))
+                manifest = {**execution.environment_manifest,
+                            "candidate_commit": job["candidate_commit"],
+                            "frozen_profile": {"configured_at": profile["configured_at"],
+                                               "command_digest": job["command_digest"],
+                                               "timeout_seconds": job["timeout_seconds"]}}
+                child = manifest.get("child", {})
+                if child.get("candidate_commit") and child["candidate_commit"] != job["candidate_commit"]:
+                    execution = replace(execution, artifact_mismatch=True, provenance_status="mismatch",
+                                        termination_reason="artifact_mismatch")
+                execution = replace(execution, environment_manifest=manifest,
+                    environment_digest=hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest())
                 storage_ref, report_path, checksum = self.project_tests.write_report(
                     candidate_id=job["candidate_id"],
                     test_run_id=test_run_id,
@@ -501,9 +528,35 @@ class QaMixin:
                         "timed_out": execution.timed_out,
                     },
                 )
+                if execution.termination_reason in _INFRASTRUCTURE_OUTCOMES:
+                    self._park_qa_infrastructure(connection, actor, ticket, job, execution.termination_reason, storage_ref)
                 return self._qa_test_job(connection, test_run_id)
         except DomainError as error:
             return self.fail_queued_project_test(test_run_id, str(error))
+
+    def _park_qa_infrastructure(self, connection, actor, ticket, job, reason, storage_ref):
+        """Stop offers for source work and preserve the candidate for a guarded retry."""
+        timestamp = _iso()
+        next_version = ticket["version"] + 1
+        connection.execute("UPDATE tickets SET status = ?, blocked_reason = ?, version = ?, updated_at = ? WHERE ticket_id = ?",
+            (TicketStatus.BLOCKED.value, "qa.infrastructure/" + reason, next_version, timestamp, ticket["ticket_id"]))
+        connection.execute("DELETE FROM leases WHERE lease_id = ?", (job["lease_id"],))
+        self._close_ticket_dispatch(connection, ticket["ticket_id"], timestamp)
+        entry_id = _id("ctx")
+        connection.execute("""INSERT INTO context_entries
+            (entry_id, project_id, feature_id, ticket_id, entry_type, content, source_ref,
+             artifact_commit, actor_id, actor_role, created_at)
+            VALUES (?, ?, ?, ?, 'risk', ?, ?, ?, ?, ?, ?)""",
+            (entry_id, job["project_id"], ticket["feature_id"], ticket["ticket_id"],
+             f"QA infrastructure blocked: {reason}. Preserve this candidate; Planner must record readiness before retry. No source rework is requested.",
+             storage_ref, job["candidate_commit"], actor.agent_id, actor.role.value, timestamp))
+        updated = self._ticket(connection, ticket["ticket_id"])
+        self._event(connection, actor, job["project_id"], "qa.infrastructure_blocked", "ticket", ticket["ticket_id"],
+                    next_version, {"test_run_id": job["test_run_id"], "reason": reason, "next_role": "planner"})
+        self._open_planner_job(connection, actor, job["project_id"], updated,
+            job_type=PlannerJobType.QA_FAILURE, summary="QA infrastructure needs remediation and a guarded same-candidate retry.",
+            evidence_refs=[f"test_run:{job['test_run_id']}", storage_ref], candidate_id=job["candidate_id"],
+            context_entry_id=entry_id, severity=InterventionSeverity.NORMAL, artifact_commit=job["candidate_commit"])
 
     def fail_queued_project_test(self, test_run_id: str, message: str) -> dict[str, Any]:
         """Terminally record infrastructure or stale-state failures without blocking QA polling."""
@@ -669,7 +722,9 @@ class QaMixin:
                     )
                 next_status = TicketStatus.VERIFIED
             else:
-                next_status = TicketStatus.REWORK
+                evidence_gap = any(f.get("status") == "insufficient_evidence" for f in findings) and all(
+                    f.get("status") in {"verified", "insufficient_evidence"} for f in findings)
+                next_status = TicketStatus.BLOCKED if evidence_gap else TicketStatus.REWORK
                 known_failure_entry_id = _id("ctx")
                 connection.execute(
                     """
@@ -683,7 +738,8 @@ class QaMixin:
                         project_id,
                         ticket["feature_id"],
                         ticket_id,
-                        "QA rejected candidate; inspect linked findings and evidence",
+                        ("QA evidence is insufficient; infrastructure owner must record readiness before retry. No source rework is requested."
+                         if evidence_gap else "QA rejected candidate; inspect linked findings and evidence"),
                         f"candidate:{candidate_id}",
                         candidate["commit_sha"],
                         actor.agent_id,
@@ -697,11 +753,16 @@ class QaMixin:
                 (next_status.value, next_version, timestamp, ticket_id),
             )
             connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease_id,))
+            if next_status == TicketStatus.BLOCKED:
+                connection.execute("UPDATE tickets SET blocked_reason = ? WHERE ticket_id = ?",
+                                   ("qa.infrastructure/insufficient_evidence", ticket_id))
+                self._close_ticket_dispatch(connection, ticket_id, timestamp)
             self._event(
                 connection,
                 actor,
                 project_id,
-                "ticket.verified" if verdict == "passed" else "ticket.rework_requested",
+                ("ticket.verified" if verdict == "passed" else
+                 "qa.infrastructure_blocked" if next_status == TicketStatus.BLOCKED else "ticket.rework_requested"),
                 "ticket",
                 ticket_id,
                 next_version,

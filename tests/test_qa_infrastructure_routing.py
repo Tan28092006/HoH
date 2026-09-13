@@ -27,6 +27,13 @@ def test_infrastructure_execution_parks_same_candidate_and_remains_pollable(serv
     with pytest.raises(ValidationError, match="readiness"):
         service.recover_candidate_for_qa(actors["planner"], ticket["ticket_id"],
             polled["ticket"]["version"], queued["test_run"]["test_run_id"])
+    readiness = service.append_planner_context(actors["planner"], ticket_id=ticket["ticket_id"],
+        entry_type="planner_decision", content="Resource headroom restored and runner preflight verified.",
+        source_ref="evidence://operations/readiness.json")
+    recovered = service.recover_candidate_for_qa(actors["planner"], ticket["ticket_id"],
+        polled["ticket"]["version"], queued["test_run"]["test_run_id"], readiness["entry_id"])
+    assert recovered["ticket"]["status"] == "QA_READY"
+    assert recovered["candidate"]["candidate_id"] == candidate["candidate"]["candidate_id"]
 
 
 @pytest.mark.parametrize("finding_status,expected", [("insufficient_evidence", "BLOCKED"), ("failed", "REWORK")])
