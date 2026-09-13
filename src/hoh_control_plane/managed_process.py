@@ -103,7 +103,12 @@ def run_managed(command: list[str], *, cwd: str | Path, timeout: float,
         raise ValueError('A command, positive timeout and nonnegative output limit are required')
     # -I -S prevents ambient sitecustomize/PYTHONPATH from running code before
     # the worker is attached to the Job Object / process-group watchdog.
-    process = subprocess.Popen([sys.executable, '-I', '-S', '-u', '-c', _GATE],
+    # Windows venv python.exe is a redirector: it can launch the real interpreter
+    # before job assignment, leaving that child outside our Job Object. The gate
+    # needs only the stdlib, so start the base interpreter directly. The requested
+    # command still uses its original venv and inherits the already-owned job.
+    gate_python = (getattr(sys, '_base_executable', None) or sys.executable) if os.name == 'nt' else sys.executable
+    process = subprocess.Popen([gate_python, '-I', '-S', '-u', '-c', _GATE],
         cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         start_new_session=os.name != 'nt', creationflags=0x08000000 if os.name == 'nt' else 0)
     job = None
