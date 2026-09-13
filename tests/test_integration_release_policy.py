@@ -70,6 +70,37 @@ def test_a_fully_evidenced_candidate_queues_for_merge(
     assert _mainline(repository) != candidate["candidate"]["commit_sha"]
 
 
+def test_release_policy_selects_latest_submission_when_sha_was_resubmitted(service, actors, seeded, tmp_path):
+    _repository, ticket, candidate, _verified = _candidate_ready_for_integration(service, actors, seeded, tmp_path)
+    original_id = candidate['candidate']['candidate_id']
+    with service.store.connection(immediate=True) as connection:
+        connection.execute("""INSERT INTO candidates
+            (candidate_id,ticket_id,base_commit,commit_sha,branch_ref,developer_claims,submitted_by,submitted_at,frozen_at)
+            SELECT 'cand_current_policy',ticket_id,base_commit,commit_sha,branch_ref,developer_claims,submitted_by,
+                   '2099-01-01T00:00:00Z','2099-01-01T00:00:00Z' FROM candidates WHERE candidate_id=?""", (original_id,))
+        connection.execute("""INSERT INTO candidate_test_profiles SELECT 'cand_current_policy',test_command,
+            timeout_seconds,configured_at FROM candidate_test_profiles WHERE candidate_id=?""", (original_id,))
+    snapshot = service._release_policy_snapshot(actors['integrator'],ticket['ticket_id'])
+    assert snapshot['candidate']['candidate_id'] == 'cand_current_policy'
+
+
+def test_recovered_candidate_integrates_after_fresh_qa_without_erasing_old_gap(service, actors, seeded, tmp_path):
+    repository,ticket,candidate,verified = _candidate_ready_for_integration(service, actors, seeded, tmp_path)
+    candidate_id = candidate['candidate']['candidate_id']
+    with service.store.connection(immediate=True) as connection:
+        connection.execute("""INSERT INTO qa_findings
+            (finding_id,candidate_id,criterion,status,severity,observation,evidence_refs,created_by,created_at)
+            VALUES ('finding_historical_gap',?,?,'insufficient_evidence','high','Old runner failure','[]','qa-01','2020-01-01T00:00:00Z')""",
+            (candidate_id,ticket['acceptance_criteria'][0]))
+    integration = _claimed_for_integration(service,actors,ticket,verified)
+    queued = _queue(service,actors,ticket,integration)
+    completed = service.execute_queued_merge(queued['merge_job']['merge_job_id'])
+    assert completed['status'] == 'COMPLETED'
+    assert _mainline(repository) == candidate['candidate']['commit_sha']
+    with service.store.connection() as connection:
+        assert connection.execute("SELECT status FROM qa_findings WHERE finding_id='finding_historical_gap'").fetchone()[0] == 'insufficient_evidence'
+
+
 def test_base_drift_is_refused_before_anything_is_queued(
     service, actors, seeded, tmp_path: Path
 ) -> None:
