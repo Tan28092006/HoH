@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from hoh_control_plane import semantic_record
 from hoh_control_plane.service.qa import _INFRASTRUCTURE_OUTCOMES
 from hoh_control_plane.service._common import (
@@ -28,6 +30,19 @@ from hoh_control_plane.service._common import (
 
 class IntegrationMixin:
     """Protected merge gating, release policy and merge jobs."""
+
+    @staticmethod
+    def _current_integration_candidate(connection: Connection, ticket: dict[str, Any]) -> dict[str, Any]:
+        rows = connection.execute(
+            "SELECT * FROM candidates WHERE ticket_id = ? ORDER BY submitted_at DESC LIMIT 2",
+            (ticket["ticket_id"],),
+        ).fetchall()
+        candidate = _row(rows[0]) if rows else None
+        if (candidate is None or candidate["commit_sha"] != ticket["candidate_commit"]
+                or (len(rows) > 1 and rows[0]["submitted_at"] == rows[1]["submitted_at"])):
+            raise ReleasePolicyError("No unambiguous current candidate matches the ticket artifact",
+                                     {"reason": "candidate_identity_mismatch"})
+        return candidate
 
     def claim_qa(
         self,
@@ -99,11 +114,7 @@ class IntegrationMixin:
                     "SELECT * FROM project_repositories WHERE project_id = ?", (project_id,)
                 ).fetchone()
             )
-            candidate = self._one(
-                connection,
-                "SELECT * FROM candidates WHERE ticket_id = ? AND commit_sha = ?",
-                (ticket_id, ticket["candidate_commit"]),
-            )
+            candidate = self._current_integration_candidate(connection, ticket)
             if repository is None:
                 raise ValidationError("Project repository is required before integrating a candidate")
             gate_profile = _row(
@@ -645,17 +656,7 @@ class IntegrationMixin:
                     "SELECT * FROM project_repositories WHERE project_id = ?", (project_id,)
                 ).fetchone()
             )
-            rows = connection.execute(
-                "SELECT * FROM candidates WHERE ticket_id = ? ORDER BY submitted_at DESC LIMIT 2",
-                (ticket_id,),
-            ).fetchall()
-            candidate = _row(rows[0]) if rows else None
-            if (candidate is None or candidate["commit_sha"] != ticket["candidate_commit"]
-                    or (len(rows) > 1 and rows[0]["submitted_at"] == rows[1]["submitted_at"])):
-                raise ReleasePolicyError(
-                    "No frozen candidate matches the ticket's current artifact",
-                    {"reason": "candidate_identity_mismatch"},
-                )
+            candidate = self._current_integration_candidate(connection, ticket)
             candidate_id = candidate["candidate_id"]
             findings = [
                 _row(row)
@@ -872,11 +873,9 @@ class IntegrationMixin:
             )
             if repository is None:
                 raise ValidationError("Project repository is required before integrating a candidate")
-            candidate = self._one(
-                connection,
-                "SELECT * FROM candidates WHERE ticket_id = ? AND commit_sha = ?",
-                (ticket_id, ticket["candidate_commit"]),
-            )
+            candidate = self._current_integration_candidate(connection, ticket)
+            if candidate["candidate_id"] != snapshot["candidate"]["candidate_id"]:
+                raise ConflictError("Candidate changed after integration policy validation")
             active = _row(
                 connection.execute(
                     """SELECT * FROM merge_jobs
@@ -1005,6 +1004,49 @@ class IntegrationMixin:
         if preflight_error is not None:
             return self.fail_queued_merge(merge_job_id, preflight_error)
         try:
+            snapshot = self._release_policy_snapshot(actor, job["ticket_id"])
+            self._require_release_evidence(snapshot)
+            if snapshot["candidate"]["candidate_id"] != job["candidate_id"]:
+                raise ConflictError("Queued candidate is no longer the current policy snapshot")
+            profile = snapshot["profile"]
+            command = profile["test_command"]
+            self._test_command(command)
+            with self.git_worktrees.integration_checkout(
+                repository_path=repository["repository_path"], project_id=job["project_id"],
+                ticket_id=job["ticket_id"], candidate_commit=candidate["commit_sha"],
+            ) as integration_path:
+                execution = self.project_tests.execute(command, integration_path, profile["timeout_seconds"])
+            execution = replace(execution, environment_manifest={**execution.environment_manifest,
+                "merge_job_id": merge_job_id,
+                "frozen_profile": {"configured_at": profile["configured_at"],
+                    "timeout_seconds": profile["timeout_seconds"],
+                    "command_digest": hashlib.sha256("\0".join(command).encode()).hexdigest()}})
+            with self.store.connection(immediate=True) as connection:
+                gate_run = self._record_integration_gate(connection, actor, project_id=job["project_id"],
+                    ticket=ticket, candidate_id=job["candidate_id"], candidate_commit=candidate["commit_sha"],
+                    execution=execution, timestamp=_iso())
+            if (execution.artifact_mismatch or execution.termination_reason in _INFRASTRUCTURE_OUTCOMES
+                    or execution.capture_errors or execution.stdout_truncated or execution.stderr_truncated):
+                return self.fail_queued_merge(merge_job_id,
+                    f"Integration infrastructure failure: {execution.termination_reason}; preserve candidate and retry after remediation. No source rework.")
+            if execution.exit_code != 0 or execution.timed_out:
+                return self._complete_queued_merge(merge_job_id, False, candidate["base_commit"],
+                    regression_failure=f"Integration regression failed; inspect {gate_run['storage_ref']} and submit corrected source for independent QA.")
+            # A hold or revoked lease during a long gate must still prevent Git.
+            current = self._release_policy_snapshot(actor, job["ticket_id"])
+            self._require_release_evidence(current)
+            if current["candidate"]["candidate_id"] != job["candidate_id"]:
+                raise ConflictError("Candidate changed while the integration gate ran")
+            with self.store.connection(immediate=True) as connection:
+                current_ticket = self._ticket(connection, job["ticket_id"])
+                self._expect_version(current_ticket, job["expected_version"])
+                self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
+                self._event(connection, actor, job["project_id"], "integration.gate_passed", "merge_job",
+                    merge_job_id, job["expected_version"], {"candidate_id": job["candidate_id"],
+                        "candidate_commit": candidate["commit_sha"], "test_run_id": gate_run["test_run_id"]})
+        except DomainError as error:
+            return self.fail_queued_merge(merge_job_id, str(error))
+        try:
             merged, mainline_commit = self.git_worktrees.fast_forward_default_branch(
                 repository_path=repository["repository_path"],
                 default_branch=project["default_branch"],
@@ -1017,6 +1059,16 @@ class IntegrationMixin:
             # facts instead of turning an uncertain side effect into a retry.
             self._merge_needs_attention(merge_job_id, str(error))
             return self._reconcile_merge_locked(merge_job_id)
+
+    def _queued_gate_is_recorded(self, connection: Connection, job: dict[str, Any]) -> bool:
+        proof = _row(connection.execute(
+            "SELECT * FROM audit_events WHERE event_type='integration.gate_passed' AND aggregate_id=? ORDER BY sequence DESC LIMIT 1",
+            (job["merge_job_id"],)).fetchone())
+        if proof is None or proof["payload"].get("candidate_id") != job["candidate_id"]:
+            return False
+        return connection.execute(
+            "SELECT 1 FROM qa_test_runs WHERE test_run_id=? AND candidate_id=? AND exit_code=0 AND timed_out=0",
+            (proof["payload"].get("test_run_id"), job["candidate_id"])).fetchone() is not None
 
     def reconcile_merge_job(self, actor: Actor, merge_job_id: str) -> dict[str, Any]:
         require_role(actor, Role.ADMIN)
@@ -1060,6 +1112,10 @@ class IntegrationMixin:
             return self._merge_needs_attention(merge_job_id, 'Repository has uncommitted work; it was preserved')
         head = self.git_worktrees._resolve_commit(path, 'refs/heads/' + intent['default_branch'])
         if self.git_worktrees.commit_is_on_branch(repository_path=str(path), default_branch=intent['default_branch'], commit=intent['candidate_commit']):
+            with self.store.connection() as connection:
+                gate_recorded = self._queued_gate_is_recorded(connection, job)
+            if not gate_recorded:
+                return self._merge_needs_attention(merge_job_id, "No passed gate evidence is bound to this merge job; preserve external movement for operator review")
             try:
                 return self._complete_queued_merge(merge_job_id, True, intent['candidate_commit'], recovered=True)
             except DomainError as error:
@@ -1090,7 +1146,8 @@ class IntegrationMixin:
             return repository, project, candidate
 
     def _complete_queued_merge(
-        self, merge_job_id: str, merged: bool, mainline_commit: str, *, recovered: bool = False
+        self, merge_job_id: str, merged: bool, mainline_commit: str, *, recovered: bool = False,
+        regression_failure: str | None = None,
     ) -> dict[str, Any]:
         with self.store.connection(immediate=True) as connection:
             job = self._merge_job(connection, merge_job_id)
@@ -1112,7 +1169,7 @@ class IntegrationMixin:
             next_version = ticket["version"] + 1
             connection.execute("DELETE FROM leases WHERE lease_id = ?", (job["lease_id"],))
             if not merged:
-                reason = (
+                reason = regression_failure or (
                     "Mainline advanced after this candidate was based; rebase the candidate "
                     "and submit a new QA candidate."
                 )
@@ -1121,10 +1178,11 @@ class IntegrationMixin:
                     INSERT INTO context_entries
                         (entry_id, project_id, feature_id, ticket_id, entry_type, content,
                          source_ref, artifact_commit, actor_id, actor_role, created_at)
-                    VALUES (?, ?, ?, ?, 'integration_base_drift', ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         _id("ctx"), job["project_id"], ticket["feature_id"], job["ticket_id"],
+                        "integration_regression_failed" if regression_failure else "integration_base_drift",
                         reason, f"candidate:{job['candidate_id']}", mainline_commit,
                         actor.agent_id, actor.role.value, timestamp,
                     ),
@@ -1138,7 +1196,8 @@ class IntegrationMixin:
                     (TicketStatus.REWORK.value, reason, next_version, timestamp, job["ticket_id"]),
                 )
                 self._event(
-                    connection, actor, job["project_id"], "integration.base_drift", "ticket",
+                    connection, actor, job["project_id"],
+                    "integration.regression_failed" if regression_failure else "integration.base_drift", "ticket",
                     job["ticket_id"], next_version,
                     {"candidate_id": job["candidate_id"], "mainline_commit": mainline_commit},
                 )
@@ -1162,10 +1221,12 @@ class IntegrationMixin:
                 )
                 connection.execute(
                     """UPDATE merge_jobs
-                       SET status = 'COMPLETED', merge_status = 'base_drift', mainline_commit = ?,
-                           error_message = NULL, completed_at = ?
+                       SET status = ?, merge_status = ?, mainline_commit = ?,
+                           error_message = ?, completed_at = ?
                        WHERE merge_job_id = ?""",
-                    (mainline_commit, timestamp, merge_job_id),
+                    ("FAILED" if regression_failure else "COMPLETED",
+                     None if regression_failure else "base_drift", mainline_commit,
+                     regression_failure, timestamp, merge_job_id),
                 )
                 return self._merge_job(connection, merge_job_id)
             connection.execute(

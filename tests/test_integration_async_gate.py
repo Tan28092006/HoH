@@ -70,3 +70,22 @@ def test_recovery_will_not_certify_external_movement_without_job_gate(service,ac
     recovered=service.reconcile_merge_job(ADMIN,job['merge_job_id'])
     assert recovered['status']=='RUNNING'
     assert 'gate' in recovered['error_message'].lower()
+
+
+@pytest.mark.parametrize('revocation', ['hold','lease'])
+def test_gate_rechecks_authorization_before_git(service,actors,seeded,tmp_path,monkeypatch,revocation):
+    repo,ticket,candidate,claim,job=ready(service,actors,seeded,tmp_path)
+    def execute(command,path,timeout):
+        if revocation=='hold':
+            # Arrange the durable release-policy record, as in the policy tests.
+            from test_integration_release_policy import _add_context
+            _add_context(service,ticket,'integration_hold',candidate['commit_sha'],'2099-01-01T00:00:00Z')
+        else:
+            with service.store.connection(immediate=True) as c:
+                c.execute('DELETE FROM leases WHERE lease_id=?',(claim['lease']['lease_id'],))
+        return Execution(command_digest=hashlib.sha256('\0'.join(command).encode()).hexdigest(),
+            exit_code=0,timed_out=False,duration_ms=1,stdout='passed',stderr='',termination_reason='passed')
+    monkeypatch.setattr(service.project_tests,'execute',execute)
+    result=service.execute_queued_merge(job['merge_job_id'])
+    assert result['status']=='FAILED'
+    assert _git(repo,'rev-parse','main')==candidate['base_commit']
