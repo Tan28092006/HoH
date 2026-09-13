@@ -73,6 +73,16 @@ def test_a_commit_really_on_the_branch_can_be_recorded(service, actors, landed) 
     assert result["gated"] is False
 
 
+def test_external_landing_does_not_certify_feature_or_inherited_criteria(service, actors, landed):
+    _record(service, actors["integrator"], landed)
+    feature = service.get_feature_context(actors["planner"], "payment-retry")
+    assert feature["verified_behaviors"] == []
+    successor = service.create_ticket(actors["planner"], "payment-retry", "NEXT-1", "Next change", "Continue",
+        Role.DEVELOPER, ["New behavior"], [], ["src/checkout/**"])
+    context = service.get_ticket_context(actors["developer"], successor["ticket_id"])
+    assert context["inherited_constraints"] == []
+
+
 def test_expired_lease_cannot_resurrect_recorded_landing(service, actors, landed):
     from hoh_control_plane.domain import Actor
     ticket = landed["ticket"]
