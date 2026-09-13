@@ -184,3 +184,59 @@ def test_configuring_repository_does_not_block_mcp_transport(service, actors, mo
         assert bootstrap['selected_project_id'] == 'project-1'
         await configuring
     asyncio.run(scenario())
+
+
+def test_http_wait_keeps_its_own_response_stream_alive(service, actors, monkeypatch):
+    import socket
+    import httpx
+    import uvicorn
+    from datetime import timedelta
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+    from hoh_control_plane.auth import AgentCredential
+    from hoh_control_plane.mcp_server import create_mcp_http_app
+    monkeypatch.setattr('hoh_control_plane.event_wait.RECOVERY_SECONDS', .05)
+    service.register_agent(actors['qa'], skills=['qa'], capacity=1)
+    token = 'test-local-http-wait-credential'
+    app = create_mcp_http_app(service, (AgentCredential(token, actors['qa']),))
+    async def scenario():
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            address = f'http://127.0.0.1:{listener.getsockname()[1]}/mcp'
+            server = uvicorn.Server(uvicorn.Config(app, log_level='critical'))
+            running = asyncio.create_task(server.serve(sockets=[listener]))
+            try:
+                for _ in range(100):
+                    if server.started:
+                        break
+                    await asyncio.sleep(.01)
+                assert server.started
+                async with httpx.AsyncClient(headers={'Authorization':'Bearer ' + token}, timeout=8) as http:
+                    async with streamable_http_client(address, http_client=http) as (read, write, _):
+                        async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=8)) as client:
+                            await client.initialize()
+                            result = await client.call_tool('work.wait_for_event', {'project_id':'project-1','timeout_seconds':1})
+                            assert not result.isError, result
+                            assert result.structuredContent['status'] == 'timeout'
+            finally:
+                server.should_exit = True
+                await running
+    asyncio.run(scenario())
+
+
+def test_cancelled_mcp_wait_records_a_valid_audit_outcome(service, actors):
+    from hoh_control_plane.mcp_server import create_mcp_server
+    actor = actors['qa']
+    service.register_agent(actor, skills=['qa'], capacity=1)
+    async def scenario():
+        server = create_mcp_server(service, actor)
+        waiting = asyncio.create_task(server.call_tool('work.wait_for_event', {'project_id':'project-1','timeout_seconds':5}))
+        await asyncio.sleep(.04)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        with service.store.connection() as db:
+            row = db.execute("SELECT outcome,error_code FROM agent_tool_calls WHERE tool_name='work.wait_for_event' ORDER BY sequence DESC LIMIT 1").fetchone()
+        assert row['outcome'] == 'failed'
+        assert row['error_code'] == 'request_cancelled'
+    asyncio.run(scenario())
