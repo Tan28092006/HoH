@@ -8,7 +8,7 @@ import sys
 import time
 import anyio
 from collections.abc import Callable
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -1452,6 +1452,7 @@ def create_mcp_http_app(
     service: ControlPlaneService,
     credentials: tuple[AgentCredential, ...],
     transport: str = "streamable-http",
+    credentials_provider: Callable[[], tuple[AgentCredential, ...]] | None = None,
 ) -> Any:
     """Serve one authenticated MCP endpoint per configured credential.
 
@@ -1465,20 +1466,26 @@ def create_mcp_http_app(
             f"A network transport requires agent credentials in {TOKENS_VARIABLE}"
         )
     per_actor = {}
-    for credential in credentials:
-        server = create_mcp_server(service, credential.actor, stateless_http=transport == "streamable-http")
-        per_actor[credential.token] = (
-            server.sse_app() if transport == "sse" else server.streamable_http_app()
-        )
+    group = None
+    creation_lock = anyio.Lock()
+
+    async def serve_child(child, *, task_status=anyio.TASK_STATUS_IGNORED):
+        # Each lifespan is entered and exited by the same task (AnyIO scopes).
+        async with child.router.lifespan_context(child):
+            task_status.started()
+            await anyio.sleep_forever()
 
     @asynccontextmanager
     async def lifespan(_app: Any):
-        # Delegating requests alone does not start the SDK's session managers.
-        # Enter each child lifespan and shut them down in reverse order.
-        async with AsyncExitStack() as stack:
-            for child in per_actor.values():
-                await stack.enter_async_context(child.router.lifespan_context(child))
-            yield
+        nonlocal group
+        async with anyio.create_task_group() as running:
+            group = running
+            try:
+                yield
+            finally:
+                running.cancel_scope.cancel()
+                group = None
+                per_actor.clear()
 
     from starlette.applications import Starlette
 
@@ -1507,17 +1514,22 @@ def create_mcp_http_app(
         headers = {key.lower(): value for key, value in scope.get("headers", [])}
         authorization = headers.get(b"authorization", b"").decode("latin-1") or None
         try:
-            actor = resolve_actor(credentials, authorization)
-        except AuthorizationError as error:
+            current = credentials_provider() if credentials_provider else credentials
+            actor = resolve_actor(current, authorization)
+        except (AuthorizationError, ValueError, OSError, ValidationError):
             # The reason is deliberately coarse: which of missing or wrong is not
             # information an unauthenticated caller has earned.
-            await refuse(scope, receive, send, str(error))
+            await refuse(scope, receive, send, 'A valid bearer credential is required')
             return
-        for credential in credentials:
-            if credential.actor == actor:
-                await per_actor[credential.token](scope, receive, send)
-                return
-        await refuse(scope, receive, send, "Unknown credential")
+        async with creation_lock:
+            if actor not in per_actor:
+                if group is None:
+                    raise RuntimeError('MCP HTTP lifespan has not started')
+                server = create_mcp_server(service, actor, stateless_http=transport == 'streamable-http')
+                child = server.sse_app() if transport == 'sse' else server.streamable_http_app()
+                await group.start(serve_child, child)
+                per_actor[actor] = child
+        await per_actor[actor](scope, receive, send)
 
     return app
 
@@ -1536,8 +1548,13 @@ def main() -> None:
             )
         import uvicorn
 
+        provider = None
+        if os.getenv('HOH_LOCAL_CREDENTIALS_PATH'):
+            from hoh_control_plane.local_credentials import credential_provider
+            provider = credential_provider(credentials, os.environ['HOH_LOCAL_CREDENTIALS_PATH'])
+
         uvicorn.run(
-            create_mcp_http_app(service, credentials, transport),
+            create_mcp_http_app(service, credentials, transport, provider),
             host=os.getenv("HOH_MCP_HOST", "127.0.0.1"),
             port=int(os.getenv("HOH_MCP_PORT", "8931")),
             log_level="warning",

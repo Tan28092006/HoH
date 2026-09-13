@@ -153,7 +153,9 @@ class Supervisor:
         return self.pool.submit(self._execute, execution_id, kind, identifier)
 
     def _execute(self, execution_id, kind, identifier):
-        environment = {k: v for k, v in os.environ.items() if not k.startswith('HOH_')}
+        environment = {k: v for k, v in os.environ.items()
+                       if not k.upper().startswith(('HOH_', 'COV_CORE', 'COVERAGE'))
+                       and k.upper() not in {'PYTHONPATH', 'PYTHONHOME'}}
         environment['PYTHONPATH'] = str(Path(__file__).resolve().parents[1])
         environment['HOH_ARTIFACT_ROOT'] = str(self.service.store.artifact_root.resolve())
         if hasattr(self.service.store, 'dsn'):

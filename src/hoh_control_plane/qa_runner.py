@@ -171,7 +171,8 @@ class ProjectTestRunner:
         # database DSN or agent identity. OS-level sandboxing is still required
         # for hostile code: removing env vars is not a filesystem boundary.
         for key in list(environment):
-            if key.upper().startswith("HOH_"):
+            if (key.upper().startswith(("HOH_", "COV_CORE", "COVERAGE"))
+                    or key.upper() in {'PYTHONPATH', 'PYTHONHOME', 'VIRTUAL_ENV'}):
                 environment.pop(key)
         for key in (
             "COVERAGE_PROCESS_START",
@@ -188,10 +189,8 @@ class ProjectTestRunner:
         # imports the exact candidate being tested rather than an unrelated checkout.
         source_root = Path(worktree_path) / "src"
         if source_root.is_dir():
-            existing_path = environment.get("PYTHONPATH", "")
-            environment["PYTHONPATH"] = (
-                f"{source_root}{os.pathsep}{existing_path}" if existing_path else str(source_root)
-            )
+            environment['PYTHONPATH'] = str(source_root.resolve())
+        environment['PYTHONNOUSERSITE'] = '1'
         return environment
 
     def _resolve_candidate_source(

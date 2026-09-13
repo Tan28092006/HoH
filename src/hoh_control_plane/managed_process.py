@@ -32,6 +32,17 @@ except OSError:
     sys.stderr.write('[hoh:exec-error] Command could not be started\n')
     sys.exit(127)
 code = child.wait()
+if os.name == 'nt':
+    import ctypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.ExitProcess.argtypes = [ctypes.c_uint32]
+    kernel.ExitProcess.restype = None
+    kernel.ExitProcess(code & 0xffffffff)
+if code < 0:
+    # Preserve a POSIX signal termination rather than collapsing it to exit 1.
+    if -code not in (signal.SIGKILL, signal.SIGSTOP):
+        signal.signal(-code, signal.SIG_DFL)
+    os.kill(os.getpid(), -code)
 # The POSIX watchdog may still be reading stdin. Avoid interpreter shutdown
 # trying to acquire its buffered-reader lock; the owner reaps the process group.
 os._exit(code if 0 <= code <= 255 else 1)

@@ -360,7 +360,7 @@ def test_execute_resolves_the_candidate_source_over_an_ambient_shadow(
     ).resolve()
 
 
-def test_execute_leaves_an_existing_pythonpath_intact_behind_the_candidate(
+def test_execute_discards_host_pythonpath_and_keeps_only_candidate_source(
     tmp_path: Path, monkeypatch
 ) -> None:
     other_root = tmp_path / "other-tooling"
@@ -381,7 +381,8 @@ def test_execute_leaves_an_existing_pythonpath_intact_behind_the_candidate(
 
     entries = execution.stdout.strip().split(os.pathsep)
     assert str((worktree / "src").resolve()) == str(Path(entries[0]).resolve())
-    assert str(other_root) in entries
+    assert str(other_root) not in entries
+    assert len(entries) == 1
 
 
 def test_execute_fails_closed_on_artifact_mismatch_without_running_the_configured_command(

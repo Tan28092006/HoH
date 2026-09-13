@@ -105,6 +105,62 @@ def test_drain_waits_for_workers_and_reopen_restores_admission(desktop):
         assert db.execute("SELECT state_value FROM runtime_state WHERE state_key='paused'").fetchone()[0] == '0'
 
 
+@pytest.mark.parametrize('client_name', ['codex', 'claude-code'])
+def test_shared_http_upgrades_only_generated_profile_and_keeps_identity(desktop, tmp_path, client_name):
+    import tomllib
+    from hoh_control_plane.auth import credentials_from_environment
+    from hoh_control_plane.local_agent import install_profile
+    client, root = desktop
+    client.post('/local/projects', json={'project_id': 'shop', 'name': 'Shop'}, headers=headers(client))
+    home = tmp_path / 'client'
+    old = install_profile(root, 'shop', 'qa', 'primary', client_name, home)
+    new = install_profile(root, 'shop', 'qa', 'primary', client_name, home, transport='shared-http')
+    assert old['agent_id'] == new['agent_id'] and old['server_name'] == new['server_name']
+    path = home / ('.codex/config.toml' if client_name == 'codex' else '.claude.json')
+    content = path.read_text()
+    entries = tomllib.loads(content)['mcp_servers'] if client_name == 'codex' else json.loads(content)['mcpServers']
+    profile = entries[new['server_name']]
+    assert 'command' not in profile and 'args' not in profile
+    assert profile['url'].startswith('http://127.0.0.1:')
+    credentials = credentials_from_environment((root / 'config/agent-credentials.json').read_text())
+    assert len(credentials) == 1
+    assert credentials[0].actor.agent_id == new['agent_id']
+    assert credentials[0].actor.project_ids == frozenset({'shop'})
+    assert credentials[0].token not in json.dumps(new)
+    install_profile(root, 'shop', 'qa', 'primary', client_name, home, transport='shared-http')
+    assert path.read_text() == content
+
+
+def test_legacy_migration_preserves_actor_and_unrelated_config(desktop, tmp_path):
+    import tomllib
+    from hoh_control_plane.profile_migration import migrate
+    from hoh_control_plane.auth import credentials_from_environment
+    client, root = desktop
+    client.post('/local/projects', json={'project_id':'shop', 'name':'Shop'}, headers=headers(client))
+    home = tmp_path / 'client'
+    path = home / '.codex/config.toml'
+    path.parent.mkdir(parents=True)
+    legacy = tmp_path / 'legacy'
+    args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(legacy / 'scripts/start-mcp.ps1')]
+    untouched = '\n# preserve comment\n[mcp_servers.other]\ncommand = "untouched"\n\n[projects.example]\ntrust_level = "trusted"\n'
+    original = ('model = "keep"\n[mcp_servers.hoh-developer]\ncommand = "powershell.exe"\nargs = '
+                + json.dumps(args) + '\n[mcp_servers.hoh-developer.env]\nHOH_AGENT_ID = "original-dev"\n'
+                'HOH_AGENT_ROLE = "developer"\nHOH_PROJECT_IDS = "shop"\n' + untouched)
+    path.write_text(original)
+    preview = migrate(root, home, 'codex', legacy)
+    assert len(preview['profiles']) == 1 and path.read_text() == original
+    result = migrate(root, home, 'codex', legacy, apply=True)
+    assert Path(result['backup_path']).read_text() == original
+    parsed = tomllib.loads(path.read_text())
+    assert parsed['model'] == 'keep' and parsed['mcp_servers']['other']['command'] == 'untouched'
+    assert parsed['projects']['example']['trust_level'] == 'trusted'
+    assert '# preserve comment' in path.read_text()
+    assert 'command' not in parsed['mcp_servers']['hoh-developer']
+    credentials = credentials_from_environment((root / 'config/agent-credentials.json').read_text())
+    assert credentials[0].actor.agent_id == 'original-dev'
+    assert not migrate(root, home, 'codex', legacy, apply=True)['profiles']
+
+
 def test_explicit_skill_upgrade_keeps_backup_and_rolls_back_config_conflict(desktop, tmp_path):
     from hoh_control_plane.local_agent import install_profile
     client, root = desktop

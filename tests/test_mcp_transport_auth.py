@@ -275,3 +275,58 @@ def test_http_client_can_initialize_list_and_call_tools(service) -> None:
         }))
         assert called["result"]["structuredContent"]["agent_id"] == "dev-01"
         assert "mcp-session-id" not in initialized.headers, "HTTP sessions must not accumulate between chats"
+
+
+def test_shared_host_loads_new_profiles_and_revokes_without_restart(service, tmp_path):
+    from starlette.testclient import TestClient
+    from hoh_control_plane.local_credentials import credential_provider, register_local_credential
+    actor = Actor('new-qa', Role.QA, frozenset({'project-1'}))
+    path = tmp_path / 'config/agent-credentials.json'
+    app = create_mcp_http_app(service, _credentials(), credentials_provider=credential_provider(_credentials(), path))
+    with TestClient(app, base_url='http://127.0.0.1') as client:
+        token = register_local_credential(tmp_path, actor)
+        assert register_local_credential(tmp_path, actor) == token
+        headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json, text/event-stream'}
+        payload = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}
+        response = client.post('/mcp', headers=headers, json=payload)
+        assert response.status_code == 200
+        data = json.loads(next(line[6:] for line in response.text.splitlines() if line.startswith('data: ')))
+        names = {tool['name'] for tool in data['result']['tools']}
+        assert 'qa.run_project_tests' in names and 'dev.submit_candidate' not in names
+        # Revocation is checked even for an actor whose server is already cached.
+        path.unlink()
+        assert client.post('/mcp', headers=headers, json=payload).status_code == 401
+        path.write_text('invalid json')
+        rejected = client.post('/mcp', headers=headers, json=payload)
+        assert rejected.status_code == 401 and token not in rejected.text
+
+
+def test_shared_http_reconnect_fences_old_wait_and_keeps_same_actor(service, actors):
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+    from starlette.testclient import TestClient
+    service.create_project(actors['planner'], project_id='project-1', name='Wait recovery', description='', default_branch='main')
+    service.register_agent(actors['developer'], skills=['developer'], capacity=1)
+    headers = {'Authorization': f'Bearer {DEV_TOKEN}', 'Accept': 'application/json, text/event-stream'}
+    app = create_mcp_http_app(service, _credentials())
+    with TestClient(app, base_url='http://127.0.0.1') as client, ThreadPoolExecutor(2) as pool:
+        def call(identifier, arguments):
+            response = client.post('/mcp', headers=headers, json={
+                'jsonrpc':'2.0', 'id':identifier, 'method':'tools/call',
+                'params':{'name':'work.wait_for_event', 'arguments':arguments}})
+            assert response.status_code == 200, response.text
+            messages = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith('data: ')]
+            result = next(message['result'] for message in messages if message.get('id') == identifier)
+            assert not result.get('isError'), result
+            return result['structuredContent']
+        previous = pool.submit(call, 1, {'project_id':'project-1', 'timeout_seconds':5})
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            wait = service.session_bootstrap(actors['developer'], 'project-1')['event_wait']
+            if wait is not None:
+                break
+            time.sleep(.02)
+        assert wait is not None
+        resumed = call(2, {'project_id':'project-1', 'timeout_seconds':1, 'resume_wait_id':wait['wait_id']})
+        assert previous.result(timeout=3)['status'] == 'superseded'
+        assert resumed['status'] == 'timeout'

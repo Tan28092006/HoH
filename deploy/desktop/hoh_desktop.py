@@ -47,7 +47,8 @@ def initialize():
 def environment(component):
     config = settings()
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith(('HOH_', 'COV_CORE', 'COVERAGE')) and k != 'PYTHONPATH'}
+           if not k.upper().startswith(('HOH_', 'COV_CORE', 'COVERAGE'))
+           and k.upper() not in {'PYTHONPATH', 'PYTHONHOME'}}
     env.update(HOH_DATABASE_PATH=config['database_path'],
                HOH_WORKER_MODE='supervised', HOH_HOST='127.0.0.1',
                HOH_PORT=str(config['ui_port']), HOH_SEED_DEMO='0',
@@ -55,6 +56,7 @@ def environment(component):
                HOH_MCP_TRANSPORT='streamable-http', PYTHONIOENCODING='utf-8')
     if component == 'mcp':
         env['HOH_MCP_TOKENS_JSON'] = (ROOT / 'config/credentials.json').read_text(encoding='utf-8')
+        env['HOH_LOCAL_CREDENTIALS_PATH'] = str(ROOT / 'config/agent-credentials.json')
     return env
 
 

@@ -1,4 +1,4 @@
-# Windows desktop operator controls (0.3.3)
+# Windows desktop operator controls (0.3.4)
 
 These launcher files describe the existing single-user installation at
 `D:\HoH-service`; they are not a universal Windows installer. The Python package
@@ -7,6 +7,16 @@ the normal API. Copy the launcher files into the installation root only after
 stopping its host and installing the matching wheel. Keep `config`, database,
 artifact roots and Git worktrees in place. Never run `--initialize` or
 `--bootstrap-data` over an existing installation.
+
+For a packaged upgrade, extract the archive and run its `upgrade_local.py` with
+the installed Python and `--root D:\HoH-service`. It validates the manifest,
+requests a draining shutdown, checks both ports closed, backs up SQLite and the
+launcher, installs only the supplied wheel, and checks the restarted version.
+It does not recreate the database or relocate any Git worktree. Then run the
+profile migration below and reload the clients. `verify_shared_profiles.py`
+checks bootstrap and role surfaces using read-only HTTP calls; its optional
+`--connections 17 --hold-seconds 20` supports measuring the shared host under
+multiple connected clients.
 
 ## Operator workflow
 
@@ -35,7 +45,7 @@ Generated prompts run `python -m hoh_control_plane.local_agent setup` using the
 installed runtime. The installer supports Codex and Claude Code, preserves
 unrelated client settings, refuses conflicting MCP entries, and can explicitly
 back up and upgrade only HoH base/role skills. A profile has a stable identity
-derived from project, role and instance; its stdio server scope contains exactly
+derived from project, role and instance; its credential scope contains exactly
 that project. A second concurrent agent in the same role needs its own instance.
 A normal restart of the same chat keeps its existing instance: bootstrap exposes
 `event_wait.wait_id`, and the next `work.wait_for_event` resumes that wait with
@@ -59,9 +69,24 @@ client does not treat an otherwise healthy wait as silent. Stopping a chat,
 sleeping the machine or stopping HoH still ends that chat's wait; a stopped GUI
 conversation cannot be reopened by MCP.
 
-These profiles are for sessions running under this Windows account on this
-machine. They use OS access, not remote bearer tokens. Creating a project does
-not broaden existing HTTP token scopes. Remote agents still need separately
+New desktop setup prompts use `--transport shared-http`. Each chat connects
+directly to the existing loopback MCP host, so no Python/PowerShell server is
+spawned per chat. Setup provisions a private role/project credential in
+`config/agent-credentials.json` and the client configuration. Never paste those
+files into a chat or include them in a release archive. The host reloads this
+map before authenticating each request and lazily builds one tool surface per
+identity. HTTP sessions are stateless; idle GUI connections do not accumulate
+server-side session managers. Revoked credentials cannot reuse a cached actor.
+
+Existing `serve` profiles remain compatible. To migrate recognized profiles,
+run `python -I -m hoh_control_plane.profile_migration --root D:\HoH-service
+--client codex --legacy-repository D:\HoH` (or `--client claude-code`). The first
+run previews identity-preserving changes; add `--apply` to write with backups.
+Only known generated profiles are changed. Reload the clients after migration
+to release their old stdio processes. Open HoH with its Desktop icon before
+connecting: HTTP profiles do not automatically start an operator-stopped host.
+
+Creating a project does not broaden existing HTTP token scopes. Remote agents still need separately
 provisioned credentials and an authorized network path. Both listeners remain
 loopback-only. Do not expose the local operator UI directly to a network.
 
@@ -83,3 +108,18 @@ REST mutation routes remain unavailable through the desktop listener. Writes
 require a matching loopback Host, same-origin Origin and per-process session
 nonce. No bearer token is sent to the browser. This is a trusted single-host
 pilot, without HA or a worker sandbox.
+
+## Candidate environment boundary
+
+The QA runner discards ambient `PYTHONPATH`, `PYTHONHOME`, `VIRTUAL_ENV`, HoH
+credentials and coverage injection before starting a candidate command. It adds
+only the candidate worktree's own `src` directory and disables user-site imports.
+It deliberately does not add `-I` to the candidate command: framework-specific
+path configuration and frozen command profiles remain authoritative. Windows
+native exit codes survive the managed gate as unsigned 32-bit statuses.
+
+This fixes cross-version host dependency leakage, but does not finish the
+`area303-hoh-runner-readiness` contract. Project-configurable provenance after
+pytest configuration, an actual-child environment manifest, resource admission
+and infrastructure-only QA retry routing still need their own changes. Do not
+mark an existing candidate accepted using historical insufficient evidence.

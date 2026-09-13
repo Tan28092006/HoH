@@ -23,6 +23,15 @@ def install(kit: Path, home: Path, client: str) -> None:
     if client == "codex":
         parsed = tomllib.loads(text)
         old = parsed.get("mcp_servers", {}).get(name)
+        previous = manifest.get('upgrade_from', {}).get('codex')
+        if previous is not None and old is not None and {**old, 'tool_timeout_sec': 86400} == previous:
+            # Only an exact generated stdio profile is eligible. Preserve all
+            # unrelated tables and settings, including their comments.
+            block = re.compile(r'(?ms)^\[mcp_servers\.' + re.escape(name) + r'\][ \t]*\n.*?(?=^\[|\Z)')
+            if len(block.findall(text)) != 1:
+                raise ValueError('Cannot locate generated profile for transport upgrade')
+            text = block.sub('', text)
+            old = None
         if old is not None and 'tool_timeout_sec' not in old and {**old, 'tool_timeout_sec': 86400} == manifest['codex']:
             # Only the generated, otherwise identical profile receives this
             # additive timeout upgrade. Keep comments and other profiles intact.
@@ -38,6 +47,13 @@ def install(kit: Path, home: Path, client: str) -> None:
         parsed = json.loads(text or "{}")
         supplied = json.loads((kit / "mcp.json").read_text(encoding="utf-8"))["mcpServers"][name]
         old = parsed.setdefault("mcpServers", {}).get(name)
+        previous = manifest.get('upgrade_from', {}).get('claude-code')
+        if previous is not None and old is not None:
+            if {k: v for k, v in old.items() if k != 'timeout'} == {k: v for k, v in previous.items() if k != 'timeout'}:
+                timeout = old.get('timeout', 86400000)
+                if type(timeout) is int and timeout > 0:
+                    supplied['timeout'] = max(supplied['timeout'], timeout)
+                    old = None
         if old is not None and 'timeout' in supplied:
             required_timeout = supplied['timeout']
             old_timeout = old.get('timeout', required_timeout)

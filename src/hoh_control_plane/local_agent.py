@@ -38,23 +38,41 @@ def checked_project(root, project):
     return config
 
 
-def install_profile(root, project, role, instance, client, home, upgrade_skills=False):
+def install_profile(root, project, role, instance, client, home, upgrade_skills=False, transport='stdio'):
     from hoh_control_plane.agent_kit import build_kit
     from hoh_control_plane.agent_assets.install import install
-    checked_project(root, project)
+    config = checked_project(root, project)
+    if transport not in {'stdio', 'shared-http'}:
+        raise ValueError('Unknown local MCP transport')
     actor = profile_actor(project, role, instance)
     server = 'hoh-' + actor.agent_id
     command = str(root / '.venv/Scripts/python.exe')
     arguments = ['-m', 'hoh_control_plane.local_agent', 'serve', '--root', str(root),
                  '--project', project, '--role', role, '--instance', instance]
     codex = {'command': command, 'args': arguments, 'tool_timeout_sec': 86400}
+    claude = {'type': 'stdio', 'command': command, 'args': arguments, 'timeout': 86400000}
+    previous = {'codex': codex, 'claude-code': claude}
+    if transport == 'shared-http':
+        from hoh_control_plane.local_credentials import register_local_credential
+        token = register_local_credential(root, actor)
+        url = f"http://127.0.0.1:{int(config.get('mcp_port', 8931))}/mcp"
+        headers = {'Authorization': 'Bearer ' + token}
+        codex = {'url': url, 'http_headers': headers, 'tool_timeout_sec': 86400}
+        claude = {'type': 'http', 'url': url, 'headers': headers, 'timeout': 86400000}
     with tempfile.TemporaryDirectory(prefix='hoh-profile-') as temp:
         kit = Path(temp) / 'kit'
         build_kit(kit, role, 'http://127.0.0.1:8931/mcp')
-        (kit / 'codex.toml').write_text(f'[mcp_servers.{server}]\ncommand = {json.dumps(command)}\nargs = {json.dumps(arguments)}\ntool_timeout_sec = 86400\n', encoding='utf-8')
-        (kit / 'mcp.json').write_text(json.dumps({'mcpServers': {server: {'type': 'stdio', 'command': command, 'args': arguments, 'timeout': 86400000}}}), encoding='utf-8')
+        if transport == 'shared-http':
+            codex_text = (f'[mcp_servers.{server}]\nurl = {json.dumps(url)}\ntool_timeout_sec = 86400\n'
+                          f'http_headers = {{ Authorization = {json.dumps(headers["Authorization"])} }}\n')
+        else:
+            codex_text = f'[mcp_servers.{server}]\ncommand = {json.dumps(command)}\nargs = {json.dumps(arguments)}\ntool_timeout_sec = 86400\n'
+        (kit / 'codex.toml').write_text(codex_text, encoding='utf-8')
+        (kit / 'mcp.json').write_text(json.dumps({'mcpServers': {server: claude}}), encoding='utf-8')
         manifest = json.loads((kit / 'manifest.json').read_text(encoding='utf-8'))
         manifest['server_name'], manifest['codex'] = server, codex
+        if transport == 'shared-http':
+            manifest['upgrade_from'] = previous
         manifest['files'] = {p.relative_to(kit).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
                              for p in kit.rglob('*') if p.is_file() and p.name != 'manifest.json'}
         (kit / 'manifest.json').write_text(json.dumps(manifest), encoding='utf-8')
@@ -81,7 +99,7 @@ def install_profile(root, project, role, instance, client, home, upgrade_skills=
                 if not destination.exists():
                     shutil.move(str(backup), destination)
             raise
-    return {'server_name': server, 'agent_id': actor.agent_id, 'role': role, 'project_id': project,
+    return {'server_name': server, 'agent_id': actor.agent_id, 'role': role, 'project_id': project, 'transport': transport,
             'skill_backups': [str(backup) for _, backup in moved]}
 
 
@@ -100,7 +118,7 @@ Vai trò: {role}. Project ID bắt buộc: {project}. Instance: {instance}.
 Tôi cho phép cài/cập nhật đúng skill HoH base + {role} và thêm MCP profile này; sao lưu skill HoH cũ, giữ nguyên mọi cấu hình khác.
 
 1. Xác định client là Codex hay Claude Code. Dùng shell PowerShell chạy:
-& '{root}\\.venv\\Scripts\\python.exe' -m hoh_control_plane.local_agent setup --root '{root}' --project '{project}' --role {role} --instance {instance} --client codex --upgrade-skills
+& '{root}\\.venv\\Scripts\\python.exe' -I -m hoh_control_plane.local_agent setup --root '{root}' --project '{project}' --role {role} --instance {instance} --client codex --upgrade-skills --transport shared-http
 Nếu là Claude Code, thay giá trị --client bằng claude-code. Không cài cả hai client nếu không cần.
 2. Load $hoh-control-plane và $hoh-{role}. MCP server cần dùng là hoh-{actor.agent_id}. Nếu công cụ mới chưa xuất hiện, báo cần reload MCP/restart client rồi tiếp tục; không giả vờ đã kết nối hoặc dùng server role/project khác.
 3. Gọi session.bootstrap(project_id="{project}") trên đúng MCP đó. Xác minh identity.role="{role}", identity.agent_id="{actor.agent_id}", identity.project_ids chỉ chứa "{project}" và selected_project_id="{project}". Sai bất kỳ mục nào thì dừng trước khi ghi/claim.
@@ -110,7 +128,7 @@ Nếu là Claude Code, thay giá trị --client bằng claude-code. Không cài 
 
 7. Chế độ GUI nhận sự kiện, không cron: khi hết việc sẵn sàng, thông báo ngắn rồi gọi work.wait_for_event(project_id="{project}", timeout_seconds=43200) và để chat chờ tool. Không kết thúc lượt chỉ vì inbox rỗng, không lặp polling bằng lượt model. Khi có event, resolve context hiện tại và claim theo đúng role; event không cấp lease. Giữ event_id, truyền ack_event_id ở lần wait tiếp theo sau khi đã xử lý hoặc xác định event hết hiệu lực. Khi queue job provision/submission/qa/merge, dùng work.wait_for_event với job_kind và job_id tương ứng, sau đó gọi poll_tool trong kết quả đúng một lần để lấy trạng thái. HoH duy trì lease hợp lệ của job trong lúc tool đang chờ. Nếu cần bạn trả lời thì báo rõ và dừng; không giấu câu hỏi trong một lần chờ 12 giờ. Nếu timeout/mất kết nối, kiểm tra lại host và bootstrap; không tự tạo cron. Đóng chat, bấm Stop, sleep máy hoặc tắt HoH sẽ ngắt chờ. Cách này giữ chính chat Codex app/Claude extension; không tạo phiên CLI thay thế.
 
-Cấu hình này dùng stdio với quyền tài khoản Windows trên cùng máy, không cần chép bearer token. Máy khác cần bộ cấu hình HTTP riêng và đường mạng đã được cấp quyền.'''
+Cấu hình này dùng MCP HTTP chung tại loopback, không tạo thêm Python server theo từng chat. Setup tự cấp credential riêng cho identity/project và lưu trong cấu hình client; không chép token vào chat. Mở HoH bằng icon Desktop trước khi kết nối; profile HTTP không tự bật host đã tắt. Sau khi chuyển từ stdio, reload MCP/restart client một lần. Máy khác cần bộ cấu hình HTTP riêng và đường mạng đã được cấp quyền.'''
     return prompts
 
 
@@ -124,17 +142,19 @@ def main():
     parser.add_argument('--client', choices=['codex', 'claude-code'], default='codex')
     parser.add_argument('--home', type=Path, default=Path.home())
     parser.add_argument('--upgrade-skills', action='store_true')
+    parser.add_argument('--transport', choices=['stdio', 'shared-http'], default='shared-http')
     args = parser.parse_args()
     root = args.root.resolve()
     config = checked_project(root, args.project)
     actor = profile_actor(args.project, args.role, args.instance)
     if args.action == 'setup':
-        print(json.dumps(install_profile(root, args.project, args.role, args.instance, args.client, args.home, args.upgrade_skills)))
+        print(json.dumps(install_profile(root, args.project, args.role, args.instance, args.client, args.home, args.upgrade_skills, args.transport)))
         return
     if any((root / 'config' / name).exists() for name in ('stop.request', 'shutdown.request')):
         raise SystemExit('HoH was stopped by the operator. Open the HoH desktop icon before reconnecting.')
     os.environ.pop('HOH_DATABASE_URL', None)
     os.environ.pop('PYTHONPATH', None)
+    os.environ.pop('PYTHONHOME', None)
     os.environ.update(HOH_DATABASE_PATH=config['database_path'], HOH_WORKER_MODE='supervised',
                       HOH_MCP_TRANSPORT='stdio', HOH_AGENT_ID=actor.agent_id,
                       HOH_AGENT_ROLE=args.role, HOH_PROJECT_IDS=args.project)
