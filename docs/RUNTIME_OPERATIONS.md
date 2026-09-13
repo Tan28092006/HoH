@@ -1,5 +1,36 @@
 # Native worker supervision and recovery
 
+## Runner contract in 0.3.5
+
+The supervised host admits at most one QA or integration test worker at a time;
+Git preparation may use the remaining worker capacity. This bounds test-suite
+overlap, not memory usage of unrelated applications. Before pytest launch the
+runner checks a small free-memory/commit admission floor and retains measured
+host headroom, child peak memory and queryable process/job limits. Allocation
+failure is infrastructure evidence and must not be mistaken for an assertion.
+
+Python pytest commands preserve their registered interpreter flags and pytest
+arguments. A shipped observer records the actual child interpreter, dependency
+versions, imports after pytest setup, candidate SHA before/after, tracked-file
+cleanliness, skipped-test reasons and capture status. Declare unusual package
+layouts in the frozen project's `[tool.hoh.qa].provenance_modules`; otherwise
+wheel package declarations and src packages provide discovery. This observer
+is provenance checking for trusted project tests, not a hostile-code sandbox.
+
+Infrastructure failures park QA as BLOCKED, preserve its candidate and evidence,
+release the QA lease and notify Planner. A terminal run stays readable by its
+original requester. Planner records a current readiness decision with a source
+reference, then calls `planner.recover_candidate_for_qa` with the failed evidence
+and `readiness_reference`. The same candidate returns to QA; Developer is not
+asked to repair the host or submit unchanged source. Integration likewise refuses
+incomplete evidence and allocation failure without moving main or creating rework.
+
+After an upgrade every role bootstraps again and reads a fresh ticket packet.
+Bootstrap identifies runtime version; the packet exposes the latest planning
+decision. Planner context revisions invalidate old write snapshots even when the
+ticket's integer version did not change. Source main and the deployed release
+must agree before provisioning further worktrees.
+
 This release adds a bounded execution host, private QA Git snapshots, durable
 merge intents and operator commands. It is the first operational recovery stage;
 it does not claim full industrial availability, hostile-code isolation or HA.

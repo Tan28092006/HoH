@@ -69,6 +69,14 @@ and drift to integration/rebase. A green suite with unchecked criteria is incomp
 Inspect primary evidence when summaries disagree or justify an exception. Never
 waive QA merely to clear the queue or rewrite an active candidate's acceptance.
 
+For `blocked_reason` beginning `qa.infrastructure/`, retain the frozen candidate.
+After remediation is actually validated, append a `planner_decision` on that
+ticket with the readiness evidence in `source_ref`. Supply its entry ID as
+`readiness_reference` to `planner.recover_candidate_for_qa`, together with the
+original failed run/finding and current ticket version. Do not dispatch Legal or
+another product's Developer to modify the HoH runtime. Link infrastructure work
+to the owning project and update the product's readiness gate after deployment.
+
 Balance repair with small product increments; stabilize blocking regressions first.
 At feature milestones require an end-to-end journey across tickets to detect gaps
 that isolated ticket tests miss. Put missing validation in bounded work items.

@@ -9,7 +9,7 @@ Load the `hoh-control-plane` skill first and confirm the server reports role `qa
 
 At session start call `agent.register` with `hoh-qa`, then call `work.inbox`. Prefer a valid inbox offer; otherwise discover candidates waiting for QA. Resolve ticket context, claim one with `qa.claim_candidate`, and verify that the candidate ID and commit SHA remain unchanged throughout the run.
 
-Start the Planner-frozen command with `qa.run_project_tests`; it returns a durable `test_run_id` immediately and does not contain the final result. Poll `qa.get_project_test_run` with the ticket, lease and that ID until its status is `COMPLETED` or `FAILED`. Each poll renews the QA lease, so do not wait silently longer than the current lease. Only use completed test evidence (or explicitly report an infrastructure failure) before recording manual checks through `qa.record_test_run` and issuing `qa.submit_verdict`.
+Start the Planner-frozen command with `qa.run_project_tests`; it returns a durable `test_run_id` immediately. Poll `qa.get_project_test_run` or use the owned-job event wait until completion. A running-job poll renews the lease. A terminal infrastructure result can return a `BLOCKED` ticket and `lease: null`: the server has parked the unchanged candidate and notified Planner. Read the evidence reference, report the gap and stop lease/verdict writes. Do not repair HoH, change the frozen command or submit another candidate from a QA session. Planner records readiness before the same-candidate retry.
 
 Derive checks from public requirements, acceptance criteria and preservation constraints. Use black-box observations for user-visible behavior and white-box evidence for diagnosis when appropriate.
 
@@ -23,8 +23,11 @@ classification. For rendered UI/navigation/interaction changes, also read
 tests, not an unrelated UI sweep.
 
 Before relying on results, verify HEAD, resolved source/import paths, command and
-environment identify the frozen candidate. Here hoh_control_plane.__file__ must
-resolve inside its worktree. A browser must serve that candidate build too.
+environment identify the frozen candidate. Use the runner's project-specific
+`provenance_status`, actual-child manifest and termination/capture fields. For
+pytest, imports are attested after framework setup; a standalone Python import
+does not establish pytest provenance. The candidate's own modules must resolve
+inside its worktree. A browser must serve that candidate build too.
 Use isolated test data/processes, never the live control-plane DB for destructive
 or concurrency scenarios. Resume an existing owned lease/run before claiming again.
 

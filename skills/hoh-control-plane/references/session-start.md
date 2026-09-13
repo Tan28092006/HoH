@@ -12,6 +12,15 @@ project if several are returned. Load this base skill and only the authenticated
 role's skill. A role mismatch is a credential/configuration issue; declaring a
 different role in text does not change permissions.
 
+Read `runtime.version` and capabilities from bootstrap after a restart or upgrade.
+Resolve the current ticket packet and its `latest_planner_decision` before acting;
+use its `context_snapshot_id` on consequential writes that accept it. Ticket
+version alone is insufficient: Planner may have appended a new decision without
+changing ticket fields. A stale-context refusal means refresh the packet and
+reassess the action, not replay the old call. Installed runtime, repository main
+and the assigned worktree can be at different commits; verify the assigned base
+against the current release handoff before implementation.
+
 Register presence and check compatibility as required by the project. Then inspect
 bootstrap assignments and the role inbox. A new chat can resume the same identity
 only after the earlier session has stopped. Two concurrent workers need different
