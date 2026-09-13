@@ -585,9 +585,11 @@ class GitWorktreeManager:
     def _git(path: Path, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         try:
             command = ['git', '-C', str(path), *arguments]
-            result = run_managed(command, cwd=path, timeout=_GIT_COMMAND_TIMEOUT_SECONDS)
+            result = run_managed(command, cwd=path, timeout=_GIT_COMMAND_TIMEOUT_SECONDS, output_limit=2_000_000)
             if result.timed_out:
                 raise ValidationError('Git operation timed out; its process tree was stopped')
+            if any(output.endswith('\n[output truncated]') for output in (result.stdout, result.stderr)):
+                raise ValidationError('Git output exceeded the capture limit; refusing incomplete evidence')
             completed = subprocess.CompletedProcess(command, result.returncode, result.stdout, result.stderr)
         except subprocess.TimeoutExpired as exc:
             raise ValidationError("Git operation timed out") from exc
