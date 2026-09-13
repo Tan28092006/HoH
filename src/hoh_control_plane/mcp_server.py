@@ -370,17 +370,24 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             async def keepalive():
                 try:
                     with anyio.fail_after(5):
-                        await context.session.send_ping()
+                        request = context.request_context.request
+                        if request is None:
+                            await context.session.send_ping()
+                        elif await request.is_disconnected():
+                            raise ConnectionError('HTTP response stream disconnected')
                         await context.report_progress(time.monotonic() - started, message='Waiting for a HoH event')
                 except Exception as error:
                     raise ConnectionError('MCP connection lost while waiting; reconnect and bootstrap') from error
-            outcome, error_code = 'cancelled', None
+            outcome, error_code = 'failed', 'request_cancelled'
             try:
                 with correlation_scope():
                     result = await wait_for_event(service, actor, **arguments,
                                                   keepalive=keepalive if has_transport else None)
-                outcome = 'succeeded'
+                outcome, error_code = 'succeeded', None
                 return result
+            except ConnectionError as error:
+                error_code = 'connection_lost'
+                raise ToolError('[connection_lost] Reconnect MCP and resume the same identity via session.bootstrap') from error
             except DomainError as error:
                 outcome, error_code = 'rejected', error.code
                 raise ToolError(f'[{error.code}] {error}') from error
