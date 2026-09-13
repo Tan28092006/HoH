@@ -43,7 +43,12 @@ class LeaseMixin:
                 "UPDATE leases SET heartbeat_at = ?, expires_at = ? WHERE lease_id = ?",
                 (_iso(timestamp), expires_at, lease_id),
             )
-            return self._lease(connection, lease_id)
+            renewed = self._lease(connection, lease_id)
+            project_id = self._project_for_ticket(connection, lease["ticket_id"])
+            renewed["planning_barrier"] = self._repository_reconciliation_state(
+                connection, project_id
+            )
+            return renewed
 
     def sweep_expired_leases(self, actor: Actor) -> dict[str, Any]:
         """Recover expired Developer and QA leases without waiting for a later claim."""
@@ -260,6 +265,7 @@ class LeaseMixin:
         with self.store.connection(immediate=True) as connection:
             self._expire_lease(connection, ticket_id)
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._require_repository_reconciled(connection, project_id)
             self._expect_version(ticket, expected_version)
             self.require_fresh_context(connection, ticket_id, context_snapshot_id)
             self._require_skill_compatible(connection, actor, project_id)

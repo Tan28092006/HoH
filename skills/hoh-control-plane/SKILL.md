@@ -5,7 +5,7 @@ description: Use a Harness Control Plane MCP to discover role-appropriate engine
 
 # Harness Control Plane
 
-Protocol revision: 2026-09-10. Load this base and only the assigned role skill.
+Protocol revision: 2026-09-13. Load this base and only the assigned role skill.
 Read conditional references only when applicable. Server capabilities and gates
 remain authoritative; skill guidance does not create runtime enforcement.
 
@@ -64,6 +64,11 @@ rubrics, evaluator formulas and evaluator rationale never belong in ticket
 context, evidence bundles or later iterations.
 
 Treat chat history as advisory. The current context snapshot and server state are authoritative. Refresh context after any version conflict or `context_stale` result.
+
+A `repository_reconciliation_required` packet is project-wide execution state.
+It means remote Git moved after the current plan was formed. Execution roles must
+preserve their artifact and stop before claim, candidate submission or merge;
+Planner must resolve the typed observation and recorded ticket dispositions.
 
 Do not include credentials, access tokens or secrets in progress messages, evidence or ticket context.
 

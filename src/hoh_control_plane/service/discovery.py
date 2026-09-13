@@ -306,6 +306,9 @@ class DiscoveryMixin:
                 "candidate:requeue",
                 "repository:configure",
                 "repository:sync",
+                "repository:reconcile",
+                "ticket:stop_for_reconciliation",
+                "external_landing:record",
                 "test_command:configure",
                 "verification_profile:configure",
                 "agent_capabilities:approve",
@@ -629,11 +632,13 @@ class DiscoveryMixin:
                 assert lease is not None
                 lease["ticket"] = self._ticket(connection, lease["ticket_id"])
                 active_leases.append(lease)
+            planning_barrier = self._repository_reconciliation_state(connection, project_id)
         return {
             "agent": presence,
             "active_leases": active_leases,
             "offers": offers,
             "offered_now": len(created_offers),
+            "planning_barrier": planning_barrier,
             "next_poll_after_seconds": 20,
         }
 
@@ -753,13 +758,19 @@ class DiscoveryMixin:
                 assert queue is not None
                 queue["ticket"] = self._ticket(connection, queue["ticket_id"])
                 queues.append(queue)
+            planning_barrier = self._repository_reconciliation_state(connection, project_id)
         # Bounded pointers only, so the existing read-only dashboard can show that
         # a Planner is being waited on without exposing the underlying evidence.
         interventions = [
             self.intervention_payload(intervention) | {"status": intervention["status"]}
             for intervention in self.list_planner_interventions(actor, project_id)
         ]
-        return {"agents": agents, "queues": queues, "planner_interventions": interventions}
+        return {
+            "agents": agents,
+            "queues": queues,
+            "planner_interventions": interventions,
+            "planning_barrier": planning_barrier,
+        }
 
     def _queue_ticket(
         self,
@@ -877,6 +888,14 @@ class DiscoveryMixin:
         only_agent_id: str | None = None,
     ) -> list[dict[str, Any]]:
         if queue is None or queue["status"] not in {"pending", "offered"}:
+            return []
+        if connection.execute(
+            """
+            SELECT 1 FROM repository_reconciliations
+            WHERE project_id = ? AND status = 'PENDING' LIMIT 1
+            """,
+            (queue["project_id"],),
+        ).fetchone() is not None:
             return []
         existing_offer_count = connection.execute(
             "SELECT COUNT(*) FROM work_offers WHERE queue_id = ? AND status = 'offered'",

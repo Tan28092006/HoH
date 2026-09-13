@@ -175,7 +175,7 @@ class PlanningMixin:
         return {"project": configured_project, "repository_path": normalized_path}
 
     def sync_repository(self, actor: Actor, project_id: str) -> dict[str, Any]:
-        """Fetch upstream metadata without changing main, then persist its review manifest."""
+        """Fetch remote truth and open a mandatory Planner reconciliation boundary."""
         require_role(actor, Role.PLANNER, Role.ADMIN)
         require_project(actor, project_id)
         with self.store.connection() as connection:
@@ -187,6 +187,8 @@ class PlanningMixin:
                 "SELECT * FROM project_repositories WHERE project_id = ?",
                 (project_id,),
             )
+            previous_refs_raw = repository.get("observed_remote_refs") or "{}"
+            previous_refs = json.loads(previous_refs_raw)
 
         manifest = self.git_worktrees.sync_upstream(
             repository["repository_path"], project["default_branch"]
@@ -205,6 +207,99 @@ class PlanningMixin:
             "document_paths": document_paths,
             "review_required": bool(manifest["behind"]),
         }
+        remote_refs = manifest.pop("remote_branches")
+        branch_updates = []
+        observed_commits: list[dict[str, Any]] = []
+        upstream_ref = manifest.get("upstream_ref")
+        previous_mainline = repository.get("observed_mainline_commit")
+        mainline_update = None
+        if previous_mainline != manifest["local_commit"]:
+            delta = self.git_worktrees.remote_commit_delta(
+                repository["repository_path"], previous_mainline, manifest["local_commit"]
+            )
+            mainline_update = {
+                "branch": f"refs/heads/{project['default_branch']}",
+                "previous_commit": previous_mainline,
+                "commit": manifest["local_commit"],
+                "history_relation": delta["relation"],
+                "commits": delta["commits"],
+                "changes": delta["changes"],
+            }
+            for row in delta["commits"]:
+                observed_commits.append({
+                    **row,
+                    "branch": mainline_update["branch"],
+                    "relation": delta["relation"],
+                })
+        default_commits = {
+            row["commit"] for row in manifest.get("incoming_commits", [])
+        }
+        for row in manifest.get("incoming_commits", []):
+            observed_commits.append({**row, "branch": upstream_ref, "relation": "incoming"})
+        for branch in sorted(set(previous_refs) | set(remote_refs)):
+            previous_commit = previous_refs.get(branch)
+            commit = remote_refs.get(branch)
+            if previous_commit == commit:
+                continue
+            delta = self.git_worktrees.remote_commit_delta(
+                repository["repository_path"], previous_commit, commit,
+                baseline_commit=manifest["local_commit"],
+            )
+            branch_updates.append({
+                "branch": branch,
+                "previous_commit": previous_commit,
+                "commit": commit,
+                "change": "new" if previous_commit is None else
+                          "deleted" if commit is None else "updated",
+                "history_relation": delta["relation"],
+                "commits": delta["commits"],
+                "changes": delta["changes"],
+            })
+            for row in delta["commits"]:
+                if branch == upstream_ref and row["commit"] in default_commits:
+                    continue
+                observed_commits.append({**row, "branch": branch, "relation": delta["relation"]})
+        branch_document_paths = [
+            change["path"]
+            for update in branch_updates
+            for change in update["changes"]
+            if change["path"].lower().startswith(("docs/", "spec/", "specs/"))
+            or any(
+                change["path"].lower().endswith(extension)
+                for extension in document_extensions
+            )
+        ]
+        mainline_document_paths = [
+            change["path"]
+            for change in (mainline_update or {}).get("changes", [])
+            if change["path"].lower().startswith(("docs/", "spec/", "specs/"))
+            or any(
+                change["path"].lower().endswith(extension)
+                for extension in document_extensions
+            )
+        ]
+        manifest["mainline_update"] = mainline_update
+        manifest["document_paths"] = list(dict.fromkeys([
+            *document_paths, *mainline_document_paths, *branch_document_paths
+        ]))
+        commits_by_sha: dict[str, dict[str, Any]] = {}
+        for item in observed_commits:
+            sha = item["commit"]
+            if sha not in commits_by_sha:
+                commits_by_sha[sha] = {
+                    "commit": sha,
+                    "subject": item.get("subject", ""),
+                    "branches": [item.get("branch")],
+                    "relations": [item.get("relation")],
+                }
+                continue
+            if item.get("branch") not in commits_by_sha[sha]["branches"]:
+                commits_by_sha[sha]["branches"].append(item.get("branch"))
+            if item.get("relation") not in commits_by_sha[sha]["relations"]:
+                commits_by_sha[sha]["relations"].append(item.get("relation"))
+        observed_commits = list(commits_by_sha.values())
+        manifest["branch_updates"] = branch_updates
+        manifest["observed_commits"] = observed_commits
         timestamp = _iso()
         with self.store.connection(immediate=True) as connection:
             current = self._one(
@@ -214,29 +309,33 @@ class PlanningMixin:
             )
             if current["repository_path"] != repository["repository_path"]:
                 raise ConflictError("Project repository changed while its upstream was fetched")
+            if (current.get("observed_remote_refs") or "{}") != previous_refs_raw:
+                raise ConflictError(
+                    "Repository observation changed while remote refs were inspected; sync again"
+                )
             changed = (
                 current.get("observed_mainline_commit") != manifest["local_commit"]
                 or current.get("observed_upstream_commit") != manifest["upstream_commit"]
             )
-            previous_refs = json.loads(current.get("observed_remote_refs") or "{}")
-            remote_refs = manifest.pop("remote_branches")
-            branch_updates = []
-            for branch in sorted(set(previous_refs) | set(remote_refs)):
-                previous_commit = previous_refs.get(branch)
-                commit = remote_refs.get(branch)
-                if previous_commit == commit:
-                    continue
-                branch_updates.append({
-                    "branch": branch,
-                    "previous_commit": previous_commit,
-                    "commit": commit,
-                    "change": "new" if previous_commit is None else
-                              "deleted" if commit is None else "updated",
-                })
-            manifest["branch_updates"] = branch_updates
             changed = changed or bool(branch_updates)
+            has_reconciliation_history = connection.execute(
+                "SELECT 1 FROM repository_reconciliations WHERE project_id = ? LIMIT 1",
+                (project_id,),
+            ).fetchone() is not None
+            baseline_reconciliation = not has_reconciliation_history
+            if baseline_reconciliation and not observed_commits:
+                observed_commits = [{
+                    "commit": manifest["local_commit"],
+                    "subject": "Current planning baseline",
+                    "branches": [f"refs/heads/{project['default_branch']}"],
+                    "relations": ["baseline"],
+                }]
+                manifest["observed_commits"] = observed_commits
+            changed = changed or baseline_reconciliation
+            manifest["baseline_reconciliation"] = baseline_reconciliation
             manifest["changed"] = changed
             manifest["context_ref"] = None
+            manifest["reconciliation_id"] = None
             connection.execute(
                 """UPDATE project_repositories
                    SET observed_mainline_commit = ?, observed_upstream_commit = ?,
@@ -257,7 +356,26 @@ class PlanningMixin:
                     (next_version, timestamp, project_id),
                 )
                 entry_id = _id("ctx")
+                reconciliation_id = _id("recon")
                 manifest["context_ref"] = f"ctx:entry:{entry_id}"
+                manifest["reconciliation_id"] = reconciliation_id
+                open_ticket_versions = {
+                    str(row["ticket_id"]): {
+                        "version": int(row["version"]),
+                        "status": str(row["status"]),
+                    }
+                    for row in connection.execute(
+                        """
+                        SELECT t.ticket_id, t.version, t.status
+                        FROM tickets t
+                        JOIN features f ON f.feature_id = t.feature_id
+                        WHERE f.project_id = ?
+                          AND t.status NOT IN ('DONE', 'CANCELLED', 'SUPERSEDED')
+                        ORDER BY t.ticket_id
+                        """,
+                        (project_id,),
+                    ).fetchall()
+                }
                 connection.execute(
                     """INSERT INTO context_entries
                        (entry_id, project_id, entry_type, content, source_ref,
@@ -274,6 +392,39 @@ class PlanningMixin:
                         timestamp,
                     ),
                 )
+                connection.execute(
+                    """
+                    INSERT INTO repository_reconciliations
+                        (reconciliation_id, project_id, observation_ref, observed_commits,
+                         ticket_versions, status, created_at)
+                    VALUES (?, ?, ?, ?, ?, 'PENDING', ?)
+                    """,
+                    (
+                        reconciliation_id,
+                        project_id,
+                        manifest["context_ref"],
+                        json.dumps(observed_commits, sort_keys=True),
+                        json.dumps(open_ticket_versions, sort_keys=True),
+                        timestamp,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE work_offers SET status = 'cancelled', closed_at = ?
+                    WHERE status = 'offered' AND queue_id IN (
+                        SELECT queue_id FROM work_queue
+                        WHERE project_id = ? AND status IN ('pending', 'offered')
+                    )
+                    """,
+                    (timestamp, project_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE work_queue SET status = 'pending', updated_at = ?
+                    WHERE project_id = ? AND status = 'offered'
+                    """,
+                    (timestamp, project_id),
+                )
                 self._event(
                     connection,
                     actor,
@@ -287,11 +438,243 @@ class PlanningMixin:
                         "local_commit": manifest["local_commit"],
                         "upstream_commit": manifest["upstream_commit"],
                         "incoming_change_count": len(manifest["incoming_changes"]),
-                        "document_change_count": len(document_paths),
+                        "document_change_count": len(manifest["document_paths"]),
                         "branch_update_count": len(branch_updates),
+                        "observed_commit_count": len(observed_commits),
+                        "reconciliation_id": reconciliation_id,
                     },
                 )
+            pending = self._repository_reconciliation_state(connection, project_id)
+            manifest["reconciliation_required"] = bool(pending["pending"])
+            manifest["pending_reconciliations"] = pending["pending"]
         return manifest
+
+    def list_repository_reconciliations(
+        self, actor: Actor, project_id: str, status: str = "PENDING", limit: int = 20
+    ) -> dict[str, Any]:
+        """List immutable Git observations still awaiting a board decision."""
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        require_project(actor, project_id)
+        if status not in {"PENDING", "RESOLVED"}:
+            raise ValidationError("status must be PENDING or RESOLVED")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValidationError("limit must be an integer from 1 to 100")
+        with self.store.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM repository_reconciliations
+                WHERE project_id = ? AND status = ?
+                ORDER BY created_at ASC LIMIT ?
+                """,
+                (project_id, status, limit),
+            ).fetchall()
+            return {"reconciliations": [self._repository_reconciliation(row) for row in rows]}
+
+    def resolve_repository_reconciliation(
+        self,
+        actor: Actor,
+        project_id: str,
+        reconciliation_id: str,
+        ticket_decisions: list[dict[str, Any]],
+        decision_summary: str,
+        new_ticket_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Open execution only after every previously-open ticket was reclassified.
+
+        Ticket lifecycle mutations happen through their dedicated tools.  This
+        command checks that the stated disposition matches the resulting board,
+        which makes the Git review a real barrier instead of a prompt convention.
+        """
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        require_project(actor, project_id)
+        self._bounded_text(decision_summary, "decision_summary", 4000)
+        self._bounded_list(
+            ticket_decisions, "ticket_decisions", 500, 4000, strings_only=False
+        )
+        new_ticket_ids = new_ticket_ids or []
+        self._bounded_list(new_ticket_ids, "new_ticket_ids", 100, 100)
+        if len(set(new_ticket_ids)) != len(new_ticket_ids):
+            raise ValidationError("new_ticket_ids cannot contain duplicates")
+        allowed = {"keep", "revise", "cancel", "supersede", "complete", "rework"}
+        with self.store.connection(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM repository_reconciliations WHERE reconciliation_id = ?",
+                (reconciliation_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError("Repository reconciliation not found")
+            reconciliation = self._repository_reconciliation(row)
+            if reconciliation["project_id"] != project_id:
+                raise ValidationError("Repository reconciliation belongs to another project")
+            if reconciliation["status"] != "PENDING":
+                return {"reconciliation": reconciliation, **self._repository_reconciliation_state(connection, project_id)}
+            older = connection.execute(
+                """
+                SELECT reconciliation_id FROM repository_reconciliations
+                WHERE project_id = ? AND status = 'PENDING' AND created_at < ?
+                ORDER BY created_at ASC LIMIT 1
+                """,
+                (project_id, reconciliation["created_at"]),
+            ).fetchone()
+            if older is not None:
+                raise ConflictError(
+                    "Resolve repository observations in commit order",
+                    {"reason": "older_reconciliation_pending", "reconciliation_id": older["reconciliation_id"]},
+                )
+            decisions: dict[str, dict[str, Any]] = {}
+            for item in ticket_decisions:
+                if not isinstance(item, dict):
+                    raise ValidationError("Each ticket decision must be an object")
+                ticket_id = str(item.get("ticket_id", "")).strip()
+                disposition = str(item.get("disposition", "")).strip()
+                reason = str(item.get("reason", "")).strip()
+                if not ticket_id or ticket_id in decisions:
+                    raise ValidationError("ticket_decisions require unique ticket_id values")
+                if disposition not in allowed:
+                    raise ValidationError(
+                        "disposition must be keep, revise, cancel, supersede, complete or rework"
+                    )
+                self._bounded_text(reason, "ticket_decisions.reason", 2000)
+                decisions[ticket_id] = {**item, "ticket_id": ticket_id, "disposition": disposition, "reason": reason}
+            expected = reconciliation["ticket_versions"]
+            missing = sorted(set(expected) - set(decisions))
+            extra = sorted(set(decisions) - set(expected))
+            if missing or extra:
+                raise ValidationError(
+                    "Every ticket open at observation time must have exactly one decision",
+                    {"missing_ticket_ids": missing, "unexpected_ticket_ids": extra},
+                )
+            for ticket_id, item in decisions.items():
+                ticket = self._ticket(connection, ticket_id)
+                if self._project_for_ticket(connection, ticket_id) != project_id:
+                    raise ValidationError("Ticket decision refers to another project")
+                observed = expected[ticket_id]
+                disposition = item["disposition"]
+                status_now = ticket["status"]
+                version_changed = int(ticket["version"]) > int(observed["version"])
+                if disposition == "keep" and status_now in {
+                    TicketStatus.DONE.value,
+                    TicketStatus.CANCELLED.value,
+                    TicketStatus.SUPERSEDED.value,
+                }:
+                    raise ConflictError(
+                        f"{ticket_id} is terminal and cannot be recorded as unchanged"
+                    )
+                if disposition == "revise" and not version_changed:
+                    raise ConflictError(f"{ticket_id} was declared revised but its version did not change")
+                if disposition == "cancel" and status_now != TicketStatus.CANCELLED.value:
+                    raise ConflictError(f"{ticket_id} must be cancelled before resolving the reconciliation")
+                if disposition == "supersede" and status_now != TicketStatus.SUPERSEDED.value:
+                    raise ConflictError(f"{ticket_id} must be superseded before resolving the reconciliation")
+                if disposition == "supersede":
+                    replacement = str(item.get("replacement_ticket_id", "")).strip()
+                    if not replacement:
+                        raise ValidationError("supersede requires replacement_ticket_id")
+                    if self._project_for_ticket(connection, replacement) != project_id:
+                        raise ValidationError("Replacement ticket belongs to another project")
+                if disposition == "complete" and status_now != TicketStatus.DONE.value:
+                    raise ConflictError(f"{ticket_id} must be DONE before resolving the reconciliation")
+                if disposition == "rework" and status_now not in {
+                    TicketStatus.REWORK.value, TicketStatus.BLOCKED.value
+                }:
+                    raise ConflictError(f"{ticket_id} must be REWORK or BLOCKED before resolving the reconciliation")
+                if disposition == "rework" and not version_changed:
+                    raise ConflictError(
+                        f"{ticket_id} was declared rework but did not change after the observation"
+                    )
+            for ticket_id in new_ticket_ids:
+                if self._project_for_ticket(connection, ticket_id) != project_id:
+                    raise ValidationError("New reconciliation ticket belongs to another project")
+                created = self._ticket(connection, ticket_id)
+                if created["created_at"] < reconciliation["created_at"]:
+                    raise ValidationError(
+                        f"{ticket_id} predates this observation and is not a new reconciliation ticket"
+                    )
+            timestamp = _iso()
+            manifest = {
+                "summary": decision_summary,
+                "ticket_decisions": [decisions[ticket_id] for ticket_id in sorted(decisions)],
+                "new_ticket_ids": sorted(new_ticket_ids),
+            }
+            connection.execute(
+                """
+                UPDATE repository_reconciliations
+                SET status = 'RESOLVED', resolved_by = ?, resolved_at = ?, decision_manifest = ?
+                WHERE reconciliation_id = ?
+                """,
+                (actor.agent_id, timestamp, json.dumps(manifest, sort_keys=True), reconciliation_id),
+            )
+            project = self._one(connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,))
+            next_version = project["version"] + 1
+            connection.execute(
+                "UPDATE projects SET version = ?, updated_at = ? WHERE project_id = ?",
+                (next_version, timestamp, project_id),
+            )
+            entry_id = _id("ctx")
+            connection.execute(
+                """
+                INSERT INTO context_entries
+                    (entry_id, project_id, entry_type, content, source_ref,
+                     actor_id, actor_role, created_at)
+                VALUES (?, ?, 'planner_decision', ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry_id, project_id, json.dumps(manifest, sort_keys=True),
+                    reconciliation["observation_ref"], actor.agent_id, actor.role.value, timestamp,
+                ),
+            )
+            self._event(
+                connection, actor, project_id, "project.repository_reconciled", "project",
+                project_id, next_version,
+                {"reconciliation_id": reconciliation_id, "decision_ref": f"ctx:entry:{entry_id}"},
+            )
+            state = self._repository_reconciliation_state(connection, project_id)
+            resolved = self._repository_reconciliation(
+                connection.execute(
+                    "SELECT * FROM repository_reconciliations WHERE reconciliation_id = ?",
+                    (reconciliation_id,),
+                ).fetchone()
+            )
+            return {"reconciliation": resolved, **state}
+
+    @staticmethod
+    def _repository_reconciliation(row: Any) -> dict[str, Any]:
+        value = _row(row) or {}
+        for field in ("observed_commits", "ticket_versions", "decision_manifest"):
+            if isinstance(value.get(field), str):
+                value[field] = json.loads(value[field])
+        return value
+
+    def _repository_reconciliation_state(
+        self, connection: Connection, project_id: str
+    ) -> dict[str, Any]:
+        rows = connection.execute(
+            """
+            SELECT reconciliation_id, observation_ref, observed_commits, created_at
+            FROM repository_reconciliations
+            WHERE project_id = ? AND status = 'PENDING'
+            ORDER BY created_at ASC
+            """,
+            (project_id,),
+        ).fetchall()
+        pending = []
+        for row in rows:
+            value = _row(row) or {}
+            commits = value.pop("observed_commits")
+            value["observed_commit_count"] = len(commits)
+            value["commit_refs"] = [item.get("commit") for item in commits[:20]]
+            pending.append(value)
+        return {"repository_reconciliation_required": bool(pending), "pending": pending}
+
+    def _require_repository_reconciled(
+        self, connection: Connection, project_id: str
+    ) -> None:
+        state = self._repository_reconciliation_state(connection, project_id)
+        if state["repository_reconciliation_required"]:
+            raise ConflictError(
+                "Repository changed after the current plan was formed; Planner must reconcile every open ticket before execution continues",
+                {"reason": "repository_reconciliation_required", **state},
+            )
 
     def configure_test_command(
         self,
@@ -561,6 +944,7 @@ class PlanningMixin:
         self._bounded_text(reason, "reason", 2000)
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._require_repository_reconciled(connection, project_id)
             self._expect_version(ticket, expected_version)
             if TicketStatus(ticket["status"]) not in {
                 TicketStatus.BACKLOG, TicketStatus.READY, TicketStatus.BLOCKED,
@@ -860,6 +1244,7 @@ class PlanningMixin:
                     "validation_contract": normalized_contract,
                 }
                 if ready:
+                    self._require_repository_reconciled(connection, project_id)
                     self._assert_quality_ready(project, planned_ticket)
                 connection.execute(
                     """
@@ -1319,8 +1704,127 @@ class PlanningMixin:
                 ),
             }
 
+    def stop_ticket_for_reconciliation(
+        self,
+        actor: Actor,
+        ticket_id: str,
+        expected_version: int,
+        reconciliation_id: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Revoke stale execution while preserving its worktree and frozen artifacts."""
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        self._bounded_text(reason, "reason", 2000)
+        with self.store.connection(immediate=True) as connection:
+            ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._expect_version(ticket, expected_version)
+            reconciliation = self._require_pending_reconciliation(
+                connection, project_id, reconciliation_id
+            )
+            if ticket["status"] not in {
+                TicketStatus.DEV_IN_PROGRESS.value,
+                TicketStatus.QA_IN_PROGRESS.value,
+                TicketStatus.MERGE_READY.value,
+            }:
+                raise ConflictError(
+                    "Only active Development, QA or Integration work can be stopped for reconciliation"
+                )
+            lease = _row(
+                connection.execute(
+                    "SELECT * FROM leases WHERE ticket_id = ? AND expires_at > ?",
+                    (ticket_id, _iso()),
+                ).fetchone()
+            )
+            if lease is None:
+                raise ConflictError("Ticket has no live execution lease to stop")
+            for table in (
+                "worktree_provision_jobs",
+                "candidate_submission_jobs",
+                "qa_test_jobs",
+                "merge_jobs",
+            ):
+                if connection.execute(
+                    f"SELECT 1 FROM {table} WHERE ticket_id = ? AND status IN ('QUEUED', 'RUNNING')",
+                    (ticket_id,),
+                ).fetchone() is not None:
+                    raise ConflictError(
+                        "A detached worker is still running; wait for its guarded terminal result before stopping the ticket",
+                        {"reason": "reconciliation_worker_active", "table": table},
+                    )
+            timestamp = _iso()
+            next_version = ticket["version"] + 1
+            blocked_reason = f"repository_reconciliation/{reconciliation_id}: {reason}"
+            self._close_ticket_dispatch(connection, ticket_id, timestamp)
+            connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease["lease_id"],))
+            connection.execute(
+                """
+                UPDATE tickets
+                SET status = ?, blocked_reason = ?, version = ?, updated_at = ?
+                WHERE ticket_id = ?
+                """,
+                (
+                    TicketStatus.BLOCKED.value,
+                    blocked_reason,
+                    next_version,
+                    timestamp,
+                    ticket_id,
+                ),
+            )
+            entry_id = _id("ctx")
+            connection.execute(
+                """
+                INSERT INTO context_entries
+                    (entry_id, project_id, feature_id, ticket_id, entry_type, content,
+                     source_ref, artifact_commit, actor_id, actor_role, created_at)
+                VALUES (?, ?, ?, ?, 'planner_decision', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry_id,
+                    project_id,
+                    ticket["feature_id"],
+                    ticket_id,
+                    blocked_reason,
+                    reconciliation["observation_ref"],
+                    ticket.get("candidate_commit") or ticket.get("base_commit"),
+                    actor.agent_id,
+                    actor.role.value,
+                    timestamp,
+                ),
+            )
+            self._event(
+                connection,
+                actor,
+                project_id,
+                "ticket.reconciliation_stopped",
+                "ticket",
+                ticket_id,
+                next_version,
+                {
+                    "reconciliation_id": reconciliation_id,
+                    "previous_status": ticket["status"],
+                    "revoked_lease_id": lease["lease_id"],
+                    "previous_agent_id": lease["agent_id"],
+                    "context_ref": f"ctx:entry:{entry_id}",
+                },
+            )
+            return {
+                "ticket": self._ticket(connection, ticket_id),
+                "preserved_worktree": _row(
+                    connection.execute(
+                        "SELECT * FROM worktrees WHERE ticket_id = ?", (ticket_id,)
+                    ).fetchone()
+                ),
+                "preserved_candidate_commit": ticket.get("candidate_commit"),
+                "context_ref": f"ctx:entry:{entry_id}",
+            }
+
     def cancel_ticket(
-        self, actor: Actor, ticket_id: str, expected_version: int, reason: str
+        self,
+        actor: Actor,
+        ticket_id: str,
+        expected_version: int,
+        reason: str,
+        reconciliation_id: str | None = None,
     ) -> dict[str, Any]:
         """Retire obsolete unclaimed work so dispatch stops offering it."""
         return self._retire_ticket(
@@ -1331,6 +1835,7 @@ class PlanningMixin:
             next_status=TicketStatus.CANCELLED,
             entry_type="ticket_cancelled",
             event_type="ticket.cancelled",
+            reconciliation_id=reconciliation_id,
         )
 
     def supersede_ticket(
@@ -1340,6 +1845,7 @@ class PlanningMixin:
         expected_version: int,
         replacement_ticket_id: str,
         reason: str,
+        reconciliation_id: str | None = None,
     ) -> dict[str, Any]:
         """Retire work that a named same-project replacement ticket now carries."""
         self._bounded_text(replacement_ticket_id, "replacement_ticket_id", 100)
@@ -1352,6 +1858,7 @@ class PlanningMixin:
             entry_type="ticket_superseded",
             event_type="ticket.superseded",
             replacement_ticket_id=replacement_ticket_id,
+            reconciliation_id=reconciliation_id,
         )
 
     def _retire_ticket(
@@ -1365,6 +1872,7 @@ class PlanningMixin:
         entry_type: str,
         event_type: str,
         replacement_ticket_id: str | None = None,
+        reconciliation_id: str | None = None,
     ) -> dict[str, Any]:
         """Close one ticket's dispatch without rewriting active or evidenced work.
 
@@ -1377,11 +1885,32 @@ class PlanningMixin:
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             self._expect_version(ticket, expected_version)
-            if TicketStatus(ticket["status"]) not in RETIRABLE_TICKET_STATUSES:
-                raise ConflictError(
-                    "Only backlog, ready or blocked tickets can be cancelled or superseded"
+            reconciliation = None
+            if reconciliation_id is not None:
+                reconciliation = self._require_pending_reconciliation(
+                    connection, project_id, reconciliation_id
                 )
-            self._require_no_active_work(connection, ticket_id)
+            reconciliation_retirable = {
+                TicketStatus.BACKLOG,
+                TicketStatus.READY,
+                TicketStatus.BLOCKED,
+                TicketStatus.REWORK,
+                TicketStatus.QA_READY,
+                TicketStatus.VERIFIED,
+                TicketStatus.MERGE_READY,
+            }
+            allowed_statuses = (
+                reconciliation_retirable
+                if reconciliation is not None
+                else RETIRABLE_TICKET_STATUSES
+            )
+            if TicketStatus(ticket["status"]) not in allowed_statuses:
+                raise ConflictError(
+                    "Ticket cannot be cancelled or superseded from its current lifecycle state"
+                )
+            self._require_no_active_work(
+                connection, ticket_id, allow_frozen=reconciliation is not None
+            )
             replacement = self._retirement_replacement(
                 connection, ticket_id, project_id, replacement_ticket_id
             )
@@ -1407,7 +1936,11 @@ class PlanningMixin:
                     ticket_id,
                     entry_type,
                     reason,
-                    f"ticket:{replacement_ticket_id}" if replacement_ticket_id else None,
+                    (
+                        reconciliation["observation_ref"]
+                        if reconciliation is not None
+                        else f"ticket:{replacement_ticket_id}" if replacement_ticket_id else None
+                    ),
                     actor.agent_id,
                     actor.role.value,
                     timestamp,
@@ -1818,7 +2351,9 @@ class PlanningMixin:
             "evidence_reference must be a qa_test_jobs test_run_id or a qa_findings finding_id"
         )
 
-    def _require_no_active_work(self, connection: Connection, ticket_id: str) -> None:
+    def _require_no_active_work(
+        self, connection: Connection, ticket_id: str, *, allow_frozen: bool = False
+    ) -> None:
         """Refuse retirement while any agent, worker or frozen artifact still owns this."""
         active_lease = connection.execute(
             "SELECT 1 FROM leases WHERE ticket_id = ? AND expires_at > ?",
@@ -1841,10 +2376,27 @@ class PlanningMixin:
         candidate = connection.execute(
             "SELECT 1 FROM candidates WHERE ticket_id = ?", (ticket_id,)
         ).fetchone()
-        if candidate is not None:
+        if candidate is not None and not allow_frozen:
             raise ConflictError(
                 "A ticket with a frozen candidate cannot be cancelled or superseded"
             )
+
+    def _require_pending_reconciliation(
+        self, connection: Connection, project_id: str, reconciliation_id: str
+    ) -> dict[str, Any]:
+        row = connection.execute(
+            """
+            SELECT * FROM repository_reconciliations
+            WHERE reconciliation_id = ? AND project_id = ? AND status = 'PENDING'
+            """,
+            (reconciliation_id, project_id),
+        ).fetchone()
+        if row is None:
+            raise ConflictError(
+                "The repository reconciliation is not pending for this project",
+                {"reason": "repository_reconciliation_not_pending"},
+            )
+        return self._repository_reconciliation(row)
 
     def _retirement_replacement(
         self,

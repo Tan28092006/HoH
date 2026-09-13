@@ -103,6 +103,7 @@ class IntegrationMixin:
         require_role(actor, Role.INTEGRATOR)
         with self.store.connection() as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._require_repository_reconciled(connection, project_id)
             self._expect_version(ticket, expected_version)
             if ticket["status"] != TicketStatus.MERGE_READY.value:
                 raise ConflictError("Ticket is not ready for integration")
@@ -178,6 +179,7 @@ class IntegrationMixin:
 
         with self.store.connection(immediate=True) as connection:
             ticket, current_project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._require_repository_reconciled(connection, current_project_id)
             if (
                 current_project_id != project_id
                 or ticket["status"] != TicketStatus.MERGE_READY.value
@@ -479,11 +481,18 @@ class IntegrationMixin:
         satisfied, and every surface it touches says the work did not pass the
         integration gate.
         """
-        require_role(actor, Role.INTEGRATOR, Role.ADMIN)
+        require_role(actor, Role.PLANNER, Role.INTEGRATOR, Role.ADMIN)
         self._valid_commit(landed_commit, "landed_commit")
         self._bounded_text(reason, "reason", 2000)
         with self.store.connection() as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            if actor.role is Role.PLANNER:
+                pending = self._repository_reconciliation_state(connection, project_id)
+                if not pending["repository_reconciliation_required"]:
+                    raise ConflictError(
+                        "Planner may record an external landing only while reconciling observed Git movement",
+                        {"reason": "repository_reconciliation_not_pending"},
+                    )
             self._expect_version(ticket, expected_version)
             if TicketStatus(ticket["status"]) in CLOSED_TICKET_STATUSES or (
                 ticket["status"] == TicketStatus.DONE.value
@@ -538,6 +547,12 @@ class IntegrationMixin:
             ticket, current_project_id = self._authorized_ticket(connection, actor, ticket_id)
             if current_project_id != project_id:
                 raise ConflictError("Ticket changed while its landing was being verified")
+            if actor.role is Role.PLANNER:
+                pending = self._repository_reconciliation_state(connection, project_id)
+                if not pending["repository_reconciliation_required"]:
+                    raise ConflictError(
+                        "Repository reconciliation finished while the landing was being verified"
+                    )
             self._expect_version(ticket, expected_version)
             timestamp = _iso()
             next_version = ticket["version"] + 1
@@ -880,6 +895,7 @@ class IntegrationMixin:
             self._require_mergeable_identity(snapshot)
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._require_repository_reconciled(connection, project_id)
             self._expect_version(ticket, expected_version)
             self.require_fresh_context(connection, ticket_id, context_snapshot_id)
             if ticket["status"] != TicketStatus.MERGE_READY.value:
@@ -998,6 +1014,7 @@ class IntegrationMixin:
             actor = Actor(job["requested_by"], Role.INTEGRATOR, frozenset({job["project_id"]}))
             ticket = self._ticket(connection, job["ticket_id"])
             try:
+                self._require_repository_reconciled(connection, job["project_id"])
                 if ticket["status"] != TicketStatus.MERGE_READY.value:
                     raise ConflictError(
                         "Ticket is no longer ready for integration before the merge worker started"
@@ -1058,6 +1075,7 @@ class IntegrationMixin:
                 raise ConflictError("Candidate changed while the integration gate ran")
             with self.store.connection(immediate=True) as connection:
                 current_ticket = self._ticket(connection, job["ticket_id"])
+                self._require_repository_reconciled(connection, job["project_id"])
                 self._expect_version(current_ticket, job["expected_version"])
                 self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
                 self._event(connection, actor, job["project_id"], "integration.gate_passed", "merge_job",
@@ -1174,6 +1192,7 @@ class IntegrationMixin:
                 return job
             actor = Actor(job["requested_by"], Role.INTEGRATOR, frozenset({job["project_id"]}))
             ticket = self._ticket(connection, job["ticket_id"])
+            self._require_repository_reconciled(connection, job["project_id"])
             if ticket["status"] != TicketStatus.MERGE_READY.value:
                 raise ConflictError("Ticket changed while the merge worker ran")
             self._expect_version(ticket, job["expected_version"])

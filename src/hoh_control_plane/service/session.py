@@ -34,7 +34,8 @@ class SessionMixin:
                 "runtime": {"version": __version__, "qa_instrumentation": "pytest-hooks-v1",
                             "infrastructure_retry": "planner_readiness_required",
                             "context_policy": "refresh_planning_revision_before_writes",
-                            "quality_contract": "claim-evidence-v1"},
+                            "quality_contract": "claim-evidence-v1",
+                            "planning_boundary": "every_observed_commit"},
                 "capabilities": self.capabilities(actor),
                 "required_skills": ["hoh-control-plane"] + ([] if actor.role == Role.ADMIN else [f"hoh-{actor.role.value}"]),
                 "projects": [{"project_id": p["project_id"], "name": p["name"]} for p in projects[:100]],
@@ -78,6 +79,9 @@ class SessionMixin:
                 "requires_shared_filesystem": colocated and actor.role == Role.DEVELOPER,
                 "candidate_delivery": "assigned_worktree" if colocated else "commit_reachable_on_service",
             }
+            result["planning_barrier"] = self._repository_reconciliation_state(
+                connection, selected_id
+            )
             lease_rows = connection.execute(
                 "SELECT l.* FROM leases l JOIN tickets t ON t.ticket_id = l.ticket_id "
                 "JOIN features f ON f.feature_id = t.feature_id "
@@ -117,4 +121,10 @@ class SessionMixin:
                 result["next_action"] = "resume_assignment"
             elif actor.role == Role.PLANNER:
                 result["next_action"] = "resume_planner_job" if result["planner_assignments"] else "register_then_discover"
+            if result["planning_barrier"]["repository_reconciliation_required"]:
+                result["next_action"] = (
+                    "reconcile_repository_before_any_wait_or_release"
+                    if actor.role == Role.PLANNER
+                    else "preserve_assignment_until_planner_reconciles_repository"
+                )
             return result

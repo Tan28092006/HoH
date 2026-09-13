@@ -150,9 +150,15 @@ async def _repository_pending(service, actor, project):
         'document_paths': (manifest.get('document_paths') or [])[:20],
         'branch_updates': (manifest.get('branch_updates') or [])[:20],
         'context_ref': context_ref,
+        'reconciliation_id': manifest.get('reconciliation_id'),
+        'observed_commit_count': len(manifest.get('observed_commits') or []),
+        'commit_refs': [
+            item.get('commit') for item in (manifest.get('observed_commits') or [])[:20]
+        ],
         'next_action': (
-            'resolve the repository observation; inspect relevant Git/docs/spec '
-            'diffs and update active ticket direction before waiting again'
+            'resolve the repository observation; inspect each commit and relevant '
+            'Git/docs/spec diff, classify every previously-open ticket, apply lifecycle '
+            'changes, then call planner.resolve_repository_reconciliation'
         ),
     })]
 
@@ -166,6 +172,39 @@ def _pending(service, actor, project, kind=None, identifier=None):
                  'job_kind': kind, 'job_id': identifier, 'status': job['status'],
                  'ticket_ref': 'ticket:' + job['ticket_id'], 'poll_tool': poll_tool})]
     with service.store.connection() as db:
+        reconciliations = [
+            service._repository_reconciliation(row)
+            for row in db.execute(
+                """
+                SELECT * FROM repository_reconciliations
+                WHERE project_id = ? AND status = 'PENDING'
+                ORDER BY created_at ASC LIMIT 20
+                """,
+                (project,),
+            ).fetchall()
+        ]
+        if reconciliations:
+            first = reconciliations[0]
+            payload = {
+                'kind': (
+                    'repository_changed' if actor.role == Role.PLANNER
+                    else 'repository_reconciliation_required'
+                ),
+                'reconciliation_id': first['reconciliation_id'],
+                'context_ref': first['observation_ref'],
+                'observed_commit_count': len(first['observed_commits']),
+                'commit_refs': [
+                    item.get('commit') for item in first['observed_commits'][:20]
+                ],
+                'next_action': (
+                    'resolve the observation, audit every previously-open ticket, apply '
+                    'lifecycle changes, then call planner.resolve_repository_reconciliation'
+                    if actor.role == Role.PLANNER else
+                    'preserve the current lease/worktree and do not claim, submit or merge '
+                    'until Planner resolves the repository reconciliation'
+                ),
+            }
+            return [('repository-reconciliation:' + first['reconciliation_id'], payload)]
         presence = db.execute('SELECT capacity FROM agent_presence WHERE agent_id=?', (actor.agent_id,)).fetchone()
         table = 'planner_job_leases' if actor.role == Role.PLANNER else 'leases'
         active = db.execute(f'SELECT count(*) AS n FROM {table} WHERE agent_id=? AND expires_at>?', (actor.agent_id, _iso())).fetchone()['n']

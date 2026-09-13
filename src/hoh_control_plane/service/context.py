@@ -140,6 +140,7 @@ class ContextMixin:
                     "SELECT * FROM project_repositories WHERE project_id = ?", (project_id,)
                 ).fetchone()
             )
+            planning_barrier = self._repository_reconciliation_state(connection, project_id)
             verification_profile = project.get("verification_profile") or {
                 "schema_version": "1", "quality_policy": "legacy", "capabilities": []
             }
@@ -259,6 +260,7 @@ class ContextMixin:
                 repository,
                 self._relevant_branch_refs(candidate, worktree),
             ),
+            "planning_barrier": planning_barrier,
             "verification_profile": verification_profile,
             "feature": feature,
             "ticket": ticket,
@@ -278,6 +280,9 @@ class ContextMixin:
                 repository,
                 self._relevant_branch_refs(candidate, worktree),
             ),
+            "repository_reconciliation_refs": [
+                item["observation_ref"] for item in planning_barrier["pending"]
+            ],
             "ticket_version": ticket["version"],
             "feature_version": feature["version"],
             "candidate_commit": candidate["commit_sha"] if candidate else None,
@@ -467,6 +472,14 @@ class ContextMixin:
             repository, self._relevant_branch_refs(candidate, worktree)
         ):
             stale.append("repository")
+        current_reconciliation_refs = [
+            item["observation_ref"]
+            for item in self._repository_reconciliation_state(
+                connection, recorded["project_id"]
+            )["pending"]
+        ]
+        if observed.get("repository_reconciliation_refs", []) != current_reconciliation_refs:
+            stale.append("planning_barrier")
         if observed.get("ticket_version") != ticket["version"]:
             stale.append("ticket")
         if observed.get("feature_version") != feature["version"]:

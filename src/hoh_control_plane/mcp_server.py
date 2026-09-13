@@ -573,6 +573,73 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
                 "planner.sync_repository", arguments,
                 lambda: service.sync_repository(actor, project_id)))
 
+        @server.tool(name="planner.list_repository_reconciliations", structured_output=True)
+        def planner_list_repository_reconciliations(
+            project_id: str, status: str = "PENDING", limit: int = 20
+        ) -> dict[str, Any]:
+            """List commit observations whose ticket plans still require review."""
+            arguments = {"project_id": project_id, "status": status, "limit": limit}
+            return invoke(
+                "planner.list_repository_reconciliations",
+                arguments,
+                lambda: service.list_repository_reconciliations(actor, **arguments),
+            )
+
+        @server.tool(name="planner.resolve_repository_reconciliation", structured_output=True)
+        def planner_resolve_repository_reconciliation(
+            project_id: str,
+            reconciliation_id: str,
+            ticket_decisions: list[dict[str, Any]],
+            decision_summary: str,
+            new_ticket_ids: list[str] | None = None,
+            idempotency_key: str | None = None,
+        ) -> dict[str, Any]:
+            """Reopen execution after classifying every ticket open before a Git change.
+
+            Apply ticket mutations first with cancel/supersede/update and the
+            existing integration landing workflow.  The decision list is then
+            checked against the actual board before the barrier can resolve.
+            """
+            arguments = {
+                "project_id": project_id,
+                "reconciliation_id": reconciliation_id,
+                "ticket_decisions": ticket_decisions,
+                "decision_summary": decision_summary,
+                "new_ticket_ids": new_ticket_ids or [],
+            }
+            return invoke(
+                "planner.resolve_repository_reconciliation",
+                arguments,
+                lambda: service.resolve_repository_reconciliation(actor, **arguments),
+                idempotency_key,
+            )
+
+        @server.tool(name="planner.record_external_landing", structured_output=True)
+        def planner_record_external_landing(
+            ticket_id: str,
+            expected_version: int,
+            landed_commit: str,
+            reason: str,
+            idempotency_key: str | None = None,
+        ) -> dict[str, Any]:
+            """Record Git-proven default-branch work during a pending reconciliation.
+
+            This closes stale duplicate execution but certifies no QA criterion.
+            The service verifies commit reachability and writes an ungated landing.
+            """
+            arguments = {
+                "ticket_id": ticket_id,
+                "expected_version": expected_version,
+                "landed_commit": landed_commit,
+                "reason": reason,
+            }
+            return invoke(
+                "planner.record_external_landing",
+                arguments,
+                lambda: service.record_external_landing(actor, **arguments),
+                idempotency_key,
+            )
+
         @server.tool(name="planner.reconcile_delivery_report", structured_output=True)
         def planner_reconcile_delivery_report(merge_job_id: str) -> dict[str, Any]:
             """Recover exactly one missing Planner report for a completed merge."""
@@ -878,6 +945,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             ticket_id: str,
             expected_version: int,
             reason: str,
+            reconciliation_id: str | None = None,
             idempotency_key: str | None = None,
         ) -> dict[str, Any]:
             """Retire an obsolete backlog, ready or blocked ticket from dispatch."""
@@ -885,6 +953,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
                 "ticket_id": ticket_id,
                 "expected_version": expected_version,
                 "reason": reason,
+                "reconciliation_id": reconciliation_id,
             }
             return invoke(
                 "planner.cancel_ticket",
@@ -899,6 +968,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             expected_version: int,
             replacement_ticket_id: str,
             reason: str,
+            reconciliation_id: str | None = None,
             idempotency_key: str | None = None,
         ) -> dict[str, Any]:
             """Retire a ticket that an existing same-project replacement now carries."""
@@ -907,11 +977,34 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
                 "expected_version": expected_version,
                 "replacement_ticket_id": replacement_ticket_id,
                 "reason": reason,
+                "reconciliation_id": reconciliation_id,
             }
             return invoke(
                 "planner.supersede_ticket",
                 arguments,
                 lambda: service.supersede_ticket(actor, **arguments),
+                idempotency_key,
+            )
+
+        @server.tool(name="planner.stop_ticket_for_reconciliation", structured_output=True)
+        def planner_stop_ticket_for_reconciliation(
+            ticket_id: str,
+            expected_version: int,
+            reconciliation_id: str,
+            reason: str,
+            idempotency_key: str | None = None,
+        ) -> dict[str, Any]:
+            """Revoke stale active execution while preserving its worktree and artifacts."""
+            arguments = {
+                "ticket_id": ticket_id,
+                "expected_version": expected_version,
+                "reconciliation_id": reconciliation_id,
+                "reason": reason,
+            }
+            return invoke(
+                "planner.stop_ticket_for_reconciliation",
+                arguments,
+                lambda: service.stop_ticket_for_reconciliation(actor, **arguments),
                 idempotency_key,
             )
 

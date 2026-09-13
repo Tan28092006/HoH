@@ -66,6 +66,9 @@ JSON_FIELDS = {
     "capability_approval_refs",
     "skill_manifest",
     "skill_compatibility",
+    "observed_commits",
+    "ticket_versions",
+    "decision_manifest",
     "accepted_protocol_versions",
     "accepted_skill_versions",
 }
@@ -140,7 +143,9 @@ GENERAL_CONTEXT_ENTRY_TYPE = "note"
 
 # Artifact identity and open findings stay in every packet, so these sections
 # are compacted to essentials rather than omitted.
-_PROTECTED_SECTIONS = frozenset({"ticket", "candidate", "known_failures", "verification_profile"})
+_PROTECTED_SECTIONS = frozenset(
+    {"ticket", "candidate", "known_failures", "verification_profile", "planning_barrier"}
+)
 
 # What each role cannot act safely without: a Developer that lost its branch and
 # base commit, or QA that lost the worktree it must execute in, would do damage
@@ -295,5 +300,6 @@ def _row(row: Any | None) -> dict[str, Any] | None:
         return None
     result = dict(row)
     for field in JSON_FIELDS & result.keys():
-        result[field] = json.loads(result[field])
+        if result[field] is not None and isinstance(result[field], str):
+            result[field] = json.loads(result[field])
     return result

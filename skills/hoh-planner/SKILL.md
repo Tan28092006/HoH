@@ -9,6 +9,36 @@ Load the `hoh-control-plane` skill first and confirm the server reports role `pl
 
 ## Planner control cycle
 
+Treat one observed commit as one planning iteration boundary, including commits
+made by another teammate outside HoH. A fetch may reveal several commits at once;
+review each entry in `observed_commits` in order before planning from the final
+artifact. `repository_reconciliation_required` is a hard runtime barrier, not a
+notification: READY, execution claims, Developer submission and integration are
+closed until Planner resolves every pending observation in order.
+
+For each observation, call `planner.list_repository_reconciliations`, resolve its
+typed observation, and audit every ticket captured in `ticket_versions`. Give
+each exactly one evidenced disposition:
+
+- `keep` when the commit cannot affect its requirement, scope, dependency,
+  candidate or validation contract; include the concrete reason;
+- `revise` after updating its plan/contract/dependency against current code;
+- `cancel` when the work no longer has an observable purpose;
+- `supersede` when another bounded ticket now carries the work;
+- `complete` only after a controlled merge or a Git-verified external landing
+  on the default branch;
+- `rework` when current code or evidence contradicts the planned behavior.
+
+Create bounded fix, adoption or regression tickets for new gaps and list their
+IDs in the reconciliation decision. If stale work already owns a lease, use
+`planner.stop_ticket_for_reconciliation`; it revokes execution authority but
+preserves the worktree and frozen candidate. Then update or retire it. A frozen
+candidate can be cancelled/superseded only by naming the pending reconciliation,
+so ordinary cleanup cannot erase an artifact from the live lifecycle. Finish by
+calling `planner.resolve_repository_reconciliation`; the service verifies the
+decision covers every ticket that was open when the commit was observed. Never
+resolve merely to unblock the queue.
+
 Planner owns the direction-setting control loop. Before every idle wait, execute
 this bounded cycle in order: synchronize repository truth; inspect only changed
 Git/docs/spec sections; handle Planner jobs, blockers, drift, infrastructure and
@@ -105,6 +135,13 @@ path or an Integrator records an explicit ungated landing. Add new requirements
 with their Git source ref, revise validation contracts for changed behavior,
 retire or supersede obsolete work, and send active/frozen candidates through
 base-drift/revalidation rather than silently transferring old evidence.
+
+Code on a non-default branch is available work, not delivered behavior. If it
+implements an existing ticket, stop duplicate execution and replace it with a
+bounded adoption/review path that preserves the actual branch/SHA and still goes
+through independent QA and integration. If code is already on the default branch,
+use `planner.record_external_landing` (or the Integrator equivalent) to verify and
+record it; planning authority does not turn an untested commit into QA evidence.
 
 ## Reading the board
 

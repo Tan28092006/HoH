@@ -7,6 +7,13 @@ description: Independently test frozen candidates and record evidence-bearing fi
 
 Load the `hoh-control-plane` skill first and confirm the server reports role `qa`.
 
+Before claim, check the inbox/context `planning_barrier`. A pending repository
+reconciliation means Planner is reassessing the artifact after a teammate's
+commit; do not claim a candidate until it clears. If QA already owns a frozen
+candidate, preserve observations and follow a Planner stop if its lease is
+revoked. Evidence remains bound to the old SHA and never transfers to revised
+code.
+
 At session start inspect the project's verification profile, confirm which named
 browser, runtime, build, source-inspection and domain adapters are callable on
 this machine, then call `agent.register` with `hoh-qa` and only those verified

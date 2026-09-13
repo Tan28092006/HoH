@@ -96,6 +96,7 @@ class WorktreeMixin:
         """Authorize the request and read what the Git inspection needs."""
         with self.store.connection() as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._require_repository_reconciled(connection, project_id)
             self._expect_version(ticket, expected_version)
             if ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:
                 raise ConflictError("Worktrees can only be prepared for active development work")
@@ -217,6 +218,7 @@ class WorktreeMixin:
         )
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            self._require_repository_reconciled(connection, project_id)
             self._expect_version(ticket, expected_version)
             if ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:
                 raise ConflictError("Worktrees can only be prepared for active development work")
@@ -567,9 +569,13 @@ class WorktreeMixin:
                 provision["requested_by"], Role.DEVELOPER, frozenset({provision["project_id"]})
             )
             ticket = self._ticket(connection, provision["ticket_id"])
-            if ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:
+            try:
+                self._require_repository_reconciled(connection, provision["project_id"])
+            except DomainError as error:
+                preflight_error = str(error)
+            if preflight_error is None and ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:
                 preflight_error = "Ticket is no longer in active development before worktree setup."
-            else:
+            elif preflight_error is None:
                 try:
                     self._require_active_lease(
                         connection, actor, provision["ticket_id"], provision["lease_id"]

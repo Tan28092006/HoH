@@ -20,6 +20,7 @@ single-machine benchmark setup.
 | Preserve public execution records, runtime identity and traces | The runner records command digest, actual child manifest, resolved source, candidate commit, exit/timeout/duration, capture/termination status, environment digest, storage reference and checksum. Large logs/media stay in evidence storage. | Enforced for the registered runner; exploratory domain tools attach records through evidence references |
 | Equip QA with project/build/runtime/domain/visual/task-specific tools | The project verification profile declares intended equipment. Every QA session registers what it checked, while Planner/operator independently approves the subset backed by public preflight evidence. Strict tickets are neither offered nor claimable unless required capabilities are both declared and approved. UI contracts can require browser trace, screenshot and interaction capabilities. | Enforced routing, approval and claim gates; adapters remain project-specific |
 | Return compact evidence to the next Planner | QA handoff carries preservation constraints, update targets and validation requirements. A successful gated merge now creates exactly one durable `delivery_completed` Planner report; recovery is idempotent. | Enforced |
+| Re-plan from the real artifact at every iteration boundary | Every newly observed commit opens a durable repository reconciliation. Planner reviews each commit and classifies every ticket that was open at observation time before READY, claim, Developer submission or integration can continue. | Enforced by runtime barrier; semantic dispositions remain Planner judgement |
 | Keep evaluator-only information outside the development loop | Role contracts forbid hidden tests, scores, private rubrics/formulas and evaluator rationale in tickets or evidence. | Contracted; a general-purpose service cannot automatically classify arbitrary pasted text |
 
 ## Multi-agent extensions
@@ -42,6 +43,15 @@ after a delivery report. Detailed branch diffs enter a ticket only when that
 branch is linked to the active ticket/candidate or is a declared shared team
 branch. This lets the board notice requirement/docs/API/config/production changes
 without making every unrelated branch invalidate every ticket snapshot.
+
+A changed head may reveal several commits after an offline interval. HoH records
+each fast-forward commit in order inside one bounded observation, then requires a
+decision for every ticket that was open at that boundary. Old tickets are retained
+for audit but leave dispatch as `CANCELLED` or `SUPERSEDED`. Active stale execution
+can be revoked without deleting its worktree or frozen candidate. Code seen only
+on a peer branch becomes an adoption/QA/integration path; code already on the
+default branch becomes DONE only through the explicit Git-verified ungated-landing
+record, which carries no QA certification.
 
 ## Context boundary
 

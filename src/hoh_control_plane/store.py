@@ -232,6 +232,25 @@ CREATE TABLE IF NOT EXISTS project_repositories (
     configured_at TEXT NOT NULL
 );
 
+-- Every observed remote movement is a planning boundary.  The observation is
+-- immutable and stays pending until Planner has reconciled the board against
+-- the new artifact.  Execution admission consults this table, so a model
+-- cannot acknowledge a Git event and continue from an old plan by accident.
+CREATE TABLE IF NOT EXISTS repository_reconciliations (
+    reconciliation_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    observation_ref TEXT NOT NULL UNIQUE,
+    observed_commits TEXT NOT NULL,
+    ticket_versions TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('PENDING', 'RESOLVED')),
+    created_at TEXT NOT NULL,
+    resolved_by TEXT,
+    resolved_at TEXT,
+    decision_manifest TEXT
+);
+CREATE INDEX IF NOT EXISTS repository_reconciliations_project_status
+    ON repository_reconciliations(project_id, status, created_at);
+
 CREATE TABLE IF NOT EXISTS project_test_profiles (
     project_id TEXT PRIMARY KEY REFERENCES projects(project_id),
     test_command TEXT NOT NULL,

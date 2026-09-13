@@ -200,6 +200,114 @@ class GitWorktreeManager:
             "remote_branches": remote_branches,
         }
 
+    def remote_commit_delta(
+        self,
+        repository_path: str,
+        previous_commit: str | None,
+        commit: str | None,
+        *,
+        limit: int = 100,
+        baseline_commit: str | None = None,
+    ) -> dict[str, object]:
+        """Describe commits introduced by one observed remote-head movement.
+
+        A fast-forward can contain several commits when the local observer was
+        asleep.  Returning each one preserves the paper's commit-as-iteration
+        boundary even though the Planner receives them in one wakeup.  New,
+        deleted and rewritten branches stay bounded to their head identity; a
+        new branch's entire historical ancestry is not new project work.
+        """
+        repository = Path(self.validate_repository(repository_path))
+        if commit is None:
+            return {"relation": "deleted", "commits": [], "changes": []}
+        resolved = self._resolve_commit(repository, commit)
+
+        def changes(start: str | None, end: str) -> list[dict[str, str]]:
+            if start is None:
+                output = self._git(
+                    repository, "show", "--format=", "--name-status", "--no-renames", end
+                ).stdout
+            else:
+                output = self._git(
+                    repository, "diff", "--name-status", "--no-renames", start, end
+                ).stdout
+            result = []
+            for line in output.splitlines()[:200]:
+                status, separator, path = line.partition("\t")
+                if separator and path:
+                    result.append({"status": status, "path": path})
+            return result
+
+        if previous_commit is None:
+            if baseline_commit is not None:
+                baseline = self._resolve_commit(repository, baseline_commit)
+                merge_base = self._git(
+                    repository, "merge-base", baseline, resolved, check=False
+                ).stdout.strip()
+                if merge_base:
+                    output = self._git(
+                        repository,
+                        "log",
+                        "--reverse",
+                        "--format=%H%x09%s",
+                        f"--max-count={limit}",
+                        f"{merge_base}..{resolved}",
+                    ).stdout
+                    commits = []
+                    for line in output.splitlines():
+                        sha, separator, subject = line.partition("\t")
+                        if separator:
+                            commits.append({"commit": sha, "subject": subject[:500]})
+                    return {
+                        "relation": "new",
+                        "commits": commits,
+                        "changes": changes(merge_base, resolved),
+                    }
+            subject = self._git(
+                repository, "show", "-s", "--format=%s", resolved
+            ).stdout.strip()
+            return {
+                "relation": "new",
+                "commits": [{"commit": resolved, "subject": subject[:500]}],
+                "changes": changes(None, resolved),
+            }
+        previous = self._resolve_commit(repository, previous_commit)
+        ancestry = self._git(
+            repository, "merge-base", "--is-ancestor", previous, resolved, check=False
+        )
+        if ancestry.returncode == 0:
+            output = self._git(
+                repository,
+                "log",
+                "--reverse",
+                "--format=%H%x09%s",
+                f"--max-count={limit}",
+                f"{previous}..{resolved}",
+            ).stdout
+            commits = []
+            for line in output.splitlines():
+                sha, separator, subject = line.partition("\t")
+                if separator:
+                    commits.append({"commit": sha, "subject": subject[:500]})
+            return {
+                "relation": "fast_forward",
+                "commits": commits,
+                "changes": changes(previous, resolved),
+            }
+        if ancestry.returncode not in {0, 1}:
+            raise ValidationError("Unable to classify remote branch movement")
+        subject = self._git(
+            repository, "show", "-s", "--format=%s", resolved
+        ).stdout.strip()
+        merge_base = self._git(
+            repository, "merge-base", previous, resolved, check=False
+        ).stdout.strip()
+        return {
+            "relation": "rewritten",
+            "commits": [{"commit": resolved, "subject": subject[:500]}],
+            "changes": changes(merge_base or None, resolved),
+        }
+
     def prepare(
         self,
         *,

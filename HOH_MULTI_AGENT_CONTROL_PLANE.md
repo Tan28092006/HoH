@@ -58,6 +58,21 @@ Local skill hướng dẫn cách làm việc nhưng backend mới là nơi cư�
 
 Không chỉ lưu trạng thái cuối. Hệ thống phải lưu ai đã claim, gia hạn lease, đổi acceptance criteria, submit candidate, chạy test, pass/fail hoặc reopen ticket.
 
+### 2.9. Mỗi commit là một planning boundary
+
+Mỗi commit mới được quan sát trên default branch hoặc remote team branch phải mở
+một repository reconciliation bền vững. Planner đọc từng commit và diff code,
+docs, spec; sau đó phân loại mọi ticket đang mở thành giữ nguyên, sửa kế hoạch,
+hủy, thay thế, hoàn thành hoặc rework. Runtime không phát READY, không cấp claim,
+không nhận Developer candidate và không merge khi reconciliation còn mở.
+
+Ticket lỗi thời không bị xóa vật lý. `CANCELLED` và `SUPERSEDED` loại nó khỏi
+dispatch nhưng giữ history, candidate và evidence. Nếu plan cũ đang có lease,
+Planner được thu hồi quyền thực thi theo đúng reconciliation; worktree và artifact
+vẫn được bảo toàn. Commit ngoài control plane không tự là QA evidence: branch code
+phải đi qua adoption/QA/integration, còn code đã vào default branch phải được
+Integrator xác minh và ghi external landing trước khi ticket thành DONE.
+
 ## 3. Mô hình khái niệm
 
 ```text

@@ -28,6 +28,15 @@ For each work item:
 
 If `dev.submit_candidate` errors, is interrupted, or does not return a submission ID: record the exact error code/message verbatim (e.g. via `dev.append_progress` or directly to the user) and do not retry blindly. Re-read ticket/candidate and submission state first, since the first attempt may have queued successfully. For `context_stale` only, obtain a fresh ticket packet and compare ticket version, lease owner, assigned worktree/branch/base, candidate SHA, validation contract, dependencies and `repository_state`. If no candidate or submission job exists and none of those material inputs changed, retry exactly once with the new snapshot ID and the same idempotency key. If a job exists, resume it; if any input changed or repository freshness is unresolved, stop and route the new fact to Planner. A slow `QUEUED` or `RUNNING` job is not a blocker; keep polling it and renewing the lease.
 
+Every submitted Developer run is one commit and ends this role's iteration. Before
+that submission, inspect `planning_barrier` in the refreshed packet. If it says
+`repository_reconciliation_required`, stop new edits and preserve the current
+worktree/commit. Keep the lease alive while Planner decides whether this ticket
+remains valid. Do not submit, rebase or reinterpret scope through the barrier. If
+Planner revokes the lease with a reconciliation stop, cease work immediately;
+the preserved worktree is evidence/recovery material and no longer authorizes a
+candidate.
+
 Do not mark your own candidate as QA-passed, modify acceptance criteria, merge a protected branch, or continue after losing the lease. Call `dev.report_blocker` only after confirming a durable failure — not a single transient error, a busy dependency, or an infra hiccup that might clear on its own; when in doubt, surface the blocker to the user instead of releasing the lease speculatively. `dev.report_blocker` releases the lease, retains exact context and returns the ticket to Planner. Never perform QA, Planner or Integrator/merge actions yourself, and do not invent a completion claim.
 
 If this chat becomes idle and is later resumed, call `work.inbox` again before choosing work — this is what surfaces an existing active lease for the resume check in step 3. An MCP server can queue work but cannot itself wake a stopped chat; use the host's scheduling or notification adapter when push wakeups are needed.
