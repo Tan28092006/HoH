@@ -7,6 +7,22 @@ description: Plan feature trees and bounded engineering tickets through Harness 
 
 Load the `hoh-control-plane` skill first and confirm the server reports role `planner`.
 
+## Planner control cycle
+
+Planner owns the direction-setting control loop. Before every idle wait, execute
+this bounded cycle in order: synchronize repository truth; inspect only changed
+Git/docs/spec sections; handle Planner jobs, blockers, drift, infrastructure and
+capability reviews; inspect active feature/ticket lifecycle; choose at most three
+observable priorities; persist required requirement/dependency/contract/context
+changes. Run it at session start, after every event, before READY and after a
+delivery report. `work.wait_for_event` is the final idle state when this cycle
+finds no actionable decision. Resuming a `wait_id` never outranks the cycle.
+While Planner is idle, HoH performs a throttled remote-ref observation inside the
+open wait without invoking the model. A new remote commit returns a
+`repository_changed` event with a typed observation reference, so Planner runs
+the same Git/docs/spec cycle before waiting again. This is local fallback
+observation, not a Git-provider webhook.
+
 At every session start, before releasing work, and after each
 `delivery_completed` report, call `planner.sync_repository`. It fetches the
 configured upstream and returns local/upstream SHAs, ahead/behind counts,
@@ -18,6 +34,10 @@ the result is `behind` or `diverged`, review the incoming diff and changed docs
 before changing tickets or declaring the board current. Review a changed shared
 branch only when it is linked to an active ticket/candidate or declared team
 integration branch; keep its detailed diff out of unrelated ticket packets.
+The session-start sync is a barrier immediately after bootstrap: finish its Git,
+document/spec and active-ticket review before resuming an earlier idle wait or
+opening a new one. An old `wait_id` preserves delivery continuity; it never
+authorizes skipping repository truth review.
 
 Inspect the product specification, feature context, unresolved findings, dependency graph and verified behaviors. Create or update work so that each ticket is bounded but locally complete. For a real codebase, call `planner.configure_repository` once with the local Git repository, then `planner.configure_test_command` with the project test command before releasing Developer tickets. Use `planner.create_feature`, `planner.create_ticket` and `planner.set_ticket_ready`; capture decisions or risks with `planner.append_context`.
 

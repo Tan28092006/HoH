@@ -24,8 +24,11 @@ lost client and HTTP waits check their own response stream. Sources:
 [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp) and
 [Claude environment variables](https://code.claude.com/docs/en/env-vars).
 
-The agent bootstraps the named project, registers capacity (normally 1), resumes
-existing leases/jobs, then calls `work.wait_for_event`. Use its default 43200
+The agent bootstraps the named project and registers capacity (normally 1).
+Execution roles resume existing leases/jobs before accepting new work. Planner
+first completes its repository/spec/ticket control cycle; an idle `wait_id` never
+skips that barrier. Only after role-specific ready work is handled does the agent
+call `work.wait_for_event`. Use its default 43200
 seconds and pass the previous `ack_event_id` after handling an event. At a
 queued provisioning, candidate submission, QA or merge job, specify `job_kind`
 and `job_id`. The host waits for that owned job and renews its still-valid
@@ -60,6 +63,14 @@ One live recipient is reserved before waking its model; the actual ticket
 lease remains the exclusive execution lock. Another agent can receive the
 notification after the reservation/presence expires. Reconnection cannot revive
 an older reservation already reassigned to a peer.
+
+An idle Planner also performs a throttled remote-ref observation inside the
+server-side wait. This fetch does not invoke the model. A changed remote head
+returns one durable `repository_changed` event with a typed observation reference;
+the Planner then reviews relevant Git/docs/spec changes before waiting again.
+This gives the local pilot bounded-delay external-push detection without a cron
+conversation. A provider webhook remains the production path for immediate push
+delivery across machines.
 
 Unacknowledged eligible events replay with the same delivery ID. Events already
 claimed by another agent are suppressed. A backend recovery read every 20

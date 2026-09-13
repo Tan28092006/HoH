@@ -33,6 +33,12 @@ credentials/identities; HoH leases are keyed by identity, not chat/session ID.
 Several MCP processes for one profile can be normal client setup; their count
 alone does not establish that multiple chats are doing work as that identity.
 
+For Planner, repository/spec synchronization and the Planner control cycle are a
+mandatory barrier immediately after bootstrap and before resuming an idle
+`wait_id`. Restore an owned active Planner job first when needed to preserve its
+lease, but never jump from “no lease” directly back to waiting without reviewing
+Git/docs/spec changes and active ticket direction.
+
 ## Event-driven GUI sessions
 
 When the operator requests continuous event-driven work, use

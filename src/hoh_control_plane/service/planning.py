@@ -235,6 +235,8 @@ class PlanningMixin:
                 })
             manifest["branch_updates"] = branch_updates
             changed = changed or bool(branch_updates)
+            manifest["changed"] = changed
+            manifest["context_ref"] = None
             connection.execute(
                 """UPDATE project_repositories
                    SET observed_mainline_commit = ?, observed_upstream_commit = ?,
@@ -255,6 +257,7 @@ class PlanningMixin:
                     (next_version, timestamp, project_id),
                 )
                 entry_id = _id("ctx")
+                manifest["context_ref"] = f"ctx:entry:{entry_id}"
                 connection.execute(
                     """INSERT INTO context_entries
                        (entry_id, project_id, entry_type, content, source_ref,

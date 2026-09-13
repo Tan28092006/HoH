@@ -10,10 +10,13 @@ Load the `hoh-control-plane` skill first and confirm the server reports role `qa
 At session start inspect the project's verification profile, confirm which named
 browser, runtime, build, source-inspection and domain adapters are callable on
 this machine, then call `agent.register` with `hoh-qa` and only those verified
-`execution_capabilities`. Do not copy the profile list blindly. The dispatcher
+`execution_capabilities`. Pass a stable `machine_id` derived from the host name,
+not a random chat/session identifier. Do not copy the profile list blindly. The dispatcher
 must leave work queued until Planner/operator has independently approved those
 capabilities from public preflight evidence, and whenever this QA lacks required
-equipment. QA cannot approve its own capability profile. Then call
+equipment. QA cannot approve its own capability profile. When a QA-ready
+candidate matches the declaration but approval is missing, HoH emits a
+`capability_review_required` event to an available Planner. Then call
 `work.inbox`. Prefer a valid inbox offer; otherwise discover candidates waiting
 for QA. Resolve ticket context, claim one with `qa.claim_candidate`, and verify
 that the candidate ID and commit SHA remain unchanged throughout the run.

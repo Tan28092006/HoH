@@ -7,17 +7,28 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+import hashlib
 import json
 import math
 import secrets
 import socket
+import threading
 import time
 
 from hoh_control_plane.domain import Actor, Role, AuthorizationError, ConflictError, ValidationError
-from hoh_control_plane.service._common import _iso, _now, require_project
+from hoh_control_plane.service._common import (
+    _iso,
+    _now,
+    _required_execution_capabilities,
+    _row,
+    require_project,
+)
 
 RECOVERY_SECONDS = 20
 WAIT_PRESENCE_SECONDS = 90
+REPOSITORY_OBSERVE_SECONDS = 60
+_REPOSITORY_OBSERVE_LOCK = threading.Lock()
+_REPOSITORY_OBSERVED_AT: dict[str, float] = {}
 JOBS = {
     'provision': ('worktree_provision_jobs', 'provision_id', Role.DEVELOPER, 'dev.get_worktree_provision'),
     'submission': ('candidate_submission_jobs', 'submission_id', Role.DEVELOPER, 'dev.get_candidate_submission'),
@@ -88,6 +99,64 @@ def _job(service, actor, project, kind, identifier):
     return job, poll_tool, lease
 
 
+async def _repository_pending(service, actor, project):
+    """Observe remote Git while an idle Planner waits, without model polling."""
+    if actor.role != Role.PLANNER:
+        return []
+    now = time.monotonic()
+    if now - _REPOSITORY_OBSERVED_AT.get(project, 0) < REPOSITORY_OBSERVE_SECONDS:
+        return []
+    if not _REPOSITORY_OBSERVE_LOCK.acquire(blocking=False):
+        return []
+    failure = None
+    manifest = None
+    try:
+        now = time.monotonic()
+        if now - _REPOSITORY_OBSERVED_AT.get(project, 0) < REPOSITORY_OBSERVE_SECONDS:
+            return []
+        try:
+            manifest = await asyncio.to_thread(service.sync_repository, actor, project)
+        except Exception as error:
+            failure = error
+        finally:
+            _REPOSITORY_OBSERVED_AT[project] = time.monotonic()
+    finally:
+        _REPOSITORY_OBSERVE_LOCK.release()
+    if failure is not None:
+        summary = str(failure)[:500]
+        fingerprint = hashlib.sha256(
+            f"{type(failure).__name__}:{summary}".encode()
+        ).hexdigest()[:20]
+        return [(f"repository-sync-failed:{project}:{fingerprint}", {
+            'kind': 'repository_sync_failed',
+            'error_type': type(failure).__name__,
+            'summary': summary,
+            'next_action': 'repair repository access before declaring the board current',
+        })]
+    assert manifest is not None
+    if not manifest.get('changed'):
+        return []
+    context_ref = manifest.get('context_ref')
+    key = 'repository:' + (context_ref or hashlib.sha256(json.dumps({
+        'local': manifest.get('local_commit'),
+        'upstream': manifest.get('upstream_commit'),
+        'branches': manifest.get('branch_updates') or [],
+    }, sort_keys=True).encode()).hexdigest()[:20])
+    return [(key, {
+        'kind': 'repository_changed',
+        'relation': manifest.get('relation'),
+        'local_commit': manifest.get('local_commit'),
+        'upstream_commit': manifest.get('upstream_commit'),
+        'document_paths': (manifest.get('document_paths') or [])[:20],
+        'branch_updates': (manifest.get('branch_updates') or [])[:20],
+        'context_ref': context_ref,
+        'next_action': (
+            'resolve the repository observation; inspect relevant Git/docs/spec '
+            'diffs and update active ticket direction before waiting again'
+        ),
+    })]
+
+
 def _pending(service, actor, project, kind=None, identifier=None):
     if kind is not None:
         job, poll_tool, _ = _job(service, actor, project, kind, identifier)
@@ -103,10 +172,70 @@ def _pending(service, actor, project, kind=None, identifier=None):
         if active >= presence['capacity']:
             return []
         if actor.role == Role.PLANNER:
-            return [('planner:' + row['planner_job_id'] + ':' + row['updated_at'],
+            jobs = [('planner:' + row['planner_job_id'] + ':' + row['updated_at'],
                      {'kind': 'planner_work', 'planner_job_id': row['planner_job_id'],
                       'ticket_ref': 'ticket:' + row['ticket_id']})
                     for row in db.execute("SELECT planner_job_id,ticket_id,updated_at FROM planner_jobs WHERE project_id=? AND status='READY' ORDER BY created_at LIMIT 50", (project,))]
+            if jobs:
+                return jobs
+            qa_tickets = [
+                _row(row) for row in db.execute(
+                    """SELECT DISTINCT t.* FROM tickets t
+                       JOIN work_queue q ON q.ticket_id = t.ticket_id
+                       WHERE q.project_id = ? AND q.target_role = 'qa'
+                         AND q.status IN ('pending', 'offered')
+                         AND t.status = 'QA_READY'
+                       ORDER BY t.priority DESC, t.ticket_id""",
+                    (project,),
+                ).fetchall()
+            ]
+            reviews = []
+            for candidate in db.execute(
+                """SELECT * FROM agent_presence
+                   WHERE role = 'qa' AND expires_at > ?
+                   ORDER BY updated_at DESC, agent_id""",
+                (_iso(),),
+            ).fetchall():
+                qa = _row(candidate)
+                if project not in set(qa.get('project_ids') or []):
+                    continue
+                machine_id = qa.get('machine_id')
+                declared = set(qa.get('execution_capabilities') or [])
+                if not machine_id or not declared:
+                    continue
+                approved = set(qa.get('approved_execution_capabilities') or [])
+                if machine_id != qa.get('capability_approved_machine_id'):
+                    approved = set()
+                ticket_refs, needed = [], set()
+                for ticket in qa_tickets:
+                    required = _required_execution_capabilities(ticket)
+                    if required and required <= declared and required - approved:
+                        ticket_refs.append('ticket:' + ticket['ticket_id'])
+                        needed.update(required)
+                if not ticket_refs:
+                    continue
+                fingerprint = hashlib.sha256(json.dumps({
+                    'agent_id': qa['agent_id'],
+                    'machine_id': machine_id,
+                    'declared': sorted(declared),
+                    'approved': sorted(approved),
+                    'ticket_refs': ticket_refs,
+                }, sort_keys=True).encode()).hexdigest()[:20]
+                reviews.append((
+                    f"capability-review:{qa['agent_id']}:{fingerprint}",
+                    {
+                        'kind': 'capability_review_required',
+                        'agent_id': qa['agent_id'],
+                        'machine_id': machine_id,
+                        'capabilities': sorted(needed),
+                        'ticket_refs': ticket_refs,
+                        'next_action': (
+                            'verify public preflight evidence, then call '
+                            'planner.configure_agent_capability_profile'
+                        ),
+                    },
+                ))
+            return reviews
     inbox = service.get_agent_inbox(actor, project, limit=20)
     return [('queue:' + offer['queue_id'], {'kind': 'work_available',
              'ticket_ref': 'ticket:' + offer['ticket']['ticket_id'],
@@ -211,7 +340,11 @@ async def wait_for_event(service, actor, project_id, *, timeout_seconds=43200,
                     db.execute('UPDATE agent_event_waiters SET expires_at=?,updated_at=? WHERE wait_id=?',
                                (_iso(_now() + timedelta(seconds=WAIT_PRESENCE_SECONDS)), _iso(), wait_id))
                 heartbeat_at = time.monotonic() + RECOVERY_SECONDS
-            result = _deliver(service, actor, project_id, _pending(service, actor, project_id, job_kind, job_id), wait_id)
+            repository = await _repository_pending(service, actor, project_id)
+            candidates = repository or _pending(
+                service, actor, project_id, job_kind, job_id
+            )
+            result = _deliver(service, actor, project_id, candidates, wait_id)
             if result:
                 state = 'superseded' if result['status'] == 'superseded' else 'notified'
                 return result

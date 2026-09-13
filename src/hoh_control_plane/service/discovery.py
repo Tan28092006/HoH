@@ -440,7 +440,29 @@ class DiscoveryMixin:
                     validated_endpoint,
                 ),
             )
-            return self._presence(connection, actor.agent_id)
+            registered = self._presence(connection, actor.agent_id)
+            if actor.role == Role.QA and (
+                existing is None
+                or existing.get("execution_capabilities") != normalized_capabilities
+                or existing.get("machine_id") != machine_id
+            ):
+                for project_id in sorted(actor.project_ids):
+                    if project_id == "*":
+                        continue
+                    self._event(
+                        connection,
+                        actor,
+                        project_id,
+                        "agent.execution_capabilities_declared",
+                        "agent_presence",
+                        actor.agent_id,
+                        1,
+                        {
+                            "capability_count": len(normalized_capabilities),
+                            "machine_bound": bool(machine_id),
+                        },
+                    )
+            return registered
 
     @classmethod
     def _validate_skill_manifest(cls, skill_manifest: list[Any]) -> list[dict[str, str]]:
