@@ -498,11 +498,16 @@ def test_artifact_mismatch_fails_the_job_without_a_candidate_verdict_and_allows_
     assert "candidate_artifact_mismatch" in failed["error_message"]
     assert failed["test_run"] is None
     context = service.get_ticket_context(actors["qa"], ticket["ticket_id"])
-    assert context["ticket"]["status"] == "QA_IN_PROGRESS"
+    assert context["ticket"]["status"] == "BLOCKED"
     assert context["test_runs"] == []
 
     # Retry without any Developer action or a new candidate: same candidate_id, a fresh
     # test_run_id, and this time the (patched-through) real command runs and completes.
+    readiness = service.append_planner_context(actors["planner"], ticket_id=ticket["ticket_id"],
+        entry_type="planner_decision", content="Runner source resolution repaired.", source_ref="evidence://runner/fix")
+    recovered = service.recover_candidate_for_qa(actors["planner"], ticket["ticket_id"],
+        context["ticket"]["version"], failed["test_run_id"], readiness["entry_id"])
+    qa_claim = service.claim_qa(actors["qa"], ticket["ticket_id"], recovered["ticket"]["version"], 900)
     retried = service.queue_project_tests(
         actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"]
     )

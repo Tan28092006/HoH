@@ -589,6 +589,13 @@ class QaMixin:
                 ticket["version"],
                 {"test_run_id": test_run_id},
             )
+            owns_current_lease = connection.execute(
+                "SELECT 1 FROM leases WHERE lease_id = ? AND ticket_id = ? AND agent_id = ?",
+                (job["lease_id"], job["ticket_id"], job["requested_by"]),
+            ).fetchone()
+            if (owns_current_lease is not None and ticket["status"] == TicketStatus.QA_IN_PROGRESS.value
+                    and ticket["candidate_commit"] == job["candidate_commit"]):
+                self._park_qa_infrastructure(connection, actor, ticket, job, "worker_failure", f"test_run:{test_run_id}")
             return self._qa_test_job(connection, test_run_id)
 
     def _qa_test_job(self, connection: Connection, test_run_id: str) -> dict[str, Any]:
