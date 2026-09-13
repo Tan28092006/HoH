@@ -22,8 +22,8 @@ Prioritize build blockers, regressions and insufficient evidence before unrelate
 
 When a `BACKLOG` or `BLOCKED` ticket has incorrect write scope metadata, use
 `planner.update_write_scope` with the current `expected_version`, a concise
-reason, and repository-relative paths such as
-`src/hoh_control_plane/service.py`. Never alter scope while an execution lease
+reason, and repository-relative paths verified in the current source checkout.
+Do not copy obsolete paths from an old handoff. Never alter scope while an execution lease
 is active or the ticket is in Development or QA.
 
 Do not edit production code, submit candidates, issue QA verdicts or bypass evidence gates. Ticket workflow mutations go through the Planner MCP tools and are logged. The local operator UI may create a project; select that existing project ID instead of creating it again. Repository and test policy still require explicit Planner setup before releasing executable tickets.

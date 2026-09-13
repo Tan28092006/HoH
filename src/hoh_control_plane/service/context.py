@@ -83,10 +83,15 @@ class ContextMixin:
                     (feature_id,),
                 ).fetchall()
             ]
+            ungated = {row[0] for row in connection.execute(
+                "SELECT t.ticket_id FROM tickets t JOIN audit_events e ON e.aggregate_id = t.ticket_id "
+                "WHERE t.feature_id = ? AND e.event_type = 'integration.landed_ungated'",
+                (feature_id,)).fetchall()}
             verified = [
                 constraint
                 for ticket in tickets
                 if ticket["status"] in {TicketStatus.VERIFIED.value, TicketStatus.DONE.value}
+                and ticket["ticket_id"] not in ungated
                 for constraint in ticket["acceptance_criteria"]
             ]
         payload = {
@@ -274,6 +279,8 @@ class ContextMixin:
                 """
                 SELECT ticket_id, acceptance_criteria FROM tickets
                 WHERE feature_id = ? AND ticket_id != ? AND status IN (?, ?)
+                AND NOT EXISTS (SELECT 1 FROM audit_events e WHERE e.aggregate_id = tickets.ticket_id
+                                AND e.event_type = 'integration.landed_ungated')
                 ORDER BY updated_at DESC
                 """,
                 (

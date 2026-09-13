@@ -28,14 +28,21 @@ ticket state and actual mainline SHA. Lost acknowledgment requires reconciliatio
 before retry. Missing async tools or stalled workers go to Planner with evidence,
 not a raw Git merge, direct service call, SQL or force-push fallback.
 
-Apply the current release policy, not a future ticket's desired gate. In this
-deployment the standing gate is: VERIFIED status; every mandatory criterion has
-candidate-bound independent QA evidence including the registered regression run;
-artifact source identity is verified; candidate base equals current main; and the
-protected operation fast-forwards that exact SHA with no candidate-specific hold.
-That fast-forward makes main byte-identical to the tested candidate, so it is the
-current release regression evidence. HOH-201 will add an integration-isolation
-gate after it lands; do not treat it as an active requirement beforehand.
+Use the current runtime's policy and fresh ticket context, including Planner holds.
+The protected gate requires independent evidence for every mandatory criterion,
+the registered regression run, verified artifact identity and an unchanged base.
+When a project has a registered regression command, the current runtime runs it
+in an isolated candidate checkout before fast-forwarding. Preserve that gate;
+an old skill or ticket describing it as future work does not disable it.
+Inspect the returned gate evidence and mainline identity, including any semantic
+record commit written after the candidate fast-forward.
+
+If Git proves the work is already on main, inspect current planning authorization
+and use `integrator.record_external_landing` to reconcile an existing landing
+without another candidate or a fictitious merge. This records deployed work;
+it adds no QA verdict and must not certify unmet criteria. Preserve prior evidence.
+For a ported change, cite the actual landed implementation commit and explain
+why the historical candidate itself was not merged.
 
 Recheck drift atomically in the gate. base_drift requires Developer rework and
 preserves historical QA on its old SHA. Missing mandatory evidence, failed or

@@ -969,6 +969,8 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
 MIGRATED_INDEXES: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS audit_events_correlation "
     "ON audit_events (correlation_id)",
+    "CREATE INDEX IF NOT EXISTS audit_events_kind_aggregate "
+    "ON audit_events (event_type, aggregate_id)",
 )
 
 
