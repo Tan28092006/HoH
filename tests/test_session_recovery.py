@@ -240,3 +240,13 @@ def test_cancelled_mcp_wait_records_a_valid_audit_outcome(service, actors):
         assert row['outcome'] == 'failed'
         assert row['error_code'] == 'request_cancelled'
     asyncio.run(scenario())
+
+
+def test_truncated_git_output_cannot_be_accepted_as_complete_scope(tmp_path, monkeypatch):
+    from hoh_control_plane.domain import ValidationError
+    from hoh_control_plane.git_worktrees import GitWorktreeManager
+    from hoh_control_plane.managed_process import ProcessResult
+    monkeypatch.setattr('hoh_control_plane.git_worktrees.run_managed', lambda *a, **kw:
+                        ProcessResult(0, 'src/allowed.py\n[output truncated]', ''))
+    with pytest.raises(ValidationError, match='capture limit'):
+        GitWorktreeManager._git(tmp_path, 'diff', '--name-only', check=False)
