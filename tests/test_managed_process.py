@@ -59,3 +59,21 @@ def test_owner_crash_terminates_the_owned_process_tree(tmp_path):
         if process.poll() is None:
             process.kill()
         process.communicate(timeout=5)
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows virtualenv redirector race')
+def test_slow_job_attachment_cannot_lose_a_virtualenv_child(tmp_path, monkeypatch):
+    from hoh_control_plane import managed_process
+    escaped = tmp_path / 'escaped-after-timeout'
+    original_job = managed_process._WindowsJob
+    def delayed_attach(process):
+        # A Windows venv launcher may spawn the actual Python interpreter
+        # before the caller gets a chance to attach the launcher to its job.
+        time.sleep(.3)
+        return original_job(process)
+    monkeypatch.setattr(managed_process, '_WindowsJob', delayed_attach)
+    command = [sys.executable, '-c', f"import time,pathlib;time.sleep(.5);pathlib.Path({str(escaped)!r}).touch()"]
+    result = managed_process.run_managed(command, cwd=tmp_path, timeout=.1)
+    assert result.timed_out
+    time.sleep(.6)
+    assert not escaped.exists(), 'The venv redirector spawned an unowned interpreter before job attachment'
