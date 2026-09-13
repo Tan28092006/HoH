@@ -1,0 +1,169 @@
+from __future__ import annotations
+
+import pytest
+
+from hoh_control_plane.domain import ValidationError
+
+from tests.test_evidence_provenance import _candidate_waiting_for_qa
+
+
+CAPABILITIES = ["build_execution", "runtime_trace", "source_inspection"]
+
+
+def _contract(criteria: list[str]) -> list[dict[str, object]]:
+    return [
+        {
+            "criterion": criterion,
+            "scenario_ref": f"scenario:criterion-{index}",
+            "method": "mixed",
+            "expected_observation": criterion,
+            "required_evidence_types": ["test_result", "runtime_trace"],
+            "required_capabilities": ["build_execution", "runtime_trace"],
+        }
+        for index, criterion in enumerate(criteria, start=1)
+    ]
+
+
+def test_strict_project_refuses_ready_without_a_validation_contract(
+    service, actors, seeded
+) -> None:
+    service.configure_verification_profile(
+        actors["planner"],
+        "project-1",
+        capabilities=CAPABILITIES,
+        quality_policy="claim-evidence-v1",
+    )
+
+    with pytest.raises(ValidationError, match="validation contract"):
+        service.set_ticket_ready(
+            actors["planner"], seeded["ticket"]["ticket_id"], seeded["ticket"]["version"]
+        )
+
+
+def test_planner_contract_is_exact_and_reaches_every_role_context(
+    service, actors, seeded
+) -> None:
+    ticket = seeded["ticket"]
+    configured = service.configure_validation_contract(
+        actors["planner"],
+        ticket["ticket_id"],
+        ticket["version"],
+        _contract(ticket["acceptance_criteria"]),
+        "Bind each public requirement to reproducible evidence.",
+    )
+
+    for role in ("developer", "qa", "integrator"):
+        packet = service.get_ticket_context(actors[role], ticket["ticket_id"], 60_000)
+        assert packet["ticket"]["validation_contract"] == configured["ticket"][
+            "validation_contract"
+        ]
+        assert packet["verification_profile"]["quality_policy"] == "legacy"
+
+
+def test_contract_rejects_missing_criteria_and_unavailable_capabilities(
+    service, actors, seeded
+) -> None:
+    ticket = seeded["ticket"]
+    with pytest.raises(ValidationError, match="exactly once"):
+        service.configure_validation_contract(
+            actors["planner"],
+            ticket["ticket_id"],
+            ticket["version"],
+            _contract(ticket["acceptance_criteria"][:1]),
+            "Incomplete contract.",
+        )
+
+    service.configure_verification_profile(
+        actors["planner"],
+        "project-1",
+        capabilities=["source_inspection"],
+        quality_policy="claim-evidence-v1",
+    )
+    configured = service.configure_validation_contract(
+        actors["planner"],
+        ticket["ticket_id"],
+        ticket["version"],
+        _contract(ticket["acceptance_criteria"]),
+        "Contract needs runtime observations.",
+    )
+    with pytest.raises(ValidationError, match="capabilities"):
+        service.set_ticket_ready(
+            actors["planner"], ticket["ticket_id"], configured["ticket"]["version"]
+        )
+
+
+def test_qa_cannot_verify_with_the_wrong_scenario_or_evidence_type(
+    service, actors, seeded, tmp_path
+) -> None:
+    ticket = seeded["ticket"]
+    configured = service.configure_validation_contract(
+        actors["planner"],
+        ticket["ticket_id"],
+        ticket["version"],
+        _contract(ticket["acceptance_criteria"]),
+        "Require candidate-bound runtime records.",
+    )
+    seeded["ticket"] = configured["ticket"]
+    ticket, candidate, qa_claim = _candidate_waiting_for_qa(
+        service, actors, seeded, tmp_path
+    )
+
+    with pytest.raises(ValidationError, match="scenario_ref"):
+        service.submit_qa_verdict(
+            actors["qa"],
+            ticket["ticket_id"],
+            qa_claim["lease"]["lease_id"],
+            candidate["candidate"]["candidate_id"],
+            qa_claim["ticket"]["version"],
+            "failed",
+            [
+                {
+                    "criterion": ticket["acceptance_criteria"][0],
+                    "status": "failed",
+                    "severity": "high",
+                    "observation": "Reproduced a regression.",
+                    "evidence": [
+                        {
+                            "type": "screenshot",
+                            "observation": "A frame from an unrelated path.",
+                            "storage_ref": "evidence://qa/frame.png",
+                            "scenario_ref": "scenario:wrong",
+                        }
+                    ],
+                }
+            ],
+        )
+
+
+def test_verdict_returns_a_materialized_evidence_bundle(
+    service, actors, seeded, tmp_path
+) -> None:
+    ticket, candidate, qa_claim = _candidate_waiting_for_qa(
+        service, actors, seeded, tmp_path
+    )
+    findings = [
+        {
+            "criterion": criterion,
+            "status": "verified",
+            "severity": "none",
+            "observation": "Observed on the frozen candidate.",
+            "evidence": [
+                {
+                    "type": "test_result",
+                    "observation": "Passed.",
+                    "storage_ref": f"evidence://qa/result-{index}.json",
+                }
+            ],
+        }
+        for index, criterion in enumerate(ticket["acceptance_criteria"], start=1)
+    ]
+
+    result = service.submit_qa_verdict(
+        actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"],
+        candidate["candidate"]["candidate_id"], qa_claim["ticket"]["version"],
+        "passed", findings,
+    )
+
+    assert len(result["evidence_bundle"]["verified_records"]) == len(findings)
+    assert result["evidence_bundle"]["gap_records"] == []
+    assert result["evidence_bundle"]["planner_handoff"]["preservation_constraints"]
