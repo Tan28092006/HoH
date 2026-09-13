@@ -586,9 +586,11 @@ class GitWorktreeManager:
             completed = subprocess.run(
                 ["git", "-C", str(path), *arguments],
                 check=False,
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
             )
         except subprocess.TimeoutExpired as exc:
             raise ValidationError("Git operation timed out") from exc

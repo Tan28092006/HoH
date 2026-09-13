@@ -35,12 +35,21 @@ class SessionMixin:
                 "projects": [{"project_id": p["project_id"], "name": p["name"]} for p in projects[:100]],
                 "projects_truncated": len(projects) > 100,
                 "selected_project_id": selected["project_id"] if selected else None,
-                "workspace": None, "assignments": [], "planner_assignments": [],
+                "workspace": None, "assignments": [], "planner_assignments": [], "event_wait": None,
                 "next_action": "select_project" if selected is None else "register_then_inbox",
             }
             if selected is None:
                 return result
             selected_id = selected["project_id"]
+            waiting = _row(connection.execute(
+                'SELECT wait_id,state,updated_at,expires_at FROM agent_event_waiters '
+                'WHERE agent_id=? AND project_id=? AND role=?',
+                (actor.agent_id, selected_id, actor.role.value),
+            ).fetchone())
+            if waiting:
+                if waiting['expires_at'] <= _iso():
+                    waiting['state'] = 'disconnected'
+                result['event_wait'] = waiting
             if actor.role == Role.PLANNER:
                 result["planner_assignments"] = [_row(row) for row in connection.execute(
                     "SELECT j.planner_job_id, j.ticket_id, j.status, l.lease_id, l.expires_at "

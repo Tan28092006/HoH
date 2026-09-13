@@ -53,6 +53,22 @@ def session_status(service, project_id):
     return rows
 
 
+def _wake_previous(row):
+    """A replaced request should promptly observe its lost notification slot."""
+    if row is None or row['state'] != 'waiting':
+        return
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+            sender.sendto(row['wait_id'].encode('ascii'), ('127.0.0.1', row['notification_port']))
+    except (OSError, UnicodeError, OverflowError):
+        pass
+
+
+def _superseded():
+    return {'status': 'superseded', 'event_id': None, 'event': None,
+            'next_action': 'stop_this_wait; this identity resumed in a newer request'}
+
+
 def _job(service, actor, project, kind, identifier):
     if kind not in JOBS:
         raise ValidationError('Unknown job kind; use provision, submission, qa or merge')
@@ -107,8 +123,10 @@ def _reserve(db, actor, project, key):
     return True
 
 
-def _deliver(service, actor, project, candidates):
+def _deliver(service, actor, project, candidates, wait_id=None):
     with service.store.connection(immediate=True) as db:
+        if wait_id and not db.execute('SELECT 1 FROM agent_event_waiters WHERE agent_id=? AND wait_id=?', (actor.agent_id, wait_id)).fetchone():
+            return _superseded()
         pending_rows = db.execute("SELECT event_id,event_key,payload FROM agent_event_deliveries WHERE agent_id=? AND project_id=? AND state='pending' ORDER BY created_at LIMIT 50", (actor.agent_id, project)).fetchall()
         eligible = {key for key, _ in candidates}
         for pending in pending_rows:
@@ -131,7 +149,8 @@ def _deliver(service, actor, project, candidates):
 
 
 async def wait_for_event(service, actor, project_id, *, timeout_seconds=43200,
-                         ack_event_id=None, job_kind=None, job_id=None):
+                         ack_event_id=None, job_kind=None, job_id=None,
+                         resume_wait_id=None, keepalive=None):
     require_project(actor, project_id)
     if actor.role not in {Role.PLANNER, Role.DEVELOPER, Role.QA, Role.INTEGRATOR}:
         raise AuthorizationError('Only engineering roles can wait for work')
@@ -151,9 +170,11 @@ async def wait_for_event(service, actor, project_id, *, timeout_seconds=43200,
             service._refresh_presence(db, actor, WAIT_PRESENCE_SECONDS)
             # Resolve project existence before installing the foreign-key record.
             service._one(db, 'SELECT project_id FROM projects WHERE project_id=?', (project_id,))
-            old = db.execute('SELECT state,expires_at FROM agent_event_waiters WHERE agent_id=?', (actor.agent_id,)).fetchone()
-            if old and old['state'] == 'waiting' and old['expires_at'] > _iso():
-                raise ConflictError('This identity is already waiting in another session; use a distinct instance')
+            old = db.execute('SELECT * FROM agent_event_waiters WHERE agent_id=?', (actor.agent_id,)).fetchone()
+            if resume_wait_id and (not old or old['wait_id'] != resume_wait_id or old['project_id'] != project_id or old['role'] != actor.role.value):
+                raise ConflictError('The prior wait changed; refresh session.bootstrap before resuming')
+            if old and old['state'] == 'waiting' and old['expires_at'] > _iso() and not resume_wait_id:
+                raise ConflictError('This identity has a pending wait. For this same chat resuming, read event_wait in session.bootstrap and pass its wait_id as resume_wait_id; only a different simultaneous worker needs another instance')
             if ack_event_id:
                 delivery = db.execute('SELECT agent_id,project_id,event_key FROM agent_event_deliveries WHERE event_id=?', (ack_event_id,)).fetchone()
                 if not delivery or delivery['agent_id'] != actor.agent_id or delivery['project_id'] != project_id:
@@ -165,22 +186,34 @@ async def wait_for_event(service, actor, project_id, *, timeout_seconds=43200,
                        (actor.agent_id, project_id, actor.role.value, wait_id, receiver.getsockname()[1],
                         _iso(_now() + timedelta(seconds=WAIT_PRESENCE_SECONDS)), _iso()))
         registered = True
+        _wake_previous(old)
         deadline = time.monotonic() + timeout_seconds
         heartbeat_at = 0
         while True:
             if time.monotonic() >= heartbeat_at:
-                service.heartbeat_agent(actor, presence_seconds=WAIT_PRESENCE_SECONDS)
+                if keepalive is not None:
+                    await keepalive()
+                job = lease = None
                 if job_kind:
                     job, _, lease = _job(service, actor, project_id, job_kind, job_id)
-                    if lease:
-                        service.heartbeat(actor, job['lease_id'], lease_seconds=900)
                 with service.store.connection(immediate=True) as db:
+                    if not db.execute('SELECT 1 FROM agent_event_waiters WHERE agent_id=? AND wait_id=?', (actor.agent_id, wait_id)).fetchone():
+                        state = 'superseded'
+                        return _superseded()
+                    service._refresh_presence(db, actor, WAIT_PRESENCE_SECONDS)
+                    if lease:
+                        # Same checks as a work heartbeat, under the slot's write
+                        # lock so a superseded wait cannot renew execution authority.
+                        renewed = db.execute('UPDATE leases SET heartbeat_at=?,expires_at=? WHERE lease_id=? AND agent_id=? AND role=? AND expires_at>?',
+                            (_iso(), _iso(_now() + timedelta(seconds=900)), job['lease_id'], actor.agent_id, actor.role.value, _iso()))
+                        if renewed.rowcount != 1:
+                            raise ConflictError('The job lease expired; recover through the role workflow')
                     db.execute('UPDATE agent_event_waiters SET expires_at=?,updated_at=? WHERE wait_id=?',
                                (_iso(_now() + timedelta(seconds=WAIT_PRESENCE_SECONDS)), _iso(), wait_id))
                 heartbeat_at = time.monotonic() + RECOVERY_SECONDS
-            result = _deliver(service, actor, project_id, _pending(service, actor, project_id, job_kind, job_id))
+            result = _deliver(service, actor, project_id, _pending(service, actor, project_id, job_kind, job_id), wait_id)
             if result:
-                state = 'notified'
+                state = 'superseded' if result['status'] == 'superseded' else 'notified'
                 return result
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -196,6 +229,6 @@ async def wait_for_event(service, actor, project_id, *, timeout_seconds=43200,
         receiver.close()
         if registered:
             with service.store.connection(immediate=True) as db:
-                db.execute('UPDATE agent_event_waiters SET state=?,notification_port=0,updated_at=? WHERE wait_id=?', (state, _iso(), wait_id))
-                if state == 'disconnected':
+                updated = db.execute('UPDATE agent_event_waiters SET state=?,notification_port=0,updated_at=? WHERE wait_id=?', (state, _iso(), wait_id))
+                if state == 'disconnected' and updated.rowcount:
                     db.execute('UPDATE agent_presence SET expires_at=? WHERE agent_id=?', (_iso(), actor.agent_id))
