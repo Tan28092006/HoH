@@ -86,7 +86,7 @@ def test_maximum_concurrency_is_enforced_before_spawn(service, actors, seeded, t
         original = dict(db.execute('SELECT * FROM qa_test_jobs WHERE test_run_id = ?', (job['test_run_id'],)).fetchone())
         db.execute("UPDATE qa_test_jobs SET status = 'COMPLETED' WHERE test_run_id = ?", (job['test_run_id'],))
     with Supervisor(service, max_workers=2) as supervisor:
-        monkeypatch.setattr(supervisor, '_pending', lambda: [('qa', f'testrun_capacity_{i}') for i in range(8)])
+        monkeypatch.setattr(supervisor, '_pending', lambda: [('provision', f'worktree_capacity_{i}') for i in range(8)])
         launches = []
         monkeypatch.setattr(supervisor, '_submit', lambda kind, identifier: launches.append(identifier) or Future())
         assert supervisor.tick()['started'] == 2

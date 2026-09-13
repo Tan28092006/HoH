@@ -215,6 +215,11 @@ class Supervisor:
             for key in self._pending():
                 if len(self.active) >= self.max_workers:
                     break
+                # QA and protected merge both execute project suites. One host
+                # runs one such memory-heavy job at a time; Git provisioning and
+                # submission can still use spare worker capacity.
+                if key[0] in {'qa', 'merge'} and any(k[0] in {'qa', 'merge'} for k in self.active):
+                    continue
                 if key not in self.active:
                     future = self._submit(*key)
                     if future is None:
