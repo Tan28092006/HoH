@@ -68,11 +68,13 @@ def main():
             if target.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
                 raise RuntimeError('Database backup failed integrity check')
     shutil.copy2(root / 'hoh_desktop.py', backup / 'hoh_desktop.py')
+    shutil.copy2(root / 'start-host.ps1', backup / 'start-host.ps1')
     environment = {k:v for k,v in os.environ.items()
                    if k.upper() not in {'PYTHONPATH', 'PYTHONHOME'} and not k.upper().startswith('HOH_')}
     subprocess.run([str(python), '-I', '-m', 'pip', 'install', '--no-deps', '--force-reinstall', str(wheel)],
                    env=environment, check=True)
     shutil.copy2(bundle / 'hoh_desktop.py', root / 'hoh_desktop.py')
+    shutil.copy2(bundle / 'start-host.ps1', root / 'start-host.ps1')
     subprocess.run([str(python), '-I', str(root / 'hoh_desktop.py'), '--no-browser'], env=environment, check=True)
     with urlopen(base + '/__local_installation', timeout=5) as response:
         state = json.load(response)

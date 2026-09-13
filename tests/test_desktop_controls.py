@@ -288,6 +288,11 @@ def test_desktop_host_launcher_escapes_the_calling_process_job():
     assert '-WindowStyle Hidden' in launcher
     assert 'OPENBLAS_NUM_THREADS' in launcher
     assert 'OMP_NUM_THREADS' in launcher
+    upgrader = (
+        Path(__file__).resolve().parents[1] / 'deploy' / 'desktop' / 'upgrade_local.py'
+    ).read_text(encoding='utf-8')
+    assert "bundle / 'start-host.ps1'" in upgrader
+    assert "backup / 'start-host.ps1'" in upgrader
 
 
 def test_claude_profile_upgrade_handles_idle_timeout_and_preserves_higher_override(desktop, tmp_path):
