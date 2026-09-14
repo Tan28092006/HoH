@@ -59,7 +59,9 @@ def _run_with_contention_retry(operation: Callable[[], Result]) -> Result:
             time.sleep(delay)
             delay *= 2
     raise AssertionError("unreachable")  # pragma: no cover
-_TARGET_KEYS = ("project_id", "feature_id", "ticket_id", "feature_ref", "ticket_ref")
+_TARGET_KEYS = (
+    "project_id", "feature_id", "ticket_id", "feature_ref", "ticket_ref", "note_ref"
+)
 
 
 def _worker_location(database_path: Path | str) -> tuple[str, dict[str, str] | None]:
@@ -504,13 +506,25 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
 
     @server.tool(name="ticket.get_context", structured_output=True)
     def ticket_get_context(
-        ticket_ref: str, token_budget: int | None = None
+        ticket_ref: str,
+        token_budget: int | None = None,
+        include_history: bool = False,
     ) -> dict[str, Any]:
-        """Resolve a role-bounded ticket packet with candidate, evidence and omissions."""
+        """Resolve one current role-bounded ticket packet.
+
+        Planner/Admin may set include_history only for a deliberate audit of older
+        typed decisions. A larger token_budget alone never widens role visibility.
+        """
         return invoke(
             "ticket.get_context",
-            {"ticket_ref": ticket_ref, "token_budget": token_budget},
-            lambda: service.get_ticket_context(actor, ticket_ref, token_budget),
+            {
+                "ticket_ref": ticket_ref,
+                "token_budget": token_budget,
+                "include_history": include_history,
+            },
+            lambda: service.get_ticket_context(
+                actor, ticket_ref, token_budget, include_history
+            ),
         )
 
     @server.tool(name="spec.digest", structured_output=True)
@@ -551,15 +565,27 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             lambda: service.record_experience(actor, **arguments),
         )
 
-    @server.tool(name="experience.list", structured_output=True)
-    def experience_list(project_id: str, limit: int = 5) -> dict[str, Any]:
-        """Read the lessons this project has accumulated, most reinforced first."""
-        arguments = {"project_id": project_id, "limit": limit}
+    @server.tool(name="experience.get", structured_output=True)
+    def experience_get(note_ref: str) -> dict[str, Any]:
+        """Resolve one file-scoped advisory lesson surfaced in a ticket packet."""
+        arguments = {"note_ref": note_ref}
         return invoke(
-            "experience.list",
+            "experience.get",
             arguments,
-            lambda: {"notes": service.list_experience(actor, **arguments)},
+            lambda: service.get_experience(actor, **arguments),
         )
+
+    if actor.role in {Role.PLANNER, Role.ADMIN}:
+
+        @server.tool(name="experience.list", structured_output=True)
+        def experience_list(project_id: str, limit: int = 5) -> dict[str, Any]:
+            """Audit project lessons, most reinforced first."""
+            arguments = {"project_id": project_id, "limit": limit}
+            return invoke(
+                "experience.list",
+                arguments,
+                lambda: {"notes": service.list_experience(actor, **arguments)},
+            )
 
     if actor.role in {Role.DEVELOPER, Role.QA, Role.INTEGRATOR}:
 
@@ -567,7 +593,13 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
         def work_inbox(
             project_id: str, limit: int = 20, offer_seconds: int = 90
         ) -> dict[str, Any]:
-            """Poll durable role-matched work offers; idle agents receive queued hand-offs here."""
+            """Read durable role-matched offers and any QA capability blockers.
+
+            QA must inspect capability_blockers before concluding that no candidate
+            exists. A blocker names the queued ticket plus missing declarations or
+            independently approved capabilities; it is not permission to weaken the
+            validation contract or self-approve equipment.
+            """
             arguments = {
                 "project_id": project_id,
                 "limit": limit,

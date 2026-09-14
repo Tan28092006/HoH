@@ -32,6 +32,15 @@ project declaration. A later `agent.register` updates the live declaration but
 cannot overwrite the approval. Approval is bound to `machine_id`; moving the
 same agent identity to another host requires a new preflight and approval.
 
+An unoffered QA queue is still observable. `work.inbox.capability_blockers` and
+the matching discovery `capability_state` separate `missing_declaration` from
+`missing_approval`. HoH also wakes Planner with the same bounded fields. QA
+verifies callable equipment and re-registers; Planner provisions missing
+equipment or approves only public-evidence-backed capabilities on that machine.
+The candidate remains frozen and queued throughout this control exchange.
+When another online QA already satisfies the contract, HoH routes work there and
+suppresses the unnecessary capability wakeup for the mismatched identity.
+
 ## Ticket validation contract
 
 Planner attaches one contract entry per acceptance criterion, either during

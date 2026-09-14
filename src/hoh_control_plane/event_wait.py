@@ -228,7 +228,7 @@ def _pending(service, actor, project, kind=None, identifier=None):
                     (project,),
                 ).fetchall()
             ]
-            reviews = []
+            qa_agents = []
             for candidate in db.execute(
                 """SELECT * FROM agent_presence
                    WHERE role = 'qa' AND expires_at > ?
@@ -238,19 +238,39 @@ def _pending(service, actor, project, kind=None, identifier=None):
                 qa = _row(candidate)
                 if project not in set(qa.get('project_ids') or []):
                     continue
+                qa_agents.append(qa)
+            serviceable_tickets = {
+                ticket['ticket_id']
+                for ticket in qa_tickets
+                if any(
+                    service._qa_ticket_capability_state(qa, ticket)['claimable']
+                    for qa in qa_agents
+                )
+            }
+            reviews = []
+            for qa in qa_agents:
                 machine_id = qa.get('machine_id')
                 declared = set(qa.get('execution_capabilities') or [])
-                if not machine_id or not declared:
-                    continue
                 approved = set(qa.get('approved_execution_capabilities') or [])
-                if machine_id != qa.get('capability_approved_machine_id'):
+                machine_matches = bool(
+                    machine_id
+                    and machine_id == qa.get('capability_approved_machine_id')
+                )
+                if not machine_matches:
                     approved = set()
-                ticket_refs, needed = [], set()
+                ticket_refs = []
+                missing_declaration: set[str] = set()
+                missing_approval: set[str] = set()
                 for ticket in qa_tickets:
+                    if ticket['ticket_id'] in serviceable_tickets:
+                        continue
                     required = _required_execution_capabilities(ticket)
-                    if required and required <= declared and required - approved:
+                    undeclared = required - declared
+                    unapproved = (required & declared) - approved
+                    if required and (undeclared or unapproved):
                         ticket_refs.append('ticket:' + ticket['ticket_id'])
-                        needed.update(required)
+                        missing_declaration.update(undeclared)
+                        missing_approval.update(unapproved)
                 if not ticket_refs:
                     continue
                 fingerprint = hashlib.sha256(json.dumps({
@@ -258,6 +278,8 @@ def _pending(service, actor, project, kind=None, identifier=None):
                     'machine_id': machine_id,
                     'declared': sorted(declared),
                     'approved': sorted(approved),
+                    'missing_declaration': sorted(missing_declaration),
+                    'missing_approval': sorted(missing_approval),
                     'ticket_refs': ticket_refs,
                 }, sort_keys=True).encode()).hexdigest()[:20]
                 reviews.append((
@@ -266,9 +288,15 @@ def _pending(service, actor, project, kind=None, identifier=None):
                         'kind': 'capability_review_required',
                         'agent_id': qa['agent_id'],
                         'machine_id': machine_id,
-                        'capabilities': sorted(needed),
+                        'declared_capabilities': sorted(declared),
+                        'missing_declaration': sorted(missing_declaration),
+                        'missing_approval': sorted(missing_approval),
+                        'approval_machine_matches': machine_matches,
                         'ticket_refs': ticket_refs,
                         'next_action': (
+                            'provision or route missing equipment and have QA verify '
+                            'then re-register; approve only separately verified public evidence'
+                            if missing_declaration else
                             'verify public preflight evidence, then call '
                             'planner.configure_agent_capability_profile'
                         ),
@@ -276,9 +304,24 @@ def _pending(service, actor, project, kind=None, identifier=None):
                 ))
             return reviews
     inbox = service.get_agent_inbox(actor, project, limit=20)
-    return [('queue:' + offer['queue_id'], {'kind': 'work_available',
-             'ticket_ref': 'ticket:' + offer['ticket']['ticket_id'],
-             'queue_id': offer['queue_id'], 'offer_id': offer['offer_id']}) for offer in inbox['offers']]
+    offers = [('queue:' + offer['queue_id'], {'kind': 'work_available',
+               'ticket_ref': 'ticket:' + offer['ticket']['ticket_id'],
+               'queue_id': offer['queue_id'], 'offer_id': offer['offer_id']})
+              for offer in inbox['offers']]
+    if offers or actor.role != Role.QA:
+        return offers
+    blockers = inbox.get('capability_blockers') or []
+    if not blockers:
+        return []
+    fingerprint = hashlib.sha256(json.dumps(blockers, sort_keys=True).encode()).hexdigest()[:20]
+    return [(f'capability-blocked:{actor.agent_id}:{fingerprint}', {
+        'kind': 'capability_blocked',
+        'blockers': blockers,
+        'next_action': (
+            'inspect missing_declaration and missing_approval; verify callable '
+            'equipment and re-register once, then wait for Planner approval or provisioning'
+        ),
+    })]
 
 
 def _reserve(db, actor, project, key):

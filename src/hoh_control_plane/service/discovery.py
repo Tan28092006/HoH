@@ -133,7 +133,13 @@ class DiscoveryMixin:
             closed = sorted(status.value for status in CLOSED_TICKET_STATUSES)
             where.append(f"t.status NOT IN ({', '.join('?' for _ in closed)})")
             parameters.extend(closed)
-            if actor.role not in {Role.PLANNER, Role.ADMIN}:
+            # required_role describes the ticket's originating execution owner.
+            # QA and Integrator routing is lifecycle-driven: a Developer ticket
+            # remains required_role=developer after its candidate becomes
+            # QA_READY/VERIFIED. Filtering those phases by required_role made
+            # discovery falsely report no candidate even while the durable QA
+            # or Integrator queue contained it.
+            if actor.role is Role.DEVELOPER:
                 where.append("t.required_role = ?")
                 parameters.append(actor.role.value)
             if blocked_only:
@@ -198,6 +204,13 @@ class DiscoveryMixin:
             ).fetchall()
             has_more = len(rows) > limit
             rows = rows[:limit]
+            qa_presence = (
+                _row(connection.execute(
+                    "SELECT * FROM agent_presence WHERE agent_id = ?",
+                    (actor.agent_id,),
+                ).fetchone())
+                if actor.role is Role.QA else None
+            )
 
         grouped: dict[str, dict[str, Any]] = {}
         last: tuple[Any, Any, Any] | None = None
@@ -240,34 +253,37 @@ class DiscoveryMixin:
                     }
                 )
             elif actor.role is Role.QA:
-                calls.append(
-                    {
-                        "tool": "qa.claim_candidate",
-                        "arguments": {
-                            "ticket_id": row["ticket_id"],
-                            "expected_version": row["version"],
-                        },
-                    }
-                )
+                capability_state = self._qa_ticket_capability_state(qa_presence, row)
+                if capability_state["claimable"]:
+                    calls.append(
+                        {
+                            "tool": "qa.claim_candidate",
+                            "arguments": {
+                                "ticket_id": row["ticket_id"],
+                                "expected_version": row["version"],
+                            },
+                        }
+                    )
             # Identity and routing fields only. Everything a worker must read
             # before acting -- objective, acceptance criteria, preservation
             # constraints, write scope, blocked reason, artifact identity --
             # stays behind the typed ticket.get_context reference above.
-            feature["tickets"].append(
-                {
-                    "ticket_id": row["ticket_id"],
-                    "ticket_ref": ticket_ref,
-                    "feature_id": group_id,
-                    "title": row["title"],
-                    "ticket_type": row["ticket_type"],
-                    "status": row["status"],
-                    "priority": row["priority"],
-                    "required_role": row["required_role"],
-                    "version": row["version"],
-                    "context_ref": f"ctx:ticket:{row['ticket_id']}:v{row['version']}",
-                    "recommended_calls": calls,
-                }
-            )
+            ticket_summary = {
+                "ticket_id": row["ticket_id"],
+                "ticket_ref": ticket_ref,
+                "feature_id": group_id,
+                "title": row["title"],
+                "ticket_type": row["ticket_type"],
+                "status": row["status"],
+                "priority": row["priority"],
+                "required_role": row["required_role"],
+                "version": row["version"],
+                "context_ref": f"ctx:ticket:{row['ticket_id']}:v{row['version']}",
+                "recommended_calls": calls,
+            }
+            if actor.role is Role.QA:
+                ticket_summary["capability_state"] = capability_state
+            feature["tickets"].append(ticket_summary)
 
         discovered = {
             "agent": {
@@ -295,6 +311,8 @@ class DiscoveryMixin:
             "work:inbox",
             "work:wait_for_event",
             "skill_compatibility:read",
+            "experience:record",
+            "experience:get",
         ]
         role_capabilities = {
             Role.PLANNER: [
@@ -314,6 +332,7 @@ class DiscoveryMixin:
                 "agent_capabilities:approve",
                 "validation_contract:configure",
                 "skill_policy:configure",
+                "experience:list",
             ],
             Role.DEVELOPER: [
                 "ticket:claim:developer",
@@ -633,14 +652,103 @@ class DiscoveryMixin:
                 lease["ticket"] = self._ticket(connection, lease["ticket_id"])
                 active_leases.append(lease)
             planning_barrier = self._repository_reconciliation_state(connection, project_id)
+            capability_blockers = (
+                self._qa_queue_capability_blockers(
+                    connection, project_id, presence
+                ) if actor.role is Role.QA else []
+            )
         return {
             "agent": presence,
             "active_leases": active_leases,
             "offers": offers,
             "offered_now": len(created_offers),
             "planning_barrier": planning_barrier,
+            "capability_blockers": capability_blockers,
             "next_poll_after_seconds": 20,
         }
+
+    @staticmethod
+    def _qa_ticket_capability_state(
+        presence: dict[str, Any] | None, ticket: dict[str, Any]
+    ) -> dict[str, Any]:
+        required = _required_execution_capabilities(ticket)
+        declared = set((presence or {}).get("execution_capabilities") or [])
+        approved = set((presence or {}).get("approved_execution_capabilities") or [])
+        machine_matches = bool(
+            presence
+            and presence.get("machine_id")
+            and presence.get("machine_id") == presence.get("capability_approved_machine_id")
+        )
+        if not machine_matches:
+            approved = set()
+        missing_declaration = sorted(required - declared)
+        # Approval can only be meaningfully missing for equipment the live QA
+        # session has already declared. Undeclared equipment is a provisioning
+        # or registration gap, never something Planner should approve blindly.
+        missing_approval = sorted((required & declared) - approved)
+        return {
+            "claimable": not missing_declaration and not missing_approval,
+            "required": sorted(required),
+            "missing_declaration": missing_declaration,
+            "missing_approval": missing_approval,
+            "machine_id": (presence or {}).get("machine_id"),
+            "approval_machine_matches": machine_matches,
+            "next_action": (
+                "verify available equipment and re-register; Planner provisions remaining gaps"
+                if missing_declaration
+                else "Planner verifies public preflight evidence and approves this machine profile"
+                if missing_approval
+                else "claim candidate"
+            ),
+        }
+
+    def _qa_queue_capability_blockers(
+        self, connection: Connection, project_id: str, presence: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        blockers: list[dict[str, Any]] = []
+        other_qa = [
+            _row(row)
+            for row in connection.execute(
+                """SELECT * FROM agent_presence
+                   WHERE role = 'qa' AND agent_id != ? AND expires_at > ?""",
+                (presence["agent_id"], _iso()),
+            ).fetchall()
+        ]
+        rows = connection.execute(
+            """
+            SELECT DISTINCT t.* FROM tickets t
+            JOIN work_queue q ON q.ticket_id = t.ticket_id
+            WHERE q.project_id = ? AND q.target_role = 'qa'
+              AND q.status IN ('pending', 'offered') AND t.status = 'QA_READY'
+            ORDER BY t.priority DESC, t.ticket_id
+            """,
+            (project_id,),
+        ).fetchall()
+        for raw in rows:
+            ticket = _row(raw)
+            assert ticket is not None
+            state = self._qa_ticket_capability_state(presence, ticket)
+            if state["claimable"]:
+                continue
+            if any(
+                candidate is not None
+                and self._presence_can_access(candidate, project_id)
+                and self._qa_ticket_capability_state(candidate, ticket)["claimable"]
+                for candidate in other_qa
+            ):
+                # This ticket is already serviceable by another online QA. The
+                # current agent simply has no matching offer; waking it or the
+                # Planner would spend a turn without changing delivery.
+                continue
+            blockers.append(
+                {
+                    "ticket_id": ticket["ticket_id"],
+                    "ticket_ref": f"ticket:{ticket['ticket_id']}",
+                    "priority": ticket["priority"],
+                    **state,
+                }
+            )
+        return blockers
 
     def pending_wakeups(self, *, limit: int = 50) -> list[dict[str, Any]]:
         """Offers that are live, undelivered, and still worth knocking about."""

@@ -5,8 +5,10 @@ import hashlib
 from hoh_control_plane.service._common import (
     Actor,
     Any,
+    AuthorizationError,
     CLOSED_TICKET_STATUSES,
     ContextStaleError,
+    DEFAULT_TOKEN_BUDGET,
     Role,
     TicketStatus,
     _CHECKPOINT_CHARS,
@@ -36,15 +38,16 @@ from hoh_control_plane.service._common import (
 # absolute path on whichever machine ran the tests, so it is unusable to any
 # other agent, while storage_ref is the portable reference to the same report.
 _REDUNDANT_SECTION_FIELDS: dict[str, tuple[str, ...]] = {
+    "feature": ("project_id", "created_at", "updated_at"),
     "ticket": ("created_at", "updated_at"),
-    "context_entries": (
-        "project_id", "feature_id", "ticket_id", "superseded_by", "actor_id", "created_at"
+    "context_entries": ("project_id", "superseded_by", "actor_id", "created_at"),
+    "candidate": ("ticket_id", "submitted_at", "frozen_at"),
+    "worktree": (
+        "ticket_id", "project_id", "created_at", "last_verified_at"
     ),
-    "candidate": ("ticket_id",),
-    "worktree": ("ticket_id", "project_id"),
-    "test_runs": ("ticket_id", "candidate_id", "report_path"),
-    "known_failures": ("candidate_id",),
-    "evidence": ("candidate_id",),
+    "test_runs": ("ticket_id", "candidate_id", "report_path", "created_at"),
+    "known_failures": ("candidate_id", "created_at"),
+    "evidence": ("candidate_id", "created_at"),
 }
 
 # An execution role does not plan the feature, it implements or verifies one
@@ -61,8 +64,72 @@ _DEVELOPER_TEST_RUN_FIELDS = (
     "timed_out",
     "duration_ms",
     "storage_ref",
-    "created_at",
 )
+
+# Field-level role projection is an information budget as well as RBAC. Every
+# execution role receives the observable contract it acts on; planning metadata
+# and edit scope are not repeated to roles that cannot mutate them. A contracted
+# ticket already repeats each acceptance criterion inside validation_contract,
+# so the older list is retained only for a legacy ticket without a contract.
+_ROLE_TICKET_FIELDS: dict[Role, frozenset[str]] = {
+    Role.DEVELOPER: frozenset(
+        {
+            "ticket_id", "feature_id", "ticket_type", "title", "objective",
+            "status", "required_role", "validation_contract",
+            "preservation_constraints", "file_scope", "blocked_reason", "version",
+        }
+    ),
+    Role.QA: frozenset(
+        {
+            "ticket_id", "feature_id", "title", "objective", "status",
+            "validation_contract", "preservation_constraints", "blocked_reason",
+            "version",
+        }
+    ),
+    Role.INTEGRATOR: frozenset(
+        {
+            "ticket_id", "feature_id", "title", "objective", "status",
+            "validation_contract", "preservation_constraints", "blocked_reason",
+            "version",
+        }
+    ),
+}
+
+# Machine narration and test-run echoes have dedicated durable sections. The
+# remaining entry types are the decisions each role can use. Normal packets keep
+# only the newest checkpoint per feature/ticket scope and type (up to three open
+# risks/failures); Planner can explicitly request its older decision history.
+_ROLE_CONTEXT_ENTRY_TYPES: dict[Role, frozenset[str]] = {
+    Role.DEVELOPER: frozenset(
+        {
+            "planner_decision", "design_decision", "risk", "developer_blocker",
+            "known_failure", "write_scope_updated", "ticket_fields_updated",
+            "worktree_handoff", "integration_base_drift", "bootstrap_integration",
+            "note",
+        }
+    ),
+    Role.QA: frozenset(
+        {
+            "planner_decision", "design_decision", "risk", "known_failure",
+            "ticket_fields_updated", "integration_base_drift", "note",
+        }
+    ),
+    Role.INTEGRATOR: frozenset(
+        {
+            "planner_decision", "design_decision", "risk", "known_failure",
+            "integration_base_drift", "integration_authorization",
+            "bootstrap_integration", "note",
+        }
+    ),
+    Role.PLANNER: frozenset(
+        {
+            "planner_decision", "design_decision", "risk", "developer_blocker",
+            "known_failure", "write_scope_updated", "ticket_fields_updated",
+            "integration_base_drift", "integration_authorization",
+            "bootstrap_integration", "note",
+        }
+    ),
+}
 
 
 class ContextMixin:
@@ -71,7 +138,7 @@ class ContextMixin:
     def get_feature_context(
         self, actor: Actor, feature_ref: str, token_budget: int | None = None
     ) -> dict[str, Any]:
-        budget = _validated_budget(token_budget)
+        budget = min(_validated_budget(token_budget), DEFAULT_TOKEN_BUDGET)
         feature_id = self._strip_ref(feature_ref, "feature")
         with self.store.connection() as connection:
             feature = self._one(
@@ -119,9 +186,24 @@ class ContextMixin:
         )
 
     def get_ticket_context(
-        self, actor: Actor, ticket_ref: str, token_budget: int | None = None
+        self,
+        actor: Actor,
+        ticket_ref: str,
+        token_budget: int | None = None,
+        include_history: bool = False,
     ) -> dict[str, Any]:
-        budget = _validated_budget(token_budget)
+        requested_budget = _validated_budget(token_budget)
+        if not isinstance(include_history, bool):
+            raise ValidationError("include_history must be a boolean")
+        if include_history and actor.role not in {Role.PLANNER, Role.ADMIN}:
+            raise AuthorizationError(
+                "Only Planner or Admin may expand ticket decision history"
+            )
+        budget = (
+            requested_budget
+            if include_history
+            else min(requested_budget, DEFAULT_TOKEN_BUDGET)
+        )
         ticket_id = self._strip_ref(ticket_ref, "ticket")
         with self.store.connection() as connection:
             project_id = self._project_for_ticket(connection, ticket_id)
@@ -317,7 +399,7 @@ class ContextMixin:
                 dependency["ticket_id"]: dependency["status"] for dependency in dependencies
             },
         }
-        self._project_role_sections(payload, actor)
+        self._project_role_sections(payload, actor, include_history=include_history)
         compiled = self._compile_context(
             payload,
             token_budget=budget,
@@ -587,7 +669,9 @@ class ContextMixin:
         }))
 
     @staticmethod
-    def _project_role_sections(payload: dict[str, Any], actor: Actor) -> None:
+    def _project_role_sections(
+        payload: dict[str, Any], actor: Actor, *, include_history: bool
+    ) -> None:
         """Drop what the envelope already says, and what this role never acts on.
 
         This runs before budget fitting so compaction spends the budget on
@@ -616,12 +700,66 @@ class ContextMixin:
                     for item in finding["evidence"]
                 ]
 
+        ticket = payload.get("ticket")
+        allowed_ticket_fields = _ROLE_TICKET_FIELDS.get(actor.role)
+        if isinstance(ticket, dict) and ticket.get("validation_contract"):
+            # Contract entries carry the exact criteria; the service verifies
+            # one-to-one coverage when Planner configures the contract.
+            ticket.pop("acceptance_criteria", None)
+        if isinstance(ticket, dict) and allowed_ticket_fields is not None:
+            if not ticket.get("validation_contract"):
+                allowed_ticket_fields = allowed_ticket_fields | {"acceptance_criteria"}
+            payload["ticket"] = {
+                key: value for key, value in ticket.items()
+                if key in allowed_ticket_fields
+            }
+
+        entries = payload.get("context_entries") or []
+        allowed_entry_types = _ROLE_CONTEXT_ENTRY_TYPES.get(actor.role)
+        if allowed_entry_types is not None:
+            authorized = [
+                entry for entry in entries
+                if entry.get("entry_type") in allowed_entry_types
+            ]
+            removed = len(entries) - len(authorized)
+            if not include_history:
+                kept_reversed: list[dict[str, Any]] = []
+                counts: dict[tuple[str, str], int] = {}
+                for entry in reversed(authorized):
+                    scope = "ticket" if entry.get("ticket_id") else "feature"
+                    entry_type = str(entry.get("entry_type"))
+                    key = (scope, entry_type)
+                    limit = 3 if entry_type in {"risk", "known_failure"} else 1
+                    if counts.get(key, 0) >= limit:
+                        removed += 1
+                        continue
+                    counts[key] = counts.get(key, 0) + 1
+                    kept_reversed.append(entry)
+                authorized = list(reversed(kept_reversed))
+            payload["context_entries"] = authorized
+            if removed:
+                payload.setdefault("_precompiled_omissions", []).append(
+                    {
+                        "section": "context_entries.history",
+                        "reason": "role_current_view",
+                        "omitted_count": removed,
+                        "references": [payload["context_ref"] + ":history"],
+                    }
+                )
+        for entry in payload.get("context_entries") or []:
+            if isinstance(entry, dict):
+                entry.pop("feature_id", None)
+                entry.pop("ticket_id", None)
+
         if actor.role is not Role.PLANNER and isinstance(payload.get("feature"), dict):
             payload["feature"] = {
                 key: value
                 for key, value in payload["feature"].items()
                 if key in _EXECUTION_FEATURE_FIELDS
             }
+
+        if actor.role not in {Role.PLANNER, Role.QA, Role.ADMIN}:
+            payload["verification_profile"] = None
 
         if actor.role is Role.DEVELOPER:
             payload["test_runs"] = [
@@ -650,7 +788,7 @@ class ContextMixin:
         smaller than that floor: a Developer without acceptance criteria, or QA
         without the frozen candidate SHA, is more dangerous than an oversized packet.
         """
-        omitted: list[dict[str, Any]] = []
+        omitted: list[dict[str, Any]] = payload.pop("_precompiled_omissions", [])
         payload["token_budget"] = token_budget
         payload["omitted_sections"] = omitted
         payload["generated_at"] = _iso()
@@ -659,9 +797,9 @@ class ContextMixin:
         payload["estimated_tokens"] = token_budget
         payload["context_snapshot_id"] = f"ctxsnap_{'0' * 32}"
 
+        # These compactors remove duplicated narration and attach typed refs;
+        # they are semantic projections, not merely overflow recovery.
         for compact in compactors:
-            if _estimate_tokens(payload) <= token_budget:
-                break
             compact(payload, omitted, token_budget)
 
         for section in reversed(priority):
@@ -718,7 +856,10 @@ class ContextMixin:
     ) -> None:
         """Keep artifact identity and finding state; shorten only their narration."""
         candidate = payload.get("candidate")
-        if candidate and candidate.get("developer_claims"):
+        drop_claims = payload.get("role") in {
+            Role.DEVELOPER.value, Role.INTEGRATOR.value
+        } or _estimate_tokens(payload) > token_budget
+        if candidate and candidate.get("developer_claims") and drop_claims:
             omitted.append(
                 {
                     "section": "candidate.developer_claims",

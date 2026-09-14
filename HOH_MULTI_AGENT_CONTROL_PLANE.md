@@ -570,6 +570,14 @@ phải bao phủ `required_capabilities` của toàn bộ validation contract. T
 browser/runtime/domain adapter thì candidate giữ trong queue, không biến thành
 code failure.
 
+`work.inbox` trả `capability_blockers` và `work.discover` trả
+`capability_state` cho từng ticket QA đang bị chặn, gồm capability chưa khai,
+chưa được duyệt và trạng thái binding máy. QA vì vậy không được kết luận "không
+có việc" chỉ vì chưa có offer. Cùng lúc, HoH tạo event bền vững
+`capability_review_required` cho Planner ngay cả khi declaration còn thiếu;
+Planner provision/route phần trang bị thiếu và chỉ duyệt phần có public preflight
+evidence trên đúng `machine_id`. Gate claim vẫn fail-closed.
+
 `qa.discover_candidates` gộp vào `work.discover` (QA chỉ thấy `QA_READY`). `qa.reopen_verified_behavior` và `qa.release_candidate` chưa hiện thực.
 
 QA không được:
@@ -722,6 +730,22 @@ Không được tóm tắt làm thay đổi trạng thái verified/failed hoặc
 Budget mặc định là 4.000 estimated token. Repository state chỉ xuất hiện một lần
 trong packet; context snapshot lưu digest để kiểm tra stale. Full history vẫn ở
 database/evidence store và chỉ được đọc lại qua reference cụ thể.
+
+Projection theo role chạy trước budget compaction. Timestamp, field quản trị mà
+role không thể hành động và acceptance criteria đã lặp nguyên văn trong
+validation contract không đi vào packet. Packet thường giữ checkpoint hiện tại
+theo từng scope/type; tăng `token_budget` không tự kéo lịch sử cũ trở lại. Chỉ
+Planner/Admin được gọi `ticket.get_context(include_history=true)` khi đang trả lời
+một câu hỏi audit cụ thể. Planner có quyền nhìn rộng để điều hướng, nhưng vòng
+điều phối mặc định vẫn dùng current state + typed refs thay vì toàn bộ lịch sử.
+
+Kinh nghiệm xuyên ticket được index theo vùng file thay vì chat hoặc ticket ID.
+Packet chỉ nhận tối đa ba lesson giao nhau với scope, xếp theo số lần tái diễn rồi
+độ mới; lesson dài là checkpoint kèm `experience:<id>` để resolve đúng một mục.
+Lesson trên chính ticket vẫn được truyền vì chat/agent thay thế không sở hữu trí
+nhớ của người ghi. Đây là advisory provenance: Planner phải kiểm tra lại với
+code/spec hiện tại. Chỉ Planner/Admin được list toàn bộ notebook; execution role
+chỉ thấy lesson đã được scope match trong packet hoặc resolve ref đã được giao.
 
 ## 8. State machine
 

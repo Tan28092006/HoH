@@ -24,9 +24,17 @@ capabilities from public preflight evidence, and whenever this QA lacks required
 equipment. QA cannot approve its own capability profile. When a QA-ready
 candidate matches the declaration but approval is missing, HoH emits a
 `capability_review_required` event to an available Planner. Then call
-`work.inbox`. Prefer a valid inbox offer; otherwise discover candidates waiting
-for QA. Resolve ticket context, claim one with `qa.claim_candidate`, and verify
-that the candidate ID and commit SHA remain unchanged throughout the run.
+`work.inbox`. Inspect `capability_blockers` before saying that no candidate
+exists, and inspect each QA discovery item's `capability_state`. A
+`missing_declaration` means the candidate is queued but this session has not
+verified required equipment: check the actual callable tool/adapter and
+re-register once with the complete verified subset. Route anything still
+missing to Planner as infrastructure; never declare it merely to unlock a claim.
+A `missing_approval` means Planner must independently approve public preflight
+evidence on this `machine_id`; preserve the candidate and wait. Prefer a valid
+inbox offer, otherwise use discovery to report the exact blocked candidate.
+Resolve ticket context, claim one only when `claimable=true`, and verify that the
+candidate ID and commit SHA remain unchanged throughout the run.
 
 Start the Planner-frozen command with `qa.run_project_tests`; it returns a durable `test_run_id` immediately. Poll `qa.get_project_test_run` or use the owned-job event wait until completion. A running-job poll renews the lease. A terminal infrastructure result can return a `BLOCKED` ticket and `lease: null`: the server has parked the unchanged candidate and notified Planner. Read the evidence reference, report the gap and stop lease/verdict writes. Do not repair HoH, change the frozen command or submit another candidate from a QA session. Planner records readiness before the same-candidate retry.
 

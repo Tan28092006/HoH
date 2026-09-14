@@ -15,6 +15,7 @@ from hoh_control_plane import scopes
 from hoh_control_plane.service._common import (
     Actor,
     Any,
+    AuthorizationError,
     Connection,
     Role,
     ValidationError,
@@ -26,11 +27,12 @@ from hoh_control_plane.service._common import (
 )
 
 
-# A packet is a budget, and experience competes with the ticket itself. Five is
+# A packet is a budget, and experience competes with the ticket itself. Three is
 # enough for the traps that recur and too few for a place to file everything.
-_MAX_EXPERIENCE_NOTES = 5
+_MAX_EXPERIENCE_NOTES = 3
 
 _MAX_LESSON_CHARS = 2000
+_MAX_SURFACED_LESSON_CHARS = 400
 
 
 class ExperienceMixin:
@@ -162,8 +164,9 @@ class ExperienceMixin:
         """What the scope this ticket touches has already cost someone else.
 
         Read-time and by overlap, like inherited constraints: a lesson recorded
-        after this ticket started still reaches it. Notes learned on this ticket
-        are left out, since the agent reading them is the one who wrote them.
+        after this ticket started still reaches it. Notes learned on the same
+        ticket remain visible because a replacement chat or teammate is not the
+        agent that originally paid for the lesson.
         """
         scope = list(ticket.get("file_scope") or [])
         if not scope:
@@ -174,14 +177,13 @@ class ExperienceMixin:
                 f"""
                 SELECT * FROM experience_notes
                 WHERE project_id = ?
-                  AND (learned_on_ticket IS NULL OR learned_on_ticket != ?)
                   AND note_id IN (
                       SELECT note_id FROM experience_note_scopes WHERE {clause}
                   )
                 ORDER BY times_seen DESC, last_seen_at DESC
                 LIMIT ?
                 """,
-                (project_id, ticket["ticket_id"], *parameters, _MAX_EXPERIENCE_NOTES),
+                (project_id, *parameters, _MAX_EXPERIENCE_NOTES),
             ).fetchall()
         relevant: list[dict[str, Any]] = []
         for row in rows:
@@ -189,14 +191,42 @@ class ExperienceMixin:
             assert note is not None
             relevant.append(
                 {
-                    "lesson": note["lesson"],
+                    "note_ref": f"experience:{note['note_id']}",
+                    "lesson": self._experience_checkpoint(note["lesson"]),
                     "scope": note["file_scope"],
                     "times_seen": note["times_seen"],
-                    "learned_on": note["learned_on_ticket"],
+                    "learned_on_ticket": note["learned_on_ticket"],
                     "recorded_by": note["actor_role"],
+                    "advisory": True,
                 }
             )
         return relevant
+
+    @staticmethod
+    def _experience_checkpoint(lesson: str) -> str:
+        if len(lesson) <= _MAX_SURFACED_LESSON_CHARS:
+            return lesson
+        return lesson[:_MAX_SURFACED_LESSON_CHARS] + "..."
+
+    def get_experience(self, actor: Actor, note_ref: str) -> dict[str, Any]:
+        """Resolve one surfaced lesson without loading the project-wide notebook."""
+        note_id = self._strip_ref(note_ref, "experience")
+        with self.store.connection() as connection:
+            note = self._one(
+                connection,
+                "SELECT * FROM experience_notes WHERE note_id = ?",
+                (note_id,),
+            )
+            require_project(actor, note["project_id"])
+        return {
+            "note_ref": f"experience:{note_id}",
+            "lesson": note["lesson"],
+            "scope": note["file_scope"],
+            "times_seen": note["times_seen"],
+            "learned_on_ticket": note["learned_on_ticket"],
+            "recorded_by": note["actor_role"],
+            "advisory": True,
+        }
 
     @staticmethod
     def _overlap_clause(roots: list[str]) -> tuple[str, list[Any]]:
@@ -226,6 +256,10 @@ class ExperienceMixin:
     ) -> list[dict[str, Any]]:
         """The whole file, for a Planner deciding what is worth acting on."""
         require_project(actor, project_id)
+        if actor.role not in {Role.PLANNER, Role.ADMIN}:
+            raise AuthorizationError(
+                "Only Planner or Admin may list project-wide experience"
+            )
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
             raise ValidationError("limit must be between 1 and 100")
         with self.store.connection() as connection:

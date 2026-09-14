@@ -111,6 +111,15 @@ evidence refs. Never approve from the QA self-report alone. Revoke unavailable
 equipment by approving a smaller set with a new evidence ref. Strict QA dispatch
 uses the intersection of the live declaration and this approval.
 
+On `capability_review_required`, distinguish the two gates in the payload.
+`missing_declaration` means QA has not verified that its session can call the
+required equipment: provision or route that equipment, then have QA verify and
+re-register. Do not approve an undeclared capability. `missing_approval` means
+the live declaration exists but lacks an independent public-evidence approval on
+the same `machine_id`; inspect the preflight record and configure only the proven
+subset. Resolve every listed ticket, then continue the control cycle before
+waiting again.
+
 Before `planner.set_ticket_ready`, call `planner.configure_validation_contract`.
 Cover every acceptance criterion exactly once. Each entry names a stable
 `scenario_ref`, `black_box`/`white_box`/`mixed` method, expected observable result,
@@ -168,8 +177,10 @@ for: `blocked_only` for a blocker sweep, `status`, `awaiting_role`,
 feature rollup, its tickets, verified behaviors and open counts for the one
 feature you are planning. Reach for it before widening a discovery call.
 Resolve `ticket.get_context` for the ticket you are deciding about, with a
-`token_budget` that matches the question; read an unbounded packet only when
-you deliberately need that ticket's whole history.
+`token_budget` that matches the question. The normal packet keeps the newest
+role-relevant decisions. Set `include_history=true` only when a concrete audit
+question requires older Planner decision history; a larger budget alone does
+not expand the history or another role's fields.
 
 ## Evidence-driven planning
 

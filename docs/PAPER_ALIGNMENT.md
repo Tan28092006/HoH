@@ -67,6 +67,20 @@ decisions. The latest copy of each decision type is retained. The former
 already present in `context_entries`. The visible repository state is stored once;
 the stale-write snapshot retains only its digest.
 
+Ticket fields and durable entry types are projected by role before fitting the
+budget. Timestamps, repeated acceptance criteria and execution metadata that the
+current role cannot act on are absent. Increasing `token_budget` does not refill
+the packet with old chat-like narration. Planner/Admin may explicitly request
+`include_history=true` for a bounded historical audit; normal Planner control
+cycles still receive current state plus typed references.
+
+Cross-iteration experience is kept outside the development document and enters
+a packet only by overlapping file scope. At most three reinforced lessons appear
+as advisory checkpoints; a full lesson is resolved by its note reference. A
+same-ticket note survives a replacement session, while Planner rechecks every
+lesson against current code/spec before it influences the plan. This preserves
+the paper's iteration learning without accumulating agent narration.
+
 Full history remains durable in the database and evidence store. It is fetched by
 typed reference only when needed; it is not copied into every role prompt. Verified
 behavior inherited from earlier tickets is capped and carries its source ticket.

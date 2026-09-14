@@ -75,14 +75,24 @@ Do not include credentials, access tokens or secrets in progress messages, evide
 ## Context and handoffs
 
 Start with current ticket/version, objective/criteria, preservation constraints,
-active decision, candidate/base SHA and open findings. Request a modest token_budget
-sized to the question you are answering; read an unbounded packet only when you
-deliberately need one ticket's whole history. A packet is already projected to
-what your role acts on, so a field you do not see is one your role does not need
-rather than one to go hunting for. Inspect omitted sections and fetch missing
-required fields; never guess them. Use details by typed reference to answer a
-specific question, and deltas/cursors only when exposed. Do not reload the full
+active decision, candidate/base SHA and open findings. Request a modest
+`token_budget` sized to the question. A larger budget never expands role
+visibility or automatically loads old decisions. Only Planner/Admin may set
+`include_history=true`, and only to answer a specific historical question. A
+packet is already projected to what your role acts on, so a field you do not see
+is one your role does not need rather than one to go hunting for. Inspect omitted
+sections and fetch missing authorized detail; never guess it. Use details by typed
+reference to answer a specific question, and deltas/cursors only when exposed. Do not reload the full
 specification, all tickets, old successful runs or other agents' chats each loop.
+
+Use `experience.record` only for a reusable, observable trap tied to the file
+scope where it occurred. Ticket status, ordinary progress, one-off conclusions
+and copied instructions belong in the ticket/handoff instead. Ticket packets
+surface at most three reinforced overlapping lessons as advisory checkpoints;
+resolve one full lesson with `experience.get` only when it changes the next
+action. A same-ticket lesson may come from another chat, so do not discard it as
+your own memory. Planner/Admin alone may use project-wide `experience.list`, and
+must verify a lesson against current code/spec before turning it into work.
 
 Checkpoint only at a material change, handoff or durable blocker, not every poll.
 Aim for 150-300 words plus refs: ticket/version; artifact/base or committed
