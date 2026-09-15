@@ -103,7 +103,7 @@ def install_profile(root, project, role, instance, client, home, upgrade_skills=
             'skill_backups': [str(backup) for _, backup in moved]}
 
 
-def make_prompts(root, project, instance='primary'):
+def _make_prompts_0_3_18_legacy(root, project, instance='primary'):
     root_path = Path(root)
     # Forward slashes are accepted by PowerShell on Windows and survive being
     # copied through Markdown/LLM clients.  In particular, avoid ``\.venv``:
@@ -135,6 +135,67 @@ Nếu là Claude Code, thay giá trị --client bằng claude-code. Không cài 
 7. Chế độ GUI nhận sự kiện, không cron: trước khi idle, execution role phải bảo đảm mọi lỗi durable chưa được tool tự mở planner_job đã được gửi đúng một lần bằng work.report_failure; không gửi lỗi điều khiển/transient. Khi hết việc sẵn sàng, thông báo ngắn rồi gọi work.wait_for_event(project_id="{project}", timeout_seconds=43200) và để chat chờ tool. Không kết thúc lượt chỉ vì inbox rỗng, không lặp polling bằng lượt model. Khi có event, resolve context hiện tại và claim theo đúng role; event không cấp lease. Giữ event_id, truyền ack_event_id ở lần wait tiếp theo sau khi đã xử lý hoặc xác định event hết hiệu lực. Khi queue job provision/submission/qa/merge, dùng work.wait_for_event với job_kind và job_id tương ứng, sau đó gọi poll_tool trong kết quả đúng một lần để lấy trạng thái. HoH duy trì lease hợp lệ của job trong lúc tool đang chờ. Nếu cần bạn trả lời thì báo rõ và dừng; không giấu câu hỏi trong một lần chờ 12 giờ. Nếu timeout/mất kết nối, kiểm tra lại host và bootstrap; không tự tạo cron. Đóng chat, bấm Stop, sleep máy hoặc tắt HoH sẽ ngắt chờ. Cách này giữ chính chat Codex app/Claude extension; không tạo phiên CLI thay thế.
 
 Cấu hình này dùng MCP HTTP chung tại loopback, không tạo thêm Python server theo từng chat. Setup tự cấp credential riêng cho identity/project và lưu trong cấu hình client; không chép token vào chat. Mở HoH bằng icon Desktop trước khi kết nối và phải để HoH chạy trong lúc restart client; profile HTTP không tự bật host đã tắt. Máy khác cần bộ cấu hình HTTP riêng và đường mạng đã được cấp quyền.'''
+    return prompts
+
+
+def make_prompts(root, project, instance='primary'):
+    """Generate the short operational prompt; detailed policy lives in skills."""
+    root_path = Path(root)
+    service_root = root_path.as_posix()
+    python = (root_path / '.venv' / 'Scripts' / 'python.exe').as_posix()
+    focus = {
+        'planner': (
+            'Run the Planner card after bootstrap and every event: sync repository, '
+            'resolve reconciliation before any release/wait, handle Planner jobs and '
+            'capability reviews, persist current priorities, then wait. Read the linked '
+            'reference only for the event you received.'
+        ),
+        'developer': (
+            'Resume owned lease before new work, implement only in the assigned '
+            'worktree, refresh context immediately before one-commit submission, and '
+            'stop for a reconciliation barrier or retirement.'
+        ),
+        'qa': (
+            'Declare only verified capabilities on this machine, inspect capability '
+            'blockers before reporting no work, test only a frozen claimable candidate, '
+            'and record evidence without modifying candidate code or tests.'
+        ),
+        'integrator': (
+            'Merge only the exact verified candidate through the protected job. Verify '
+            'the actual mainline SHA after completion and stop for Planner reconciliation.'
+        ),
+    }
+    prompts = {}
+    for role in ROLES:
+        actor = profile_actor(project, role, instance)
+        prompts[role] = f'''Set up HoH for this Windows chat.
+Role: {role}; project: {project}; instance: {instance}.
+
+1. Identify Codex or Claude Code. Run this exact PowerShell command once; do not
+   guess another executable or repeat setup:
+   & '{python}' -I -m hoh_control_plane.local_agent setup --root '{service_root}' --project '{project}' --role {role} --instance {instance} --client codex --upgrade-skills --transport shared-http
+   For Claude Code, replace only `--client codex` with `--client claude-code`.
+2. Load `$hoh-control-plane` and `$hoh-{role}`. Use only MCP
+   `hoh-{actor.agent_id}`. If it is absent after setup, keep HoH running and
+   fully reopen Codex Desktop, or reload the VS Code extension host; do not use a
+   default or different-role server.
+3. Call `session.bootstrap(project_id="{project}")`. Confirm role, agent ID,
+   project scope and selected project exactly match this prompt. If not, stop
+   before registration, claim or write.
+4. Register `hoh-control-plane` and `hoh-{role}` once, then inspect inbox/current
+   assignment. QA uses the stable host name as `machine_id` and declares only
+   equipment it has actually verified. Keep this same instance after restart;
+   bootstrap and use `resume_wait_id` instead of creating a duplicate instance.
+5. {focus[role]}
+6. Use current server packet and exposed tools only. Never use direct SQL, another
+   worker's worktree, hidden evaluator material or credentials in chat. Before
+   idle wait, report one unhandled durable failure only if no role tool already
+   opened a Planner job. In GUI event mode call `work.wait_for_event` only after
+   current work is handled; an event is not a lease and a stopped chat cannot be
+   revived by MCP.
+
+At setup completion, state the client, exact MCP server, role, project, workspace
+model and next action briefly.'''
     return prompts
 
 

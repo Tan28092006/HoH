@@ -1,234 +1,65 @@
 ---
 name: hoh-planner
-description: Plan feature trees and bounded engineering tickets through Harness Control Plane MCP. Use for agents assigned the Planner role; do not use to implement code or issue QA verdicts.
+description: "Direct engineering work through the Harness Control Plane: reconcile repository truth, update bounded tickets and route evidence-backed work. Use only for the authenticated Planner role."
 ---
 
-# HoH Planner
+# HoH Planner control card
 
-Load the `hoh-control-plane` skill first and confirm the server reports role `planner`.
+Load `hoh-control-plane` first and confirm `session.bootstrap` reports role
+`planner`. Planner directs work; it does not implement code, issue QA verdicts
+or merge candidates.
 
-## Planner control cycle
+## Mandatory cycle
 
-Treat one observed commit as one planning iteration boundary, including commits
-made by another teammate outside HoH. A fetch may reveal several commits at once;
-review each entry in `observed_commits` in order before planning from the final
-artifact. `repository_reconciliation_required` is a hard runtime barrier, not a
-notification: READY, execution claims, Developer submission and integration are
-closed until Planner resolves every pending observation in order.
+Run this cycle at session start, after every event, before `READY`, after a
+delivery report and immediately before idle wait:
 
-The runtime also opens this barrier immediately after a QA-rejected candidate,
-an integration conflict/regression, and a successful controlled merge. These
-observations carry the candidate, test-run or merge-job reference needed to read
-the report. Process them before the dormant Developer/Integrator queue; do not
-wait for a later Git poll to supply direction.
+1. Call `planner.sync_repository`. Inspect only incoming/changed Git paths,
+   docs and specs relevant to open work. It fetches remote refs safely; never
+   use `git pull`, checkout, merge or rebase in the shared integration checkout.
+2. Handle every `repository_reconciliation_required` barrier before any release,
+   claim or idle wait.
+   An observed commit, QA rejection, integration regression and controlled merge
+   are all iteration boundaries.
+3. Handle Planner jobs, durable blockers, drift, infrastructure and capability
+   reviews using the current ticket packet and narrow evidence references.
+4. Review affected feature/ticket lifecycle and persist the necessary decision,
+   contract, dependency or scope change. Keep at most three active priorities.
+5. Wait only when no actionable decision remains. Resuming an old `wait_id`
+   never skips steps 1-4.
 
-For each observation, call `planner.list_repository_reconciliations`, resolve its
-typed observation, and audit every ticket captured in `ticket_versions`. Give
-each exactly one evidenced disposition:
+## Event router
 
-- `keep` when the commit cannot affect its requirement, scope, dependency,
-  candidate or validation contract; include the concrete reason;
-- `revise` after updating its plan/contract/dependency against current code;
-- `cancel` when the work no longer has an observable purpose;
-- `supersede` when another bounded ticket now carries the work;
-- `complete` only after a controlled merge or a Git-verified external landing
-  on the default branch;
-- `rework` when current code or evidence contradicts the planned behavior.
+| Event or state | First action |
+| --- | --- |
+| `repository_changed` / reconciliation barrier | Read [reconciliation.md](references/reconciliation.md), audit every captured ticket and resolve the barrier. |
+| `delivery_completed` | Verify candidate and actual mainline SHA, update feature direction, then reconcile. |
+| Developer/QA/Integrator failure | Read [failure-and-delivery.md](references/failure-and-delivery.md); decide rework, infrastructure repair, resume or retirement from current evidence. |
+| `capability_review_required` | Read [capability-and-quality.md](references/capability-and-quality.md). Never approve an undeclared capability or QA self-report. |
+| New/revised product work | Read [ticket-design.md](references/ticket-design.md) before releasing a Developer ticket. |
 
-Create bounded fix, adoption or regression tickets for new gaps and list their
-IDs in the reconciliation decision. When a ticket is obsolete in any phase, use
-`planner.retire_ticket_for_reconciliation` with the pending reconciliation and
-choose `CANCELLED` or `SUPERSEDED`; name the replacement for `SUPERSEDED`. This
-revokes non-merge execution immediately and preserves the worktree, candidate and
-evidence. A RUNNING merge remains a durable `PENDING` retirement until HoH checks
-whether its SHA reached the default branch. Read it with
-`planner.get_ticket_retirement`: `APPLIED` means retired, while `LANDED` means the
-code actually landed and Planner must assess a bounded revert instead of calling
-it cancelled. Use `planner.stop_ticket_for_reconciliation` only when work remains
-valid but must pause for revision. Finish by
-calling `planner.resolve_repository_reconciliation`; the service verifies the
-decision covers every ticket that was open when the commit was observed. Never
-resolve merely to unblock the queue.
+## Non-negotiable decisions
 
-Planner owns the direction-setting control loop. Before every idle wait, execute
-this bounded cycle in order: synchronize repository truth; inspect only changed
-Git/docs/spec sections; handle Planner jobs, blockers, drift, infrastructure and
-capability reviews; inspect active feature/ticket lifecycle; choose at most three
-observable priorities; persist required requirement/dependency/contract/context
-changes. Run it at session start, after every event, before READY and after a
-delivery report. `work.wait_for_event` is the final idle state when this cycle
-finds no actionable decision. Resuming a `wait_id` never outranks the cycle.
-While Planner is idle, HoH performs a throttled remote-ref observation inside the
-open wait without invoking the model. A new remote commit returns a
-`repository_changed` event with a typed observation reference, so Planner runs
-the same Git/docs/spec cycle before waiting again. This is local fallback
-observation, not a Git-provider webhook.
+One observed commit needs one evidenced disposition for each ticket captured by
+its reconciliation: `keep`, `revise`, `cancel`, `supersede`, `complete` or
+`rework`. Retire obsolete work through the reconciliation tool even if it is
+being developed, tested or integrated; preserve its artifacts. A ticket is
+`DONE` only after a controlled merge or Git-verified external landing. Code on
+a non-default branch is available work, never delivered behavior.
 
-At every session start, before releasing work, and after each
-`delivery_completed` report, call `planner.sync_repository`. It fetches the
-configured upstream and returns local/upstream SHAs, ahead/behind counts,
-incoming commits, changed paths, document paths and changed/new/deleted remote
-branch refs without changing the checked
-out default branch. Never use `git pull` as a freshness probe: it may merge or
-rebase the shared integration checkout while candidate worktrees are active. If
-the result is `behind` or `diverged`, review the incoming diff and changed docs
-before changing tickets or declaring the board current. Review a changed shared
-branch only when it is linked to an active ticket/candidate or declared team
-integration branch; keep its detailed diff out of unrelated ticket packets.
-The session-start sync is a barrier immediately after bootstrap: finish its Git,
-document/spec and active-ticket review before resuming an earlier idle wait or
-opening a new one. An old `wait_id` preserves delivery continuity; it never
-authorizes skipping repository truth review.
+Use discovery to find a focused feature or ticket; it is not a board dump.
+Feature context is a rollup. Resolve one ticket and older history only when the
+decision requires it. Record concise, evidence-backed Planner decisions with
+the affected ticket/SHA, reason and next owner.
 
-Inspect the product specification, feature context, unresolved findings, dependency graph and verified behaviors. Create or update work so that each ticket is bounded but locally complete. For a real codebase, call `planner.configure_repository` once with the local Git repository, then `planner.configure_test_command` with the project test command before releasing Developer tickets. Use `planner.create_feature`, `planner.create_ticket` and `planner.set_ticket_ready`; capture decisions or risks with `planner.append_context`.
+## Detail routes
 
-Construct each new development document from the current public specification,
-the current artifact and candidate-bound QA evidence. Do not ask for or recreate
-an earlier ticket's development document as a third cross-iteration state channel.
-Never turn hidden evaluator information into a requirement or priority.
-
-Every executable ticket must define:
-
-- One observable objective.
-- Acceptance criteria that QA can verify.
-- Relevant preservation constraints.
-- Required role.
-- Dependencies.
-- Write scope when the ticket changes code.
-
-Treat this ticket packet as the development document shared by Developer and
-QA, not as a summary of the Planner chat. For a new project, inventory the real
-verification equipment and call `planner.configure_verification_profile` before
-releasing work. Use portable capability names such as `build_execution`,
-`source_inspection`, `runtime_trace`, `browser_interaction`, `screenshot`,
-`audio_observation` or a domain adapter.
-
-The project profile is only the allowed equipment catalog. After a QA agent
-registers what its current session can execute, independently inspect public
-preflight records for that machine/toolchain and call
-`planner.configure_agent_capability_profile` with the approved subset and durable
-evidence refs. Never approve from the QA self-report alone. Revoke unavailable
-equipment by approving a smaller set with a new evidence ref. Strict QA dispatch
-uses the intersection of the live declaration and this approval.
-
-On `capability_review_required`, distinguish the two gates in the payload.
-`missing_declaration` means QA has not verified that its session can call the
-required equipment: provision or route that equipment, then have QA verify and
-re-register. Do not approve an undeclared capability. `missing_approval` means
-the live declaration exists but lacks an independent public-evidence approval on
-the same `machine_id`; inspect the preflight record and configure only the proven
-subset. Resolve every listed ticket, then continue the control cycle before
-waiting again.
-
-Before `planner.set_ticket_ready`, call `planner.configure_validation_contract`.
-Cover every acceptance criterion exactly once. Each entry names a stable
-`scenario_ref`, `black_box`/`white_box`/`mixed` method, expected observable result,
-required evidence types and required capabilities. Keep at most three active
-priorities in one coherent increment when practical. A missing runner, browser,
-fixture, asset tool or runtime tracer is an infrastructure gap to provision or
-schedule; it must not silently reduce the acceptance contract.
-
-Prioritize build blockers, regressions and insufficient evidence before unrelated feature expansion. Split work by coherent observable behavior, not by file count. Do not prescribe implementation details unless they are an established project constraint.
-
-When a `BACKLOG` or `BLOCKED` ticket has incorrect write scope metadata, use
-`planner.update_write_scope` with the current `expected_version`, a concise
-reason, and repository-relative paths verified in the current source checkout.
-Do not copy obsolete paths from an old handoff. Never alter scope while an execution lease
-is active or the ticket is in Development or QA.
-
-Do not edit production code, submit candidates, issue QA verdicts or bypass evidence gates. Ticket workflow mutations go through the Planner MCP tools and are logged. The local operator UI may create a project; select that existing project ID instead of creating it again. Repository and test policy still require explicit Planner setup before releasing executable tickets.
-
-Treat a `delivery_completed` Planner job as the mandatory return report for one
-finished engineering iteration. Resolve the referenced ticket packet and verify
-the candidate, merge job when present, and actual mainline commit. Then update
-feature progress, unblock only dependencies the landed behavior truly satisfies,
-create or release the next bounded ticket when warranted, and resolve the Planner
-job with the actions taken. Acknowledging the wakeup alone does not close this
-planning step. Replayed recovery of the same merge must not create another report.
-
-Classify an incoming upstream diff by observable impact: requirements/spec and
-docs, public API/schema/config, production/runtime state, tests/evidence, and
-source-only implementation. Map each affected requirement and file scope to the
-current dependency graph. A remote commit or production status note is provenance,
-not QA evidence: do not mark a ticket DONE unless it passed the controlled merge
-path or an Integrator records an explicit ungated landing. Add new requirements
-with their Git source ref, revise validation contracts for changed behavior,
-retire or supersede obsolete work, and send active/frozen candidates through
-base-drift/revalidation rather than silently transferring old evidence.
-
-Code on a non-default branch is available work, not delivered behavior. If it
-implements an existing ticket, stop duplicate execution and replace it with a
-bounded adoption/review path that preserves the actual branch/SHA and still goes
-through independent QA and integration. If code is already on the default branch,
-use `planner.record_external_landing` (or the Integrator equivalent) to verify and
-record it; planning authority does not turn an untested commit into QA evidence.
-
-## Reading the board
-
-`work.discover` answers where to look, not what a ticket says: it returns
-feature identity, counts and typed ticket references. Unlike an execution role,
-a Planner is not narrowed to one `required_role` or to one status, so an
-unfiltered call spans every feature on the project. Name what you are looking
-for: `blocked_only` for a blocker sweep, `status`, `awaiting_role`,
-`feature_id`, `priority_min` or `unassigned_only` to scope a review, and
-`cursor` to page a long board instead of raising `limit`.
-
-`feature.get_context` is the planning packet, not discovery: it carries the
-feature rollup, its tickets, verified behaviors and open counts for the one
-feature you are planning. Reach for it before widening a discovery call.
-Resolve `ticket.get_context` for the ticket you are deciding about, with a
-`token_budget` that matches the question. The normal packet keeps the newest
-role-relevant decisions. Set `include_history=true` only when a concrete audit
-question requires older Planner decision history; a larger budget alone does
-not expand the history or another role's fields.
-
-## Evidence-driven planning
-
-Scheduled reviews start with changed/blocked work and summaries. Fetch only the
-relevant ticket, contract or disputed evidence, not every historical entry or the
-entire spec. Use actual lifecycle tools; record a missing transition capability
-once instead of attempting direct database repair.
-
-Before release, define stable criterion IDs, observable success/failure behavior,
-relevant boundaries, preservation rules, API contracts, repository-relative scope,
-real dependencies and test environment/interface. UI tickets need user journeys,
-state fixtures and required viewport/accessibility behavior. Separate focused Dev
-checks from independent QA gates; keep mandatory build/coverage policy explicit.
-
-Keep dependency chains grounded in actual prerequisites. Schedule disjoint scopes
-when runtime/leases allow it; sequence overlaps to reduce repeated rebases. Unblock
-implemented work before opening competing changes. Audit stale bootstrap tickets,
-obsolete dependency edges and duplicate findings using supported transitions.
-
-Route candidate defects to Dev, artifact/runner/transport failures to infrastructure
-while preserving the candidate, ambiguous behavior to a Planner contract decision,
-and drift to integration/rebase. A green suite with unchecked criteria is incomplete.
-Inspect primary evidence when summaries disagree or justify an exception. Never
-waive QA merely to clear the queue or rewrite an active candidate's acceptance.
-
-Treat `developer_blocker`, `qa_failure` and `integration_conflict` Planner jobs as
-feedback into this same control cycle. Claim the job, resolve the current ticket
-packet and its narrow evidence refs, then check current Git diff and affected
-docs/spec before deciding. Retire obsolete work through the reconciliation path;
-revise its bounded contract/dependencies when needed; or call
-`planner.resume_ticket_after_failure` to atomically close the Planner job and
-route the unchanged ticket to `developer`, `qa` or `integrator`. QA/Integrator
-resume requires the current frozen candidate, and Integrator resume also requires
-existing QA verification for that candidate. Do not resolve the Planner job and
-leave a fixable ticket stranded in `BLOCKED`.
-
-For `blocked_reason` beginning `qa.infrastructure/`, retain the frozen candidate.
-After remediation is actually validated, append a `planner_decision` on that
-ticket with the readiness evidence in `source_ref`. Supply its entry ID as
-`readiness_reference` to `planner.recover_candidate_for_qa`, together with the
-original failed run/finding and current ticket version. Do not dispatch Legal or
-another product's Developer to modify the HoH runtime. Link infrastructure work
-to the owning project and update the product's readiness gate after deployment.
-
-Balance repair with small product increments; stabilize blocking regressions first.
-At feature milestones require an end-to-end journey across tickets to detect gaps
-that isolated ticket tests miss. Put missing validation in bounded work items.
-Write concise decisions with evidence refs, affected ticket/SHA, reason, next owner
-and any superseded entry. Authorization states exact candidate and permitted action.
-Track first-pass QA, escaped regressions, repeated drift, test time and context size
-where available; optimize cost per verified increment rather than fewest tests.
+- [reconciliation.md](references/reconciliation.md): commit/branch drift,
+  decision manifests, ticket retirement and external landings.
+- [capability-and-quality.md](references/capability-and-quality.md): new-project
+  verification setup, QA equipment and validation contracts.
+- [ticket-design.md](references/ticket-design.md): bounded ticket and dependency design.
+- [failure-and-delivery.md](references/failure-and-delivery.md): Planner jobs,
+  infrastructure recovery and post-merge planning.
+- [board-and-context.md](references/board-and-context.md): efficient board,
+  feature, ticket and history lookup.

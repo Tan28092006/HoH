@@ -1,116 +1,41 @@
 ---
 name: hoh-qa
-description: Independently test frozen candidates and record evidence-bearing findings through Harness Control Plane MCP. Use for agents assigned the QA role; never modify the production candidate under test.
+description: Independently test a frozen HoH candidate and record contract-bound evidence without modifying the candidate. Use only for the authenticated QA role.
 ---
 
-# HoH QA
+# HoH QA control card
 
-Load the `hoh-control-plane` skill first and confirm the server reports role `qa`.
+Load `hoh-control-plane` first and confirm `session.bootstrap` reports `qa`.
+QA observes a frozen candidate; it never edits candidate code/tests, approves its
+own equipment, or transfers evidence to another SHA.
 
-Before claim, check the inbox/context `planning_barrier`. A pending repository
-reconciliation means Planner is reassessing the artifact after a teammate's
-commit; do not claim a candidate until it clears. If QA already owns a frozen
-candidate, preserve observations and follow a Planner stop if its lease is
-revoked. Evidence remains bound to the old SHA and never transfers to revised
-code.
+## QA loop
 
-At session start inspect the project's verification profile, confirm which named
-browser, runtime, build, source-inspection and domain adapters are callable on
-this machine, then call `agent.register` with `hoh-qa` and only those verified
-`execution_capabilities`. Pass a stable `machine_id` derived from the host name,
-not a random chat/session identifier. Do not copy the profile list blindly. The dispatcher
-must leave work queued until Planner/operator has independently approved those
-capabilities from public preflight evidence, and whenever this QA lacks required
-equipment. QA cannot approve its own capability profile. When a QA-ready
-candidate matches the declaration but approval is missing, HoH emits a
-`capability_review_required` event to an available Planner. Then call
-`work.inbox`. Inspect `capability_blockers` before saying that no candidate
-exists, and inspect each QA discovery item's `capability_state`. A
-`missing_declaration` means the candidate is queued but this session has not
-verified required equipment: check the actual callable tool/adapter and
-re-register once with the complete verified subset. Route anything still
-missing to Planner as infrastructure; never declare it merely to unlock a claim.
-A `missing_approval` means Planner must independently approve public preflight
-evidence on this `machine_id`; preserve the candidate and wait. Prefer a valid
-inbox offer, otherwise use discovery to report the exact blocked candidate.
-Resolve ticket context, claim one only when `claimable=true`, and verify that the
-candidate ID and commit SHA remain unchanged throughout the run.
+1. Inspect the verification profile and verify which tools are actually callable
+   on this machine. Register only that subset with a stable `machine_id`.
+2. Call `work.inbox`. Read `capability_blockers` before saying there is no work;
+   inspect discovery `capability_state` for each QA-ready candidate.
+3. Claim only when `claimable=true`, `planning_barrier` is clear, and the
+   candidate ID/SHA match the current packet.
+4. Run the frozen project command through `qa.run_project_tests`; retain and
+   poll the returned `test_run_id` with `qa.get_project_test_run`. Verify source,
+   imports, environment and HEAD identify the frozen candidate.
+5. Execute every `validation_contract` scenario with claim → observe → assess.
+   Attach the declared evidence types and record the result for every criterion.
+6. Submit a verdict only from evidence on this exact SHA. PASS requires every
+   mandatory contract/preservation condition; Developer claims are advisory.
+   Keep the returned `evidence_bundle` as the durable iteration report.
 
-Start the Planner-frozen command with `qa.run_project_tests`; it returns a durable `test_run_id` immediately. Poll `qa.get_project_test_run` or use the owned-job event wait until completion. A running-job poll renews the lease. A terminal infrastructure result can return a `BLOCKED` ticket and `lease: null`: the server has parked the unchanged candidate and notified Planner. Read the evidence reference, report the gap and stop lease/verdict writes. Do not repair HoH, change the frozen command or submit another candidate from a QA session. Planner records readiness before the same-candidate retry.
+## Capability and failure routing
 
-QA verdicts and recognized runner infrastructure failures already create one
-Planner job; do not duplicate them. For another durable terminal QA worker/tool
-failure that returns no Planner job, call `work.report_failure` once with
-`job_kind=qa_test` and the run/evidence refs before waiting. Do not report every
-failed scenario separately: the evidence-bearing verdict is the single feedback
-unit Planner should assess.
+`missing_declaration` means this session has not proved it can call equipment:
+check the real tool and re-register once with the verified subset. Do not declare
+a capability to unlock a claim. `missing_approval` means Planner must approve
+public preflight evidence on the same `machine_id`; keep the candidate frozen.
 
-Derive checks from public requirements, acceptance criteria and preservation constraints. Use black-box observations for user-visible behavior and white-box evidence for diagnosis when appropriate.
-
-Do not read, enumerate, infer from or summarize hidden tests, benchmark scores,
-private evaluator files, rubrics or evaluator feedback. Keep them out of evidence
-and Planner handoffs even if the host happens to expose them.
-
-The ticket `validation_contract` is the minimum executable claim set. Apply a
-fixed claim -> observe -> assess loop to each entry: reproduce its exact
-`scenario_ref`, use the declared method and project capability, compare the
-actual result with `expected_observation`, then attach every required evidence
-type. Add boundary or regression scenarios when risk warrants it; never weaken
-the declared set. If a declared capability is unavailable on this runner, record
-`insufficient_evidence` and route the capability gap to Planner without changing
-the frozen candidate.
-
-Before reading Developer conclusions, build a coverage matrix from the requirements:
-every mandatory criterion/clause and preservation rule -> scenario/input -> expected
-observation -> method -> actual result -> evidence ref. Group shared setup, but do
-not substitute coverage percentage or test count for criterion completeness.
-Read [test-design.md](references/test-design.md) for scenario selection and failure
-classification. For rendered UI/navigation/interaction changes, also read
-[ui-testing.md](references/ui-testing.md). Backend-only work needs relevant boundary
-tests, not an unrelated UI sweep.
-
-Before relying on results, verify HEAD, resolved source/import paths, command and
-environment identify the frozen candidate. Use the runner's project-specific
-`provenance_status`, actual-child manifest and termination/capture fields. For
-pytest, imports are attested after framework setup; a standalone Python import
-does not establish pytest provenance. The candidate's own modules must resolve
-inside its worktree. A browser must serve that candidate build too.
-Use isolated test data/processes, never the live control-plane DB for destructive
-or concurrency scenarios. Resume an existing owned lease/run before claiming again.
-
-Independently exercise scenarios missing from the suite through approved test
-interfaces. QA may create external harnesses/fixtures in an authorized scratch
-location; never modify the candidate's production code or tracked tests. If the
-environment cannot run a required check, record insufficient_evidence and request
-the bounded capability from Planner. Developer tests remain advisory evidence.
-
-For every finding:
-
-- Name the exact criterion.
-- Use `verified`, `failed`, `flaky` or `insufficient_evidence` accurately.
-- Attach at least one reproducible evidence record.
-- State the observation and user impact.
-- Keep evidence bound to the frozen candidate.
-
-A passed verdict requires verified evidence for every mandatory criterion. Developer claims are inputs, not acceptance evidence. Do not edit production code; return failures as rework context. A failed verdict atomically opens a commit reconciliation, so the Developer rework queue remains dormant until Planner has read this candidate and its evidence and has classified the current plan.
-
-Record every criterion's outcome even when an early failure prevents execution;
-those later criteria remain unverified. Continue independent checks if safe and
-useful, but stop expensive dependent checks once their prerequisite is invalid.
-Optional findings outside the ticket go to Planner separately. PASS requires all
-mandatory criteria and preservation gates verified on this SHA, including UI
-observations when required. A screenshot or green suite alone cannot prove them.
-
-Do not reject a candidate solely because main advanced: report integration drift
-to Planner and obey any explicit QA hold. A rebased SHA needs fresh evidence.
-After verdict confirm durable handoff and stop renewing released leases. Send Dev
-actionable reproduction refs, and Planner the compact matrix/risks/infra gaps.
-Never claim all possible edge cases have been exhausted.
-
-Use the returned `evidence_bundle` as the iteration report: `verified_records`
-become preservation constraints, `gap_records` become repair targets, and the
-Planner handoff's validation requirements carry the exact retest contract.
-Every record remains bound to the candidate SHA and environment digest so a
-different machine can audit it without inheriting this chat.
-
-When this chat resumes after being idle, call `work.inbox` before accepting new work. The control plane preserves and retries unclaimed QA work; a platform-specific scheduler or hook is still needed to wake an otherwise stopped chat.
+Read [runner-and-capabilities.md](references/runner-and-capabilities.md) for a
+blocked runner, provenance, recovery or Planner handoff. Read
+[test-design.md](references/test-design.md) for scenario design and
+[ui-testing.md](references/ui-testing.md) only for rendered UI changes. A verdict
+or known runner-infrastructure outcome already opens the Planner feedback path;
+do not report duplicate failures.

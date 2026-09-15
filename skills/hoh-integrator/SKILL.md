@@ -1,90 +1,30 @@
 ---
 name: hoh-integrator
-description: Integrate QA-verified candidates while preserving artifact identity and mainline health through Harness Control Plane MCP. Use for agents assigned the Integrator role; do not bypass QA or policy gates.
+description: Integrate a QA-verified HoH candidate through the protected merge gate while preserving artifact identity and mainline truth. Use only for the authenticated Integrator role.
 ---
 
-# HoH Integrator
+# HoH Integrator control card
 
-Load the `hoh-control-plane` skill first and confirm the server reports role `integrator`.
+Load `hoh-control-plane` first and confirm `session.bootstrap` reports
+`integrator`. Integrator merges only the server-reported verified/merge-ready
+candidate; it does not repair candidate code or bypass QA and policy gates.
 
-Only select candidates that the server reports as verified or merge-ready. Check base drift, file conflicts, protected-branch policy and required regression gates before merging.
+## Merge loop
 
-Also require that `planning_barrier.repository_reconciliation_required` is false.
-A newly observed commit closes integration admission and the final merge step
-until Planner classifies every prior ticket. Preserve the candidate and lease;
-never race the reconciliation with a manual Git operation. Each successful merge
-atomically opens the next commit reconciliation beside its `delivery_completed`
-report; no execution role can enter the next iteration before Planner resolves it.
+1. Register, inspect inbox, and resume an owned merge job before another claim.
+2. Resolve the candidate packet. Confirm verified evidence, exact candidate/base
+   SHA, hold/authorization and clear `planning_barrier.repository_reconciliation_required`.
+3. Claim one candidate with `integrator.claim_candidate`, invoke
+   `integrator.merge_candidate` once, retain `merge_job_id`, and poll with
+   `integrator.get_merge_candidate` until terminal.
+4. A completed job still needs verification of merge status, ticket lifecycle,
+   gate evidence and actual mainline SHA.
+5. A successful merge creates exactly one `delivery_completed` report and next
+   reconciliation. Stop; Planner determines the next increment.
 
-If rebase, conflict resolution or another operation changes the candidate artifact, record the new identity and send it through the required QA gates again. Never reuse evidence from a different commit as proof for the changed artifact.
-
-Record integration evidence and final mainline identity. Requeue the ticket with a specific conflict or regression reason when integration cannot safely complete.
-
-A successful controlled merge creates one durable `delivery_completed` report
-and Planner wakeup in the same state transition. Verify that report exists through
-the returned workflow state; do not replace it with a chat message or a second
-ticket. Worker recovery and MCP retries must reuse that one report.
-
-## Protected asynchronous integration
-
-Register, check the inbox and resume an owned lease/job before claiming another
-candidate. Process one candidate at a time. Read the exact candidate/base SHA,
-mandatory QA outcomes, evidence provenance and current integration holds or
-authorization. Retrieve full evidence only for missing or inconsistent gate data.
-
-Claim via integrator.claim_candidate with the current version, then invoke
-integrator.merge_candidate once using the returned lease/version. Retain
-merge_job_id and poll integrator.get_merge_candidate until terminal; polls renew
-the integration lease. COMPLETED alone is not success: inspect merge_status,
-ticket state and actual mainline SHA. Lost acknowledgment requires reconciliation
-before retry. Missing async tools or stalled workers go to Planner with evidence,
-not a raw Git merge, direct service call, SQL or force-push fallback.
-
-A terminal merge failure now blocks the ticket and opens a Planner job
-automatically. If another durable Integrator/tool failure has no returned Planner
-job, call `work.report_failure` once with `job_kind=merge` when applicable before
-waiting. Do not report drift/conflict twice when the integration path already
-created its Planner job. If Planner retires the ticket during a merge, stop; HoH
-will reconcile whether the candidate actually reached main and preserve the
-truthful `LANDED` or retired outcome.
-
-Use the current runtime's policy and fresh ticket context, including Planner holds.
-The protected gate requires independent evidence for every mandatory criterion,
-the registered regression run, verified artifact identity and an unchanged base.
-When a validation contract exists, require its exact scenario and evidence-type
-coverage and preserve the returned evidence bundle with the landed SHA. A green
-aggregate command without the contracted observations is not sufficient.
-When a project has a registered regression command, the current runtime runs it
-in an isolated candidate checkout before fast-forwarding. Preserve that gate;
-an old skill or ticket describing it as future work does not disable it.
-Inspect the returned gate evidence and mainline identity, including any semantic
-record commit written after the candidate fast-forward.
-
-If Git proves the work is already on main, inspect current planning authorization
-and use `integrator.record_external_landing` to reconcile an existing landing
-without another candidate or a fictitious merge. This records deployed work;
-it adds no QA verdict and must not certify unmet criteria. Preserve prior evidence.
-For a ported change, cite the actual landed implementation commit and explain
-why the historical candidate itself was not merged.
-
-Recheck drift atomically in the gate. base_drift requires Developer rework and
-preserves historical QA on its old SHA. Missing mandatory evidence, failed or
-insufficient QA, a non-fast-forward path, or an explicit additional ticket gate
-blocks integration and is recorded precisely.
-
-In this deployment Integrator does not edit candidate code. Textual conflicts go
-to an assigned Developer/integration ticket with bounded scope and then fresh QA.
-Semantic conflicts may merge cleanly: verify contracts and interaction/regression
-gates, then route conflicting behavior to QA/Planner for an evidence-based decision.
-Never choose product semantics silently or transfer QA verdicts to changed SHAs.
-
-Honor candidate-specific holds/authorization; permission for a different SHA or
-base-drift-only attempt is not permission to merge a replacement. Under the
-standing policy above, do not wait for a per-candidate Planner/human authorization.
-Planner authorization is needed only for an exception, hold/release, or new policy
-rule, and must name the exact SHA/action.
-Avoid repeating valid QA runs unless integration conditions or policy require it.
-Record job ID, artifact/base, gate refs, terminal outcome and actual mainline SHA.
-Post-merge regression creates a durable Planner incident and pauses dependent
-integration; rollback follows established recovery policy. Continue to another
-candidate only when the assigned session policy permits.
+Never raw-merge, force-push, edit the candidate or reuse QA evidence after a
+SHA/base change. Drift, conflict, missing evidence or regression routes to
+Planner/Developer and fresh QA. Read [protected-merge.md](references/protected-merge.md)
+for gate failures, retirement during merge, external landings and recovery. Before
+idle wait, use `work.report_failure` once only for another durable tool failure
+that did not already create a Planner job.
