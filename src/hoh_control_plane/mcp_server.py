@@ -452,11 +452,19 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
         awaiting_role: str | None = None,
         unassigned_only: bool = False,
         cursor: str | None = None,
+        detail: bool | None = None,
     ) -> dict[str, Any]:
         """List role-appropriate work as feature metadata plus typed ticket references.
 
         Returns identity, status and counts only. Resolve ticket.get_context for
         the one ticket you intend to act on rather than expecting bodies here.
+
+        For Planner the broad call returns view="feature_rollup": one row per
+        feature with complete ticket_counts and awaiting counts, and no ticket
+        rows. Call again with feature_id to get that feature's ticket rows, or
+        detail=true for rows across the board. Narrowing by status,
+        awaiting_role, priority_min, blocked_only or unassigned_only also
+        returns rows.
         """
         arguments = {
             "project_id": project_id,
@@ -469,6 +477,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             "awaiting_role": awaiting_role,
             "unassigned_only": unassigned_only,
             "cursor": cursor,
+            "detail": detail,
         }
         return invoke(
             "work.discover",

@@ -47,7 +47,9 @@ being developed, tested or integrated; preserve its artifacts. A ticket is
 `DONE` only after a controlled merge or Git-verified external landing. Code on
 a non-default branch is available work, never delivered behavior.
 
-Use discovery to find a focused feature or ticket; it is not a board dump.
+Use discovery to find a focused feature or ticket; it is not a board dump. Your
+broad `work.discover` returns one row per feature with complete status and
+awaiting counts; call it again with `feature_id` for that feature's ticket rows.
 Feature context is a rollup. Resolve one ticket and older history only when the
 decision requires it. Record concise, evidence-backed Planner decisions with
 the affected ticket/SHA, reason and next owner.

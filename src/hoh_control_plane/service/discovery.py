@@ -29,6 +29,16 @@ from hoh_control_plane.service._common import (
 )
 
 
+# One ticket-level predicate, used as a filter by the row view and as a column
+# by the rollup. Written once so the two views can never disagree about what
+# "waiting on a dependency" means.
+_DEPENDENCY_UNMET = """NOT EXISTS (
+                        SELECT 1 FROM ticket_dependencies d
+                        JOIN tickets dependency ON dependency.ticket_id = d.depends_on_ticket_id
+                        WHERE d.ticket_id = t.ticket_id AND dependency.status != 'DONE'
+                    )"""
+
+
 class DiscoveryMixin:
     """Role-scoped work discovery, dispatch queue and agent presence."""
 
@@ -38,6 +48,18 @@ class DiscoveryMixin:
         Role.DEVELOPER: (TicketStatus.READY, TicketStatus.REWORK),
         Role.QA: (TicketStatus.QA_READY,),
         Role.INTEGRATOR: (TicketStatus.VERIFIED, TicketStatus.MERGE_READY),
+    }
+
+    _AWAITED_BY_STATUS: dict[TicketStatus, Role | None] = {
+        TicketStatus.BACKLOG: Role.PLANNER,
+        TicketStatus.BLOCKED: Role.PLANNER,
+        TicketStatus.READY: Role.DEVELOPER,
+        TicketStatus.REWORK: Role.DEVELOPER,
+        TicketStatus.DEV_IN_PROGRESS: Role.DEVELOPER,
+        TicketStatus.QA_READY: Role.QA,
+        TicketStatus.QA_IN_PROGRESS: Role.QA,
+        TicketStatus.VERIFIED: Role.INTEGRATOR,
+        TicketStatus.MERGE_READY: Role.INTEGRATOR,
     }
 
     @classmethod
@@ -103,6 +125,7 @@ class DiscoveryMixin:
         awaiting_role: str | None = None,
         unassigned_only: bool = False,
         cursor: str | None = None,
+        detail: bool | None = None,
     ) -> dict[str, Any]:
         """List role-appropriate work as bounded metadata plus typed references.
 
@@ -111,10 +134,31 @@ class DiscoveryMixin:
         ticket bodies. The objective, acceptance criteria, preservation
         constraints, write scope and blocked reason live behind
         ticket.get_context, which the caller resolves for the one ticket it picks.
+
+        A Planner asking the broad question gets one row per feature with
+        complete status counts and no ticket rows, because "which feature needs
+        me" is answered by counts and the ticket rows are what it pays for. Any
+        narrowing argument, or detail=True, returns the ticket rows instead. An
+        execution role always gets rows: its question is which ticket to claim.
         """
         require_project(actor, project_id)
         limit = min(max(limit, 1), 100)
+        if detail is not None and not isinstance(detail, bool):
+            raise ValidationError("detail must be a boolean")
         selected_statuses = self._discovery_statuses(status, awaiting_role)
+        narrowed = any(
+            value not in (None, False)
+            for value in (
+                feature_id, status, awaiting_role, priority_min, blocked_only,
+                unassigned_only, cursor,
+            )
+        )
+        # A narrowing argument is itself the request for rows: a Planner that
+        # named a feature, a status or a role has already chosen where to look.
+        rollup = (
+            actor.role in {Role.PLANNER, Role.ADMIN}
+            and (detail is False or (detail is None and not narrowed))
+        )
         if priority_min is not None and not isinstance(priority_min, bool):
             self._priority(priority_min)
         elif priority_min is not None:
@@ -128,11 +172,18 @@ class DiscoveryMixin:
             )
             parameters: list[Any] = [project_id]
             where = ["f.project_id = ?"]
-            # Retired work stays readable through ticket context, never through
-            # a discovery surface that exists to hand out actionable work.
-            closed = sorted(status.value for status in CLOSED_TICKET_STATUSES)
-            where.append(f"t.status NOT IN ({', '.join('?' for _ in closed)})")
-            parameters.extend(closed)
+            # Retired and delivered work stays readable through ticket context,
+            # never through a discovery surface that exists to hand out
+            # actionable work. DONE is excluded for the same reason CANCELLED is:
+            # there is nothing left to look at. A caller that genuinely wants a
+            # finished ticket asks for it by status, and then it is not hidden.
+            finished = {status.value for status in CLOSED_TICKET_STATUSES}
+            finished.add(TicketStatus.DONE.value)
+            finished -= set(selected_statuses or ())
+            if finished:
+                excluded = sorted(finished)
+                where.append(f"t.status NOT IN ({', '.join('?' for _ in excluded)})")
+                parameters.extend(excluded)
             # required_role describes the ticket's originating execution owner.
             # QA and Integrator routing is lifecycle-driven: a Developer ticket
             # remains required_role=developer after its candidate becomes
@@ -171,13 +222,15 @@ class DiscoveryMixin:
                     " AND l.expires_at > ?)"
                 )
                 parameters.append(_iso())
-            if dependency_ready:
-                where.append(
-                    """NOT EXISTS (
-                        SELECT 1 FROM ticket_dependencies d
-                        JOIN tickets dependency ON dependency.ticket_id = d.depends_on_ticket_id
-                        WHERE d.ticket_id = t.ticket_id AND dependency.status != 'DONE'
-                    )"""
+            if dependency_ready and not rollup:
+                where.append(_DEPENDENCY_UNMET)
+            if rollup:
+                # Aggregated in SQL rather than from the fetched page, so the
+                # counts are the whole board. The row query is capped at `limit`
+                # and paginates; a count that inherited that cap would quietly
+                # under-report the very backlog Planner is deciding from.
+                return self._feature_rollup(
+                    connection, actor, project, where, parameters, limit
                 )
             if keyset is not None:
                 # Keyset rather than OFFSET: a ticket inserted between pages must
@@ -296,6 +349,7 @@ class DiscoveryMixin:
                 "capabilities": self.capabilities(actor),
             },
             "project": project,
+            "view": "tickets",
             "features": list(grouped.values()),
             "next_cursor": self._encoded_cursor(last) if has_more and last else None,
         }
@@ -304,6 +358,134 @@ class DiscoveryMixin:
             # never mixed into, the tickets an execution role can claim.
             discovered["planning_jobs"] = self.discover_planner_jobs(actor, project_id)
         return discovered
+
+    _DEPENDENCY_UNMET_CASE = f"CASE WHEN {_DEPENDENCY_UNMET} THEN 0 ELSE 1 END"
+
+    def _feature_rollup(
+        self,
+        connection: Connection,
+        actor: Actor,
+        project: dict[str, Any],
+        where: list[str],
+        parameters: list[Any],
+        limit: int,
+    ) -> dict[str, Any]:
+        """One row per feature: complete counts, no ticket rows.
+
+        This is the Planner's board view. It answers "which feature is waiting
+        on which role" from counts, and hands back one typed reference per
+        feature, so the Planner spends its budget on the feature it then opens
+        rather than on every ticket it will not touch.
+
+        Counts are complete: the row view is capped at `limit` and paginates,
+        and a board total that inherited that cap would under-report the very
+        backlog the Planner is deciding from. Work waiting on an unfinished
+        dependency is counted in dependency_blocked_count rather than filtered
+        out, so a feature never looks finished because its remainder is blocked.
+        """
+        rows = connection.execute(
+            f"""
+            SELECT t.feature_id, t.status,
+                   {self._DEPENDENCY_UNMET_CASE} AS dependency_blocked,
+                   f.title AS feature_title, f.status AS feature_status,
+                   f.version AS feature_version, f.parent_feature_id,
+                   COUNT(*) AS ticket_count,
+                   MAX(t.priority) AS top_priority,
+                   MIN(t.created_at) AS oldest_created_at,
+                   MAX(t.updated_at) AS last_movement_at
+            FROM tickets t
+            JOIN features f ON f.feature_id = t.feature_id
+            WHERE {' AND '.join(where)}
+            GROUP BY t.feature_id, t.status, dependency_blocked
+            """,
+            parameters,
+        ).fetchall()
+
+        features: dict[str, dict[str, Any]] = {}
+        for raw in rows:
+            row = _row(raw)
+            assert row is not None
+            feature = features.setdefault(
+                row["feature_id"],
+                {
+                    "feature_id": row["feature_id"],
+                    "title": row["feature_title"],
+                    "status": row["feature_status"],
+                    "parent_feature_id": row["parent_feature_id"],
+                    "context_ref": (
+                        f"ctx:feature:{row['feature_id']}:v{row['feature_version']}"
+                    ),
+                    "open_ticket_count": 0,
+                    "blocked_ticket_count": 0,
+                    "dependency_blocked_count": 0,
+                    "top_priority": 0,
+                    "oldest_created_at": row["oldest_created_at"],
+                    "last_movement_at": row["last_movement_at"],
+                    "ticket_counts": {},
+                    "awaiting": {},
+                },
+            )
+            count = int(row["ticket_count"])
+            waiting_on_dependency = bool(row["dependency_blocked"])
+            feature["open_ticket_count"] += count
+            counts = feature["ticket_counts"]
+            counts[row["status"]] = counts.get(row["status"], 0) + count
+            if row["status"] == TicketStatus.BLOCKED.value:
+                feature["blocked_ticket_count"] += count
+            feature["top_priority"] = max(feature["top_priority"], int(row["top_priority"]))
+            feature["oldest_created_at"] = min(
+                feature["oldest_created_at"], row["oldest_created_at"]
+            )
+            feature["last_movement_at"] = max(
+                feature["last_movement_at"], row["last_movement_at"]
+            )
+            if waiting_on_dependency:
+                # Counted, never hidden, but not attributed to a role: nobody can
+                # claim it yet, so reading it as an idle Developer would be wrong.
+                feature["dependency_blocked_count"] += count
+                continue
+            awaited = self._AWAITED_BY_STATUS.get(TicketStatus(row["status"]))
+            if awaited is not None:
+                key = awaited.value
+                feature["awaiting"][key] = feature["awaiting"].get(key, 0) + count
+
+        ordered = sorted(
+            features.values(),
+            key=lambda item: (-item["top_priority"], item["feature_id"]),
+        )
+        truncated = len(ordered) > limit
+        return {
+            "agent": {
+                "agent_id": actor.agent_id,
+                "role": actor.role.value,
+                "capabilities": self.capabilities(actor),
+            },
+            "project": project,
+            "view": "feature_rollup",
+            "features": ordered[:limit],
+            "feature_count": len(ordered),
+            "open_ticket_count": sum(item["open_ticket_count"] for item in ordered),
+            "dependency_blocked_count": sum(
+                item["dependency_blocked_count"] for item in ordered
+            ),
+            "truncated": truncated,
+            "next_cursor": None,
+            # Planning decisions are the other half of the Planner's cycle, and
+            # it reads them here. A board view that dropped them would make the
+            # default call the one that hides the work Planner must do first.
+            "planning_jobs": self.discover_planner_jobs(actor, project["project_id"]),
+            "detail_call": {
+                "tool": "work.discover",
+                "arguments": {
+                    "project_id": project["project_id"],
+                    "feature_id": "<feature_id from this list>",
+                },
+                "note": (
+                    "resolve one feature's ticket rows, or pass detail=true for "
+                    "rows across the board"
+                ),
+            },
+        }
 
     def capabilities(self, actor: Actor) -> list[str]:
         common = [

@@ -347,7 +347,8 @@ def test_retired_work_leaves_discovery_but_the_board_keeps_its_history(
         actors["planner"], ticket["ticket_id"], ticket["version"], "Obsolete."
     )
     developer_view = service.discover_work(actors["developer"], "project-1")
-    planner_view = service.discover_work(actors["planner"], "project-1")
+    planner_view = service.discover_work(actors["planner"], "project-1", detail=True)
+    planner_rollup = service.discover_work(actors["planner"], "project-1")
     board = service.board("project-1")
 
     discovered = {
@@ -357,6 +358,11 @@ def test_retired_work_leaves_discovery_but_the_board_keeps_its_history(
         for found in feature["tickets"]
     }
     assert ticket["ticket_id"] not in discovered
+    # Nor counted: a retired ticket inflating a feature's remaining work would
+    # be the same defect one surface deeper.
+    assert not any(
+        "CANCELLED" in feature["ticket_counts"] for feature in planner_rollup["features"]
+    )
     assert ticket["ticket_id"] in {
         item["ticket_id"] for item in board["columns"]["CANCELLED"]
     }

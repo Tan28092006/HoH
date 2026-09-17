@@ -187,7 +187,7 @@ def test_unknown_or_malformed_references_are_refused_not_guessed(service, actors
 def test_planner_discovery_rows_omit_the_constant_recommended_call(
     service, actors, seeded
 ) -> None:
-    planner = service.discover_work(actors["planner"], "project-1")
+    planner = service.discover_work(actors["planner"], "project-1", detail=True)
     developer = service.discover_work(actors["developer"], "project-1")
 
     planner_rows = [t for f in planner["features"] for t in f["tickets"]]

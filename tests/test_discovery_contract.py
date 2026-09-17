@@ -52,7 +52,7 @@ def test_discovery_returns_metadata_and_refs_not_ticket_bodies(
     """The Planner payload is the worst case: unnarrowed by required_role."""
     _populate(service, actors, seeded)
 
-    discovered = service.discover_work(actors["planner"], "project-1")
+    discovered = service.discover_work(actors["planner"], "project-1", detail=True)
 
     payload = json.dumps(discovered)
     for field in BODY_FIELDS:
@@ -78,7 +78,7 @@ def test_discovery_stays_small_next_to_the_full_ticket_context(
     _populate(service, actors, seeded)
     planner = actors["planner"]
 
-    discovered = service.discover_work(planner, "project-1")
+    discovered = service.discover_work(planner, "project-1", detail=True)
 
     refs = [t["ticket_ref"] for f in discovered["features"] for t in f["tickets"]]
     one_packet = service.get_ticket_context(planner, refs[0])
@@ -148,7 +148,9 @@ def test_cursor_pages_every_ticket_exactly_once_while_rows_are_inserted(
     pages = 0
 
     while True:
-        page = service.discover_work(planner, "project-1", limit=3, cursor=cursor)
+        page = service.discover_work(
+            planner, "project-1", limit=3, cursor=cursor, detail=True
+        )
         seen.extend(t["ticket_id"] for f in page["features"] for t in f["tickets"])
         cursor = page["next_cursor"]
         pages += 1
@@ -169,7 +171,7 @@ def test_cursor_pages_every_ticket_exactly_once_while_rows_are_inserted(
             break
 
     assert len(seen) == len(set(seen)), "cursor paging returned a duplicate"
-    every = service.discover_work(planner, "project-1", limit=100)
+    every = service.discover_work(planner, "project-1", limit=100, detail=True)
     original = {t["ticket_id"] for f in every["features"] for t in f["tickets"]}
     assert original - {"GEN-LATE"} <= set(seen)
 

@@ -1,6 +1,6 @@
 # Context distribution under long-running operation
 
-Reviewed at 0.3.20 and updated at 0.3.21 against the live database (3 projects, 22 open tickets) and
+Reviewed at 0.3.20 and updated through 0.3.22 against the live database (3 projects, 22 open tickets) and
 the service code. The question: when one role agent works for hours or days,
 does HoH still hand it less, and better, context than a single agent holding
 the whole project in chat would carry?
@@ -15,7 +15,7 @@ context only grows. HoH replaces that with one bounded packet per read:
 | --- | ---: |
 | Developer packet, QA_READY ticket with 5-scenario contract, 27 changed paths, 5 decisions | 3,603 |
 | Same ticket, BACKLOG state, no history | 2,300–2,700 |
-| Planner discovery, 13 features / 60 tickets | 5,232 |
+| Planner board rollup, 14 features | 1,372 |
 | Execution-role discovery | 250–860 |
 | Role card + common card | ~1,000 words |
 
@@ -27,9 +27,9 @@ about 1,000 tokens before any history exists.
 
 ## Edge cases and their status
 
-Status: **enforced** (server refuses or corrects it today), **fixed in 0.3.20**
-or **0.3.21**, **proposed** (worth a ticket), **documented** (operator or Planner
-discipline).
+Status: **enforced** (server refuses or corrects it today), **fixed in 0.3.20**,
+**0.3.21** or **0.3.22**, **proposed** (worth a ticket), **documented**
+(operator or Planner discipline).
 
 ### Stale memory inside one long chat
 
@@ -67,9 +67,13 @@ fields keep the full value.
 Planner discovery has no token budget; it is bounded only by `limit` (50
 tickets) and paginated by cursor. On `hoh-control-plane` it was 6,726 tokens
 per cycle. **Fixed in 0.3.20** to 5,232 by dropping duplicated references and
-the constant recommended call. **Proposed:** a feature-rollup mode for Planner
-(features with counts and one reference, no ticket rows) as the default, with
-ticket rows on request per feature.
+the constant recommended call. **Fixed in 0.3.22** to 1,372: the broad Planner
+call returns one row per feature with complete counts and no ticket rows, and
+`DONE` tickets no longer appear on any discovery surface. Building the rollup is
+what exposed the second defect, because its counts disagreed with the database:
+`CLOSED_TICKET_STATUSES` never contained `DONE`, so 50 of 62 rows in that
+payload were delivered work. Rows are still available by `feature_id`, by any
+narrowing filter, or with `detail=true`.
 
 ### Contract size drives the packet floor
 

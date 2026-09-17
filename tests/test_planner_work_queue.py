@@ -245,6 +245,12 @@ def test_planner_discovery_separates_planning_jobs_from_executable_tickets(
     planner_view = service.discover_work(actors["planner"], "project-1")
     developer_view = service.discover_work(actors["developer"], "project-1")
 
+    planner_rollup = service.discover_work(actors["planner"], "project-1")
+    assert len(planner_rollup["planning_jobs"]) == 1, (
+        "the default Planner call must still surface the planning queue"
+    )
+
+    planner_view = service.discover_work(actors["planner"], "project-1", detail=True)
     planned_ticket_ids = {
         ticket["ticket_id"]
         for feature in planner_view["features"]
