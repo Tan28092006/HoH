@@ -1,6 +1,6 @@
 # Context distribution under long-running operation
 
-Reviewed at 0.3.20 against the live database (3 projects, 22 open tickets) and
+Reviewed at 0.3.20 and updated at 0.3.21 against the live database (3 projects, 22 open tickets) and
 the service code. The question: when one role agent works for hours or days,
 does HoH still hand it less, and better, context than a single agent holding
 the whole project in chat would carry?
@@ -27,8 +27,9 @@ about 1,000 tokens before any history exists.
 
 ## Edge cases and their status
 
-Status: **enforced** (server refuses or corrects it today), **fixed in 0.3.20**,
-**proposed** (worth a ticket), **documented** (operator or Planner discipline).
+Status: **enforced** (server refuses or corrects it today), **fixed in 0.3.20**
+or **0.3.21**, **proposed** (worth a ticket), **documented** (operator or Planner
+discipline).
 
 ### Stale memory inside one long chat
 
@@ -37,11 +38,11 @@ objectives. The model may act on the wrong one.
 - Writes that carry `context_snapshot_id` are refused when planning decisions,
   repository state, barrier, retirement, ticket/feature version, candidate or
   dependencies moved since that read. **Enforced.**
-- The snapshot is optional. A write without it bypasses the freshness check
-  entirely; only `expected_version` remains. **Proposed:** require a snapshot
-  on `dev.submit_candidate`, `qa.submit_verdict` and
-  `integrator.merge_candidate`, or return `freshness: "unverified"` and audit
-  it, so the card's "refresh before submit" becomes observable.
+- **Fixed in 0.3.21:** `dev.submit_candidate`, `qa.submit_verdict` and
+  `integrator.merge_candidate` require `context_snapshot_id` in their schema, so
+  the freshness check runs on every consequential write. `work.claim` and the
+  service layer keep it optional, because an internal worker has no packet to
+  quote.
 
 ### Citations that nothing could resolve
 
@@ -74,18 +75,23 @@ ticket rows on request per feature.
 
 Validation contract items may be 2,000 characters (criterion) plus 4,000
 (expected observation). Because `ticket` is protected, an oversized contract
-blows every packet for the ticket's whole life. **Proposed:** tighten bounds
-(600/600) for new contracts and report `estimated_tokens` of the ticket section
-back to the Planner at `configure_validation_contract`.
+blows every packet for the ticket's whole life. **Fixed in 0.3.21:** 600
+characters per criterion and per expected observation, 200 per scenario ref, and
+1,200 estimated tokens for the whole contract; the refusal names the measured
+size and `configure_validation_contract` returns `contract_estimated_tokens`. No
+open ticket on the live database is affected: the largest contract is 1,031
+tokens with a 372-character criterion.
 
 ### Reconciliation barrier while Planner is away
 
 Any observed commit opens a barrier that freezes offers, claims, submission and
 merge until Planner audits every open ticket. This is correct, and it means a
 closed Planner chat stalls the whole plant. **Enforced** by design.
-**Proposed:** execution roles waiting in `work.wait_for_event` should receive a
-`planning_barrier_pending` event with the barrier's age, and the dashboard
-should show it, so nobody sits blind and the operator knows to resume Planner.
+**Fixed in 0.3.21:** a waiting role receives `planning_barrier_pending` at 30
+minutes, 2 hours, 8 hours and 24 hours, carrying the barrier's age and telling a
+non-Planner role to ask the operator to resume a Planner. `work.inbox` and the
+dashboard report each barrier's age and the oldest. Packets carry `opened_at`
+only, so snapshot stability is preserved.
 
 ### Lease expiry with a live local process
 
@@ -107,7 +113,9 @@ salt, so two HoH installations with the same profile names would name branches
 identically. Sequential attempt numbers make that collision more likely than
 random ones did. The server refuses to reuse an existing branch or worktree
 path, so the failure is loud, not silent. **Enforced (fails safe).**
-**Proposed:** salt new profile identities with the installation id.
+**Fixed in 0.3.21:** a new profile identity is salted with the installation id.
+An already-installed profile keeps its legacy id when a credential or presence
+row for it exists, so its leases, worktrees and branches stay its own.
 
 ### Failure reports during rework
 

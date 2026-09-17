@@ -80,6 +80,13 @@ MAX_TOKEN_BUDGET = 200_000
 DEFAULT_TOKEN_BUDGET = 4_000
 _CHECKPOINT_CHARS = 200
 
+# A validation contract lives in the protected ticket section of every packet
+# for the ticket's whole life, so it is bounded at write time rather than
+# compacted at read time. Six scenarios of typical length fit; a contract that
+# does not fit is a ticket that should be split.
+_CONTRACT_TEXT_CHARS = 600
+_CONTRACT_TOKEN_BUDGET = 1_200
+
 # Retention policy for idempotency records: a replay is honored for this long,
 # after which purge_expired_idempotency_records may delete the row and the same
 # key behaves like a fresh request. Long enough to outlive any worker restart

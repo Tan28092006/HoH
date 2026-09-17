@@ -49,7 +49,9 @@ recheck every lesson against current code and specification.
 ## Hard stops
 
 `repository_reconciliation_required` freezes new offers, claims, candidate
-submission and merges until Planner resolves the observation. Preserve the
+submission and merges until Planner resolves the observation. A
+`planning_barrier_pending` event carries the barrier's age; if it keeps growing,
+no Planner chat is open and the operator must resume one. Preserve the
 artifact and stop rather than rebasing, reinterpreting scope or bypassing the
 barrier. A pending/applied retirement revokes execution authority while keeping
 worktree, candidate and evidence for audit.

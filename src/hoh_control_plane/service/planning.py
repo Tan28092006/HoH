@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from hoh_control_plane.service._common import (
+    _estimate_tokens,
+    _CONTRACT_TOKEN_BUDGET,
+    _CONTRACT_TEXT_CHARS,
     Actor,
     Any,
     CLOSED_TICKET_STATUSES,
@@ -774,8 +777,25 @@ class PlanningMixin:
             commits = value.pop("observed_commits")
             value["observed_commit_count"] = len(commits)
             value["commit_refs"] = [item.get("commit") for item in commits[:20]]
+            value["opened_at"] = value.pop("created_at", None)
             pending.append(value)
         return {"repository_reconciliation_required": bool(pending), "pending": pending}
+
+    @staticmethod
+    def _with_barrier_age(state: dict[str, Any]) -> dict[str, Any]:
+        """Annotate a barrier with how long it has been open.
+
+        Only for inbox and dashboard reads: a ticket packet is snapshotted by
+        content, and a clock reading inside it would make every read distinct.
+        """
+        from hoh_control_plane.event_wait import barrier_age_seconds
+
+        pending = [
+            {**item, "age_seconds": barrier_age_seconds(item.get("opened_at"))}
+            for item in state.get("pending") or []
+        ]
+        oldest = max((item["age_seconds"] for item in pending), default=0)
+        return {**state, "pending": pending, "oldest_age_seconds": oldest}
 
     def _require_repository_reconciled(
         self, connection: Connection, project_id: str
@@ -1010,9 +1030,11 @@ class PlanningMixin:
             expected = str(item.get("expected_observation", "")).strip()
             evidence_types = item.get("required_evidence_types") or []
             required_capabilities = item.get("required_capabilities") or []
-            self._bounded_text(criterion, f"validation_contract[{index}].criterion", 2000)
-            self._bounded_text(scenario_ref, f"validation_contract[{index}].scenario_ref", 1000)
-            self._bounded_text(expected, f"validation_contract[{index}].expected_observation", 4000)
+            # The ticket section is protected from compaction, so every character
+            # here is carried by every packet for the ticket's whole life.
+            self._bounded_text(criterion, f"validation_contract[{index}].criterion", _CONTRACT_TEXT_CHARS)
+            self._bounded_text(scenario_ref, f"validation_contract[{index}].scenario_ref", 200)
+            self._bounded_text(expected, f"validation_contract[{index}].expected_observation", _CONTRACT_TEXT_CHARS)
             if method not in allowed_methods:
                 raise ValidationError("validation contract method must be black_box, white_box or mixed")
             self._bounded_list(
@@ -1039,6 +1061,15 @@ class PlanningMixin:
                 "validation contract must cover every acceptance criterion exactly once",
                 {"missing_criteria": sorted(set(acceptance_criteria) - set(seen)),
                  "unknown_criteria": sorted(set(seen) - set(acceptance_criteria))},
+            )
+        estimated = _estimate_tokens(normalized)
+        if estimated > _CONTRACT_TOKEN_BUDGET:
+            raise ValidationError(
+                f"validation contract is about {estimated} tokens; the ticket section is "
+                f"never compacted, so keep the whole contract at or below "
+                f"{_CONTRACT_TOKEN_BUDGET} tokens by shortening criteria and observations "
+                "or splitting the ticket",
+                {"contract_estimated_tokens": estimated, "budget": _CONTRACT_TOKEN_BUDGET},
             )
         return normalized
 
@@ -1100,7 +1131,11 @@ class PlanningMixin:
                 "ticket", ticket_id, next_version,
                 {"scenario_count": len(normalized), "reason": reason},
             )
-            return {"ticket": self._ticket(connection, ticket_id), "context_entry_id": entry_id}
+            return {
+                "ticket": self._ticket(connection, ticket_id),
+                "context_entry_id": entry_id,
+                "contract_estimated_tokens": _estimate_tokens(normalized),
+            }
 
     @staticmethod
     def _assert_quality_ready(project: dict[str, Any], ticket: dict[str, Any]) -> None:

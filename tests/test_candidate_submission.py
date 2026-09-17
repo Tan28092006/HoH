@@ -144,6 +144,9 @@ async def test_developer_mcp_acknowledges_candidate_submission_before_worker_val
             "base_commit": prepared["base_commit"],
             "branch_ref": prepared["branch_ref"],
             "developer_claims": ["Ready."],
+            "context_snapshot_id": service.get_ticket_context(
+                actors["developer"], ticket["ticket_id"]
+            )["context_snapshot_id"],
         },
     )
 

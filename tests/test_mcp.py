@@ -483,6 +483,9 @@ async def test_developer_and_qa_mcp_flow_records_test_run_and_verdict(tmp_path) 
             "base_commit": "b" * 40,
             "branch_ref": "agent/dev-01/DEV-102",
             "developer_claims": ["Behavior is ready for independent QA."],
+            "context_snapshot_id": service.get_ticket_context(
+                developer, "DEV-102"
+            )["context_snapshot_id"],
         },
     )
     _, qa_claim = await qa_server.call_tool(
@@ -517,6 +520,9 @@ async def test_developer_and_qa_mcp_flow_records_test_run_and_verdict(tmp_path) 
                     "storage_ref": "evidence://qa/DEV-102/run-1.json",
                 }],
             }],
+            "context_snapshot_id": service.get_ticket_context(
+                qa, "DEV-102"
+            )["context_snapshot_id"],
         },
     )
 
@@ -761,6 +767,9 @@ async def test_a_qa_failure_on_an_upgraded_database_is_not_reported_as_a_state_c
                     ],
                 }
             ],
+            "context_snapshot_id": service.get_ticket_context(
+                actors["qa"], ticket["ticket_id"]
+            )["context_snapshot_id"],
         },
     )
 
@@ -934,6 +943,9 @@ async def test_planner_mcp_recovers_a_blocked_candidate_for_a_fresh_qa_claim(
             "base_commit": "b" * 40,
             "branch_ref": f"agent/{actors['developer'].agent_id}/{ticket['ticket_id']}",
             "developer_claims": ["Ready for independent QA."],
+            "context_snapshot_id": service.get_ticket_context(
+                actors["developer"], ticket["ticket_id"]
+            )["context_snapshot_id"],
         },
     )
     candidate_id = candidate["candidate"]["candidate_id"]
@@ -965,6 +977,9 @@ async def test_planner_mcp_recovers_a_blocked_candidate_for_a_fresh_qa_claim(
                 }
                 for criterion in ticket["acceptance_criteria"]
             ],
+            "context_snapshot_id": service.get_ticket_context(
+                actors["qa"], ticket["ticket_id"]
+            )["context_snapshot_id"],
         },
     )
     blocked = rejected

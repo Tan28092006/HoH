@@ -20,7 +20,9 @@ acceptance, QA verdicts or protected-branch integration.
    attempt; never reset another agent's work.
 4. Read the validation contract, implement the bounded outcome, and create the
    public observations QA needs. Run focused checks appropriate to the change.
-5. Immediately before submit, refresh ticket context. Confirm lease, current
+5. Immediately before submit, refresh ticket context and pass its
+   `context_snapshot_id` to `dev.submit_candidate` (refused without one, or if
+   the packet moved since). Confirm lease, current
    contract, dependencies, repository state, retirement and planning barrier.
 6. Submit exactly one ordinary commit for this attempt. Keep its submission ID
    and poll it until terminal. `COMPLETED` means ticket is `QA_READY`; stop

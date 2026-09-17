@@ -387,6 +387,9 @@ async def test_integrator_mcp_acknowledges_merge_before_worker_runs(
             "ticket_id": ticket["ticket_id"],
             "lease_id": integration["lease"]["lease_id"],
             "expected_version": integration["ticket"]["version"],
+            "context_snapshot_id": service.get_ticket_context(
+                actors["integrator"], ticket["ticket_id"]
+            )["context_snapshot_id"],
         },
     )
 
@@ -441,6 +444,9 @@ async def test_retried_mcp_merge_request_spawns_at_most_one_worker(
         "ticket_id": ticket["ticket_id"],
         "lease_id": integration["lease"]["lease_id"],
         "expected_version": integration["ticket"]["version"],
+        "context_snapshot_id": service.get_ticket_context(
+            actors["integrator"], ticket["ticket_id"]
+        )["context_snapshot_id"],
     }
 
     _, first_result = await server.call_tool("integrator.merge_candidate", arguments)
@@ -477,6 +483,9 @@ async def test_a_refused_merge_request_never_spawns_a_worker(
                 "ticket_id": ticket["ticket_id"],
                 "lease_id": integration["lease"]["lease_id"],
                 "expected_version": integration["ticket"]["version"] + 1,
+                "context_snapshot_id": service.get_ticket_context(
+                    actors["integrator"], ticket["ticket_id"]
+                )["context_snapshot_id"],
             },
         )
 

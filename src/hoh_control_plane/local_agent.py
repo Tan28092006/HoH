@@ -21,11 +21,45 @@ from hoh_control_plane.domain import Actor, Role, NotFoundError
 ROLES = ('planner', 'developer', 'qa', 'integrator')
 
 
-def profile_actor(project, role, instance):
+def profile_actor(project, role, instance, salt=None):
+    """Derive a profile identity.
+
+    With a salt (the installation id) the identity is unique to this HoH
+    installation, so two machines that share a Git remote and happen to use the
+    same project, role and instance names never produce the same branch or
+    worktree names. Without a salt the legacy derivation is kept, because
+    identities registered before the salt existed must keep resolving.
+    """
     if role not in ROLES or not re.fullmatch(r'[A-Za-z0-9._-]{1,80}', project) or not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', instance):
         raise ValueError('Invalid project, role or instance')
-    digest = hashlib.sha256((project + ':' + role + ':' + instance).encode()).hexdigest()[:16]
+    if salt:
+        digest = hashlib.sha256((str(salt) + ':' + project + ':' + role + ':' + instance).encode()).hexdigest()[:8]
+    else:
+        digest = hashlib.sha256((project + ':' + role + ':' + instance).encode()).hexdigest()[:16]
     return Actor(f'local-{role}-{digest}', Role(role), frozenset({project}))
+
+
+def installed_profile_actor(root, config, project, role, instance):
+    """The identity a profile has on this installation.
+
+    A profile registered before identities were salted keeps its legacy id, so
+    an existing chat's credential, leases and worktrees stay its own; a new
+    profile is salted with the installation id.
+    """
+    from hoh_control_plane.auth import credentials_from_environment
+    legacy = profile_actor(project, role, instance)
+    path = Path(root) / 'config/agent-credentials.json'
+    if path.exists():
+        for credential in credentials_from_environment(path.read_text(encoding='utf-8')):
+            if credential.actor == legacy:
+                return legacy
+    database = (config or {}).get('database_path')
+    if database:
+        with closing(sqlite3.connect(Path(database).resolve().as_uri() + '?mode=ro', uri=True)) as db:
+            if db.execute('SELECT 1 FROM agent_presence WHERE agent_id=?', (legacy.agent_id,)).fetchone():
+                return legacy
+    salt = (config or {}).get('installation_id')
+    return profile_actor(project, role, instance, salt) if salt else legacy
 
 
 def checked_project(root, project):
@@ -44,7 +78,7 @@ def install_profile(root, project, role, instance, client, home, upgrade_skills=
     config = checked_project(root, project)
     if transport not in {'stdio', 'shared-http'}:
         raise ValueError('Unknown local MCP transport')
-    actor = profile_actor(project, role, instance)
+    actor = installed_profile_actor(root, config, project, role, instance)
     server = 'hoh-' + actor.agent_id
     command = str(root / '.venv/Scripts/python.exe')
     arguments = ['-m', 'hoh_control_plane.local_agent', 'serve', '--root', str(root),
@@ -118,7 +152,7 @@ def _make_prompts_0_3_18_legacy(root, project, instance='primary'):
         'integrator': 'Chỉ nhận candidate đã QA-verified/merge-ready, kiểm tra đúng SHA, base, validation-contract evidence bundle, planning_barrier, retirement và hold. Repository reconciliation đang mở thì không claim/queue/merge. Dùng queued integrator.merge_candidate một lần rồi poll merge_job_id; xác minh trạng thái DONE và mainline SHA. Merge FAILED sẽ tự block và mở Planner job; lỗi durable khác chưa có planner_job thì gọi work.report_failure đúng một lần trước wait. Nếu Planner retire trong lúc merge thì dừng và để HoH reconcile SHA thật trên main. Mỗi merge commit thành công tạo durable delivery_completed report và mở ngay commit reconciliation; execution iteration kế tiếp chỉ mở sau khi Planner đánh giá artifact. Với commit đồng đội đã nằm trên default branch, chỉ record_external_landing sau khi Git xác minh; record này không tạo QA verdict. Nếu drift/conflict hoặc SHA đổi, chuyển về luồng rework/QA; không force-push, merge tay hay sửa DB.'}
     prompts = {}
     for role in ROLES:
-        actor = profile_actor(project, role, instance)
+        actor = installed_profile_actor(root, checked_project(Path(root), project), project, role, instance)
         prompts[role] = f'''Thiết lập và làm việc với HoH trên máy Windows này.
 Vai trò: {role}. Project ID bắt buộc: {project}. Instance: {instance}.
 Tôi cho phép cài/cập nhật đúng skill HoH base + {role} và thêm MCP profile này; sao lưu skill HoH cũ, giữ nguyên mọi cấu hình khác.
@@ -167,7 +201,7 @@ def make_prompts(root, project, instance='primary'):
     }
     prompts = {}
     for role in ROLES:
-        actor = profile_actor(project, role, instance)
+        actor = installed_profile_actor(root, checked_project(Path(root), project), project, role, instance)
         prompts[role] = f'''Set up HoH for this Windows chat.
 Role: {role}; project: {project}; instance: {instance}.
 
@@ -213,7 +247,7 @@ def main():
     args = parser.parse_args()
     root = args.root.resolve()
     config = checked_project(root, args.project)
-    actor = profile_actor(args.project, args.role, args.instance)
+    actor = installed_profile_actor(root, config, args.project, args.role, args.instance)
     if args.action == 'setup':
         print(json.dumps(install_profile(root, args.project, args.role, args.instance, args.client, args.home, args.upgrade_skills, args.transport)))
         return

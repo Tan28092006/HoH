@@ -655,7 +655,9 @@ class DiscoveryMixin:
                 assert lease is not None
                 lease["ticket"] = self._ticket(connection, lease["ticket_id"])
                 active_leases.append(lease)
-            planning_barrier = self._repository_reconciliation_state(connection, project_id)
+            planning_barrier = self._with_barrier_age(
+                self._repository_reconciliation_state(connection, project_id)
+            )
             capability_blockers = (
                 self._qa_queue_capability_blockers(
                     connection, project_id, presence
@@ -870,7 +872,9 @@ class DiscoveryMixin:
                 assert queue is not None
                 queue["ticket"] = self._ticket(connection, queue["ticket_id"])
                 queues.append(queue)
-            planning_barrier = self._repository_reconciliation_state(connection, project_id)
+            planning_barrier = self._with_barrier_age(
+                self._repository_reconciliation_state(connection, project_id)
+            )
         # Bounded pointers only, so the existing read-only dashboard can show that
         # a Planner is being waited on without exposing the underlying evidence.
         interventions = [

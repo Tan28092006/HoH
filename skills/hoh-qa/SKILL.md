@@ -22,7 +22,8 @@ own equipment, or transfers evidence to another SHA.
    imports, environment and HEAD identify the frozen candidate.
 5. Execute every `validation_contract` scenario with claim → observe → assess.
    Attach the declared evidence types and record the result for every criterion.
-6. Submit a verdict only from evidence on this exact SHA. PASS requires every
+6. Submit a verdict only from evidence on this exact SHA, passing the
+   `context_snapshot_id` of a packet read after your claim (refused without one). PASS requires every
    mandatory contract/preservation condition; Developer claims are advisory.
    Keep the returned `evidence_bundle` as the durable iteration report.
 

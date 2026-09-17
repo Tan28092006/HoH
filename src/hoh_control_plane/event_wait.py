@@ -6,7 +6,7 @@ remain authoritative. A periodic server-side recovery read costs no model turns.
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 import hashlib
 import json
 import math
@@ -25,6 +25,10 @@ from hoh_control_plane.service._common import (
 )
 
 RECOVERY_SECONDS = 20
+# A pending barrier is announced once, then again each time it crosses one of
+# these ages, so a Planner that is away is chased and the roles it blocks are
+# told how long they have been waiting instead of sitting silent.
+BARRIER_ESCALATION_SECONDS = (1800, 7200, 28800, 86400)
 WAIT_PRESENCE_SECONDS = 90
 REPOSITORY_OBSERVE_SECONDS = 60
 _REPOSITORY_OBSERVE_LOCK = threading.Lock()
@@ -35,6 +39,15 @@ JOBS = {
     'qa': ('qa_test_jobs', 'test_run_id', Role.QA, 'qa.get_project_test_run'),
     'merge': ('merge_jobs', 'merge_job_id', Role.INTEGRATOR, 'integrator.get_merge_candidate'),
 }
+
+
+def barrier_age_seconds(opened_at):
+    """Whole seconds since a reconciliation was opened; 0 for an unparseable stamp."""
+    try:
+        opened = datetime.fromisoformat(str(opened_at).replace('Z', '+00:00'))
+    except (TypeError, ValueError):
+        return 0
+    return max(0, int((_now() - opened).total_seconds()))
 
 
 def notify_waiters(connection):
@@ -185,10 +198,14 @@ def _pending(service, actor, project, kind=None, identifier=None):
         ]
         if reconciliations:
             first = reconciliations[0]
+            age = barrier_age_seconds(first['created_at'])
+            level = sum(1 for threshold in BARRIER_ESCALATION_SECONDS if age >= threshold)
+            planner = actor.role == Role.PLANNER
             payload = {
                 'kind': (
-                    'repository_changed' if actor.role == Role.PLANNER
-                    else 'repository_reconciliation_required'
+                    'repository_changed' if planner
+                    else 'repository_reconciliation_required' if level == 0
+                    else 'planning_barrier_pending'
                 ),
                 'reconciliation_id': first['reconciliation_id'],
                 'context_ref': first['observation_ref'],
@@ -196,15 +213,29 @@ def _pending(service, actor, project, kind=None, identifier=None):
                 'commit_refs': [
                     item.get('commit') for item in first['observed_commits'][:20]
                 ],
+                'opened_at': first['created_at'],
+                'age_seconds': age,
+                'escalation_level': level,
+                'pending_count': len(reconciliations),
                 'next_action': (
                     'resolve the observation, audit every previously-open ticket, apply '
                     'lifecycle changes, then call planner.resolve_repository_reconciliation'
-                    if actor.role == Role.PLANNER else
+                    if planner else
                     'preserve the current lease/worktree and do not claim, submit or merge '
                     'until Planner resolves the repository reconciliation'
                 ),
             }
-            return [('repository-reconciliation:' + first['reconciliation_id'], payload)]
+            if level:
+                payload['escalation'] = 'barrier_stale'
+                payload['next_action'] = (
+                    f'this barrier has blocked execution for {age // 60} minutes; '
+                    + payload['next_action']
+                    + ('' if planner else '; if no Planner chat is open, ask the operator to resume one')
+                )
+            key = 'repository-reconciliation:' + first['reconciliation_id']
+            if level:
+                key += f':stale{level}'
+            return [(key, payload)]
         presence = db.execute('SELECT capacity FROM agent_presence WHERE agent_id=?', (actor.agent_id,)).fetchone()
         table = 'planner_job_leases' if actor.role == Role.PLANNER else 'leases'
         active = db.execute(f'SELECT count(*) AS n FROM {table} WHERE agent_id=? AND expires_at>?', (actor.agent_id, _iso())).fetchone()['n']

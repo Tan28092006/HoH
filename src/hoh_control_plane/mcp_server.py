@@ -1440,10 +1440,15 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             base_commit: str,
             branch_ref: str,
             developer_claims: list[str],
+            context_snapshot_id: str,
             idempotency_key: str | None = None,
-            context_snapshot_id: str | None = None,
         ) -> dict[str, Any]:
-            """Queue immutable candidate validation and return immediately for polling."""
+            """Queue immutable candidate validation and return immediately for polling.
+
+            context_snapshot_id must come from a ticket.get_context read made after
+            the claim; a submission decided from stale context is refused.
+            """
+            context_snapshot_id = _require_snapshot(context_snapshot_id, "dev.submit_candidate")
             arguments = {
                 "ticket_id": ticket_id,
                 "lease_id": lease_id,
@@ -1526,10 +1531,15 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             ticket_id: str,
             lease_id: str,
             expected_version: int,
+            context_snapshot_id: str,
             idempotency_key: str | None = None,
-            context_snapshot_id: str | None = None,
         ) -> dict[str, Any]:
-            """Queue a durable merge job and return its merge_job_id before Git runs."""
+            """Queue a durable merge job and return its merge_job_id before Git runs.
+
+            context_snapshot_id must come from a ticket.get_context read made after
+            the Integrator claim; a merge decided from stale context is refused.
+            """
+            context_snapshot_id = _require_snapshot(context_snapshot_id, "integrator.merge_candidate")
             arguments = {
                 "ticket_id": ticket_id,
                 "lease_id": lease_id,
@@ -1700,10 +1710,15 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             expected_version: int,
             verdict: str,
             findings: list[dict[str, Any]],
+            context_snapshot_id: str,
             idempotency_key: str | None = None,
-            context_snapshot_id: str | None = None,
         ) -> dict[str, Any]:
-            """Submit PASS or FAIL using evidence for every finding and acceptance criterion."""
+            """Submit PASS or FAIL using evidence for every finding and acceptance criterion.
+
+            context_snapshot_id must come from a ticket.get_context read made after
+            the QA claim; a verdict decided from stale context is refused.
+            """
+            context_snapshot_id = _require_snapshot(context_snapshot_id, "qa.submit_verdict")
             arguments = {
                 "ticket_id": ticket_id,
                 "lease_id": lease_id,
@@ -1765,6 +1780,22 @@ def _project_for_call(
         return None
     project_ids = sorted(project_id for project_id in actor.project_ids if project_id != "*")
     return project_ids[0] if len(project_ids) == 1 else None
+
+
+def _require_snapshot(context_snapshot_id: Any, tool_name: str) -> str:
+    """A consequential write must name the packet it was decided from.
+
+    The freshness check only runs against a snapshot the caller supplies, so an
+    omitted snapshot silently skipped it. Submission, verdict and merge are the
+    three writes whose staleness costs a whole iteration, so they refuse to run
+    without one rather than trusting that the packet was re-read.
+    """
+    if not isinstance(context_snapshot_id, str) or not context_snapshot_id.strip():
+        raise ValidationError(
+            f"{tool_name} requires context_snapshot_id: call ticket.get_context "
+            "immediately before this write and pass the context_snapshot_id it returns"
+        )
+    return context_snapshot_id.strip()
 
 
 def _strip_reference(reference: str, kind: str) -> str:
