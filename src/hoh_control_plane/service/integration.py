@@ -223,7 +223,7 @@ class IntegrationMixin:
                     VALUES (?, ?, ?, ?, 'integration_regression_failed', ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        _id("ctx"),
+                        _id(connection, "ctx"),
                         project_id,
                         ticket["feature_id"],
                         ticket_id,
@@ -289,7 +289,7 @@ class IntegrationMixin:
                     VALUES (?, ?, ?, ?, 'integration_base_drift', ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        _id("ctx"),
+                        _id(connection, "ctx"),
                         project_id,
                         ticket["feature_id"],
                         ticket_id,
@@ -601,7 +601,7 @@ class IntegrationMixin:
                 VALUES (?, ?, ?, ?, 'integration_landed_ungated', ?, ?, ?, ?, ?)
                 """,
                 (
-                    _id("ctx"), project_id, ticket["feature_id"], ticket_id, note,
+                    _id(connection, "ctx"), project_id, ticket["feature_id"], ticket_id, note,
                     landed_commit, actor.agent_id, actor.role.value, timestamp,
                 ),
             )
@@ -652,7 +652,7 @@ class IntegrationMixin:
         timestamp: str,
     ) -> dict[str, Any]:
         """Persist the gate run as durable candidate evidence before mainline is touched."""
-        test_run_id = _id("testrun")
+        test_run_id = _id(connection, "testrun")
         storage_ref, report_path, checksum = self.project_tests.write_report(
             candidate_id=candidate_id,
             test_run_id=test_run_id,
@@ -960,7 +960,7 @@ class IntegrationMixin:
                         "reused": True,
                     }
                 raise ConflictError("Ticket already has an active merge job")
-            merge_job_id = _id("merge_job")
+            merge_job_id = _id(connection, "merge_job")
             timestamp = _iso()
             connection.execute(
                 """INSERT INTO merge_jobs
@@ -1265,7 +1265,7 @@ class IntegrationMixin:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        _id("ctx"), job["project_id"], ticket["feature_id"], job["ticket_id"],
+                        _id(connection, "ctx"), job["project_id"], ticket["feature_id"], job["ticket_id"],
                         "integration_regression_failed" if regression_failure else "integration_base_drift",
                         reason, f"candidate:{job['candidate_id']}", mainline_commit,
                         actor.agent_id, actor.role.value, timestamp,
@@ -1398,7 +1398,7 @@ class IntegrationMixin:
                 TicketStatus.SUPERSEDED.value,
             }:
                 timestamp = _iso()
-                entry_id = _id("ctx")
+                entry_id = _id(connection, "ctx")
                 connection.execute(
                     """
                     INSERT INTO context_entries

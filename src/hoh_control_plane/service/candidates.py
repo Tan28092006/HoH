@@ -76,7 +76,7 @@ class CandidateMixin:
                 ):
                     return {"ticket": ticket, "submission": self._candidate_submission_job(connection, active["submission_id"])}
                 raise ConflictError("Ticket already has an active candidate submission")
-            submission_id = _id("candidate_job")
+            submission_id = _id(connection, "candidate_job")
             timestamp = _iso()
             connection.execute(
                 """INSERT INTO candidate_submission_jobs
@@ -209,7 +209,7 @@ class CandidateMixin:
                 raise ConflictError("Ticket changed while candidate validation ran")
             self._expect_version(ticket, job["expected_version"])
             self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
-            candidate_id = _id("cand")
+            candidate_id = _id(connection, "cand")
             timestamp = _iso()
             connection.execute("""INSERT INTO candidates
                 (candidate_id, ticket_id, base_commit, commit_sha, branch_ref, developer_claims, submitted_by, submitted_at, frozen_at)
@@ -356,7 +356,7 @@ class CandidateMixin:
                     "UPDATE worktrees SET last_verified_at = ? WHERE ticket_id = ?",
                     (_iso(), ticket_id),
                 )
-            candidate_id = _id("cand")
+            candidate_id = _id(connection, "cand")
             timestamp = _iso()
             connection.execute(
                 """

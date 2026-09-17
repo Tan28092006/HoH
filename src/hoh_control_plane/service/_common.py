@@ -10,6 +10,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+import secrets
 from uuid import uuid4
 
 from hoh_control_plane.domain import (
@@ -232,16 +233,34 @@ def _iso(value: datetime | None = None) -> str:
     return (value or _now()).isoformat().replace("+00:00", "Z")
 
 
-# 64 bits of the UUID rather than all 128. These identifiers are quoted in
-# decisions, evidence references and handoff prose far more often than they are
-# generated, so half the length is a real readability gain, while 2^64 keeps a
-# collision far below the point where the primary key would ever notice. Existing
-# longer identifiers stay valid: an id is opaque and is never parsed for length.
-_ID_HEX_CHARS = 16
+# Identifiers are a prefix plus a per-prefix counter: cand_0007, lease_0042.
+# They are quoted in packets, decisions, evidence references and tool calls far
+# more often than they are generated, and every quotation is paid for in agent
+# context. A 16-hex tail cost roughly ten tokens and was routinely mistyped by a
+# model copying it back; four digits cost one or two tokens and read as an
+# ordinal, so "the newer candidate" is visible from the id itself. The counter
+# lives in the database under the same write lock as the row it names, which is
+# why the caller passes its connection: uniqueness is a property of this store,
+# not of randomness. Older random identifiers stay valid; an id is opaque and is
+# never parsed for length. The counter widens past 9999 rather than wrapping.
+_ID_DIGITS = 4
 
 
-def _id(prefix: str) -> str:
-    return f"{prefix}_{uuid4().hex[:_ID_HEX_CHARS]}"
+def _id(connection: Any, prefix: str) -> str:
+    row = connection.execute(
+        """
+        INSERT INTO id_sequences (prefix, next_value) VALUES (?, 1)
+        ON CONFLICT(prefix) DO UPDATE SET next_value = id_sequences.next_value + 1
+        RETURNING next_value
+        """,
+        (prefix,),
+    ).fetchone()
+    return f"{prefix}_{int(row[0]):0{_ID_DIGITS}d}"
+
+
+def _file_token() -> str:
+    """A short random name for a file the store never indexes by identifier."""
+    return secrets.token_hex(4)
 
 
 def _serialize(payload: Any) -> str:
@@ -262,15 +281,24 @@ def _estimate_tokens(payload: Any) -> int:
     return len(_serialize(payload)) // 4
 
 
-def _snapshot_id(payload: dict[str, Any]) -> str:
-    """Identify a compiled packet by its content so equal state compiles equal."""
+def _snapshot_digest(payload: dict[str, Any]) -> str:
+    """Digest a compiled packet by its content so equal state compiles equal.
+
+    The digest is how a re-read of unchanged context finds the snapshot row it
+    already has; the identifier an agent quotes back is the row's short
+    counter name, allocated when the digest is first seen.
+    """
     material = {
         key: value
         for key, value in payload.items()
         if key not in {"context_snapshot_id", "generated_at"}
     }
-    digest = hashlib.sha256(_serialize(material).encode("utf-8")).hexdigest()
-    return f"ctxsnap_{digest[:32]}"
+    return hashlib.sha256(_serialize(material).encode("utf-8")).hexdigest()[:32]
+
+
+# Same width as a real identifier, so the envelope is measured before the
+# packet is fitted to its budget rather than appended afterwards.
+_SNAPSHOT_PLACEHOLDER = "ctxsnap_0000"
 
 
 def _checkpoint(text: str) -> str:

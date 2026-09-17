@@ -51,7 +51,7 @@ from hoh_control_plane.service._common import (
     _row,
     _safe_path_segment,
     _serialize,
-    _snapshot_id,
+    _snapshot_digest,
     _validated_budget,
     datetime,
     defaultdict,

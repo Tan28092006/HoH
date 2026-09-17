@@ -182,7 +182,7 @@ class QaMixin:
             if ticket["status"] != TicketStatus.QA_IN_PROGRESS.value:
                 raise ConflictError("Ticket is not in QA")
             self._require_active_lease(connection, actor, ticket_id, lease_id)
-            entry_id = _id("ctx")
+            entry_id = _id(connection, "ctx")
             connection.execute(
                 """
                 INSERT INTO context_entries
@@ -250,7 +250,7 @@ class QaMixin:
             candidate_commit = candidate["commit_sha"]
             # Queueing must return promptly. The detached worker re-verifies this
             # immutable path and commit before it executes the test command.
-            test_run_id = _id("testrun")
+            test_run_id = _id(connection, "testrun")
             worktree_path = str(self.git_worktrees.qa_path(test_run_id))
             timestamp = _iso()
             connection.execute(
@@ -495,7 +495,7 @@ class QaMixin:
                     """,
                     (timestamp, test_run_id),
                 )
-                entry_id = _id("ctx")
+                entry_id = _id(connection, "ctx")
                 outcome = "timed out" if execution.timed_out else f"exited {execution.exit_code}"
                 connection.execute(
                     """
@@ -545,7 +545,7 @@ class QaMixin:
             (TicketStatus.BLOCKED.value, "qa.infrastructure/" + reason, next_version, timestamp, ticket["ticket_id"]))
         connection.execute("DELETE FROM leases WHERE lease_id = ?", (job["lease_id"],))
         self._close_ticket_dispatch(connection, ticket["ticket_id"], timestamp)
-        entry_id = _id("ctx")
+        entry_id = _id(connection, "ctx")
         connection.execute("""INSERT INTO context_entries
             (entry_id, project_id, feature_id, ticket_id, entry_type, content, source_ref,
              artifact_commit, actor_id, actor_role, created_at)
@@ -711,7 +711,7 @@ class QaMixin:
                     environment_digest = self._recorded_environment_digest(
                         connection, item.get("environment_digest"), candidate_id
                     )
-                    evidence_id = _id("ev")
+                    evidence_id = _id(connection, "ev")
                     evidence_ids.append(evidence_id)
                     connection.execute(
                         """
@@ -736,7 +736,7 @@ class QaMixin:
                             timestamp,
                         ),
                     )
-                finding_id = _id("finding")
+                finding_id = _id(connection, "finding")
                 connection.execute(
                     """
                     INSERT INTO qa_findings
@@ -779,7 +779,7 @@ class QaMixin:
                 evidence_gap = any(f.get("status") == "insufficient_evidence" for f in findings) and all(
                     f.get("status") in {"verified", "insufficient_evidence"} for f in findings)
                 next_status = TicketStatus.BLOCKED if evidence_gap else TicketStatus.REWORK
-                known_failure_entry_id = _id("ctx")
+                known_failure_entry_id = _id(connection, "ctx")
                 connection.execute(
                     """
                     INSERT INTO context_entries

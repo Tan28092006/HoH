@@ -355,8 +355,8 @@ class PlanningMixin:
                     "UPDATE projects SET version = ?, updated_at = ? WHERE project_id = ?",
                     (next_version, timestamp, project_id),
                 )
-                entry_id = _id("ctx")
-                reconciliation_id = _id("recon")
+                entry_id = _id(connection, "ctx")
+                reconciliation_id = _id(connection, "recon")
                 manifest["context_ref"] = f"ctx:entry:{entry_id}"
                 manifest["reconciliation_id"] = reconciliation_id
                 open_ticket_versions = {
@@ -516,7 +516,7 @@ class PlanningMixin:
                 (project_id,),
             ).fetchall()
         }
-        reconciliation_id = _id("recon")
+        reconciliation_id = _id(connection, "recon")
         connection.execute(
             """
             INSERT INTO repository_reconciliations
@@ -721,7 +721,7 @@ class PlanningMixin:
                 "UPDATE projects SET version = ?, updated_at = ? WHERE project_id = ?",
                 (next_version, timestamp, project_id),
             )
-            entry_id = _id("ctx")
+            entry_id = _id(connection, "ctx")
             connection.execute(
                 """
                 INSERT INTO context_entries
@@ -1084,7 +1084,7 @@ class PlanningMixin:
                 "WHERE ticket_id = ?",
                 (json.dumps(normalized), next_version, timestamp, ticket_id),
             )
-            entry_id = _id("ctx")
+            entry_id = _id(connection, "ctx")
             connection.execute(
                 """
                 INSERT INTO context_entries
@@ -1481,7 +1481,7 @@ class PlanningMixin:
                 """,
                 (json.dumps(normalized_scope), next_version, timestamp, ticket_id),
             )
-            entry_id = _id("ctx")
+            entry_id = _id(connection, "ctx")
             connection.execute(
                 """
                 INSERT INTO context_entries
@@ -1682,7 +1682,7 @@ class PlanningMixin:
                     )
                 changed_fields.append("dependency_ids")
 
-            entry_id = _id("ctx")
+            entry_id = _id(connection, "ctx")
             connection.execute(
                 """
                 INSERT INTO context_entries
@@ -1756,7 +1756,7 @@ class PlanningMixin:
                 "UPDATE tickets SET status = ?, version = ?, updated_at = ? WHERE ticket_id = ?",
                 (TicketStatus.SUPERSEDED.value, next_version, timestamp, ticket_id),
             )
-            entry_id = _id("ctx")
+            entry_id = _id(connection, "ctx")
             source_ref = ",".join(f"ticket:{rid}" for rid in replacement_ticket_ids)
             connection.execute(
                 """
@@ -1881,7 +1881,7 @@ class PlanningMixin:
                     ticket_id,
                 ),
             )
-            entry_id = _id("ctx")
+            entry_id = _id(connection, "ctx")
             connection.execute(
                 """
                 INSERT INTO context_entries
@@ -2018,7 +2018,7 @@ class PlanningMixin:
                     ),
                 }
             timestamp = _iso()
-            request_id = _id("retire")
+            request_id = _id(connection, "retire")
             connection.execute(
                 """
                 INSERT INTO ticket_retirement_requests
@@ -2179,7 +2179,7 @@ class PlanningMixin:
                     """,
                     (request["target_status"], next_version, timestamp, ticket_id),
                 )
-                entry_id = _id("ctx")
+                entry_id = _id(connection, "ctx")
                 connection.execute(
                     """
                     INSERT INTO context_entries
@@ -2391,7 +2391,7 @@ class PlanningMixin:
                 "UPDATE tickets SET status = ?, version = ?, updated_at = ? WHERE ticket_id = ?",
                 (next_status.value, next_version, timestamp, ticket_id),
             )
-            entry_id = _id("ctx")
+            entry_id = _id(connection, "ctx")
             connection.execute(
                 """
                 INSERT INTO context_entries
@@ -2588,7 +2588,7 @@ class PlanningMixin:
                 (TicketStatus.REWORK.value, reason, next_version, timestamp, ticket_id),
             )
 
-            entry_id = _id("ctx")
+            entry_id = _id(connection, "ctx")
             connection.execute(
                 """
                 INSERT INTO context_entries
@@ -2725,7 +2725,7 @@ class PlanningMixin:
                 VALUES (?, ?, ?, ?, 'planning_decision', ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    _id("ctx"),
+                    _id(connection, "ctx"),
                     project_id,
                     ticket["feature_id"],
                     ticket_id,
@@ -3147,7 +3147,7 @@ class PlanningMixin:
                 # flag lets a caller tell "recorded" from "already said", which a
                 # silent no-op would hide.
                 return {**existing, "deduplicated": True}
-            entry_id = _id("ctx")
+            entry_id = _id(connection, "ctx")
             connection.execute(
                 """
                 INSERT INTO context_entries

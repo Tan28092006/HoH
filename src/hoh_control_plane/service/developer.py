@@ -25,7 +25,7 @@ class DeveloperMixin:
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             self._require_active_lease(connection, actor, ticket_id, lease_id)
-            entry_id = _id("ctx")
+            entry_id = _id(connection, "ctx")
             connection.execute(
                 """
                 INSERT INTO context_entries
@@ -76,7 +76,7 @@ class DeveloperMixin:
                 raise ConflictError("Only active development work can be blocked")
             self._require_active_lease(connection, actor, ticket_id, lease_id)
             timestamp = _iso()
-            entry_id = _id("ctx")
+            entry_id = _id(connection, "ctx")
             connection.execute(
                 """
                 INSERT INTO context_entries

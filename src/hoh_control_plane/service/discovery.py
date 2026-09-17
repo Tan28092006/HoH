@@ -227,13 +227,13 @@ class DiscoveryMixin:
                     "status": row["feature_status"],
                     "parent_feature_id": row["parent_feature_id"],
                     "context_ref": f"ctx:feature:{group_id}:v{row['feature_version']}",
-                    "pending_ticket_refs": [],
+                    "pending_ticket_count": 0,
                     "blocked_ticket_count": 0,
                     "tickets": [],
                 },
             )
             ticket_ref = f"ticket:{row['ticket_id']}"
-            feature["pending_ticket_refs"].append(ticket_ref)
+            feature["pending_ticket_count"] += 1
             if row["status"] == TicketStatus.BLOCKED.value:
                 feature["blocked_ticket_count"] += 1
             calls = [
@@ -283,6 +283,10 @@ class DiscoveryMixin:
             }
             if actor.role is Role.QA:
                 ticket_summary["capability_state"] = capability_state
+            if actor.role in {Role.PLANNER, Role.ADMIN}:
+                # Every Planner row would recommend the same ticket.get_context
+                # call; the ticket_ref beside it is that call's only argument.
+                del ticket_summary["recommended_calls"]
             feature["tickets"].append(ticket_summary)
 
         discovered = {
@@ -903,7 +907,7 @@ class DiscoveryMixin:
         if existing is not None:
             return existing
         timestamp = _iso()
-        queue_id = _id("queue")
+        queue_id = _id(connection, "queue")
         connection.execute(
             """
             INSERT INTO work_queue
@@ -930,7 +934,7 @@ class DiscoveryMixin:
             VALUES (?, ?, ?, ?, 'work.queued', ?, 'pending', ?)
             """,
             (
-                _id("outbox"),
+                _id(connection, "outbox"),
                 queue_id,
                 project_id,
                 target_role.value,
@@ -1058,7 +1062,7 @@ class DiscoveryMixin:
             if duplicate is not None:
                 continue
             timestamp = _iso(now)
-            offer_id = _id("offer")
+            offer_id = _id(connection, "offer")
             connection.execute(
                 """
                 INSERT INTO work_offers

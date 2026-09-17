@@ -9,7 +9,9 @@ from hoh_control_plane.service._common import (
     CLOSED_TICKET_STATUSES,
     ContextStaleError,
     DEFAULT_TOKEN_BUDGET,
+    NotFoundError,
     Role,
+    ValidationError,
     TicketStatus,
     _CHECKPOINT_CHARS,
     _FALLBACK_SECTION_PRIORITY,
@@ -22,7 +24,9 @@ from hoh_control_plane.service._common import (
     _estimate_tokens,
     _iso,
     _row,
-    _snapshot_id,
+    _SNAPSHOT_PLACEHOLDER,
+    _id,
+    _snapshot_digest,
     Connection,
     json,
     _serialize,
@@ -99,6 +103,10 @@ _ROLE_TICKET_FIELDS: dict[Role, frozenset[str]] = {
 # remaining entry types are the decisions each role can use. Normal packets keep
 # only the newest checkpoint per feature/ticket scope and type (up to three open
 # risks/failures); Planner can explicitly request its older decision history.
+# A history page is a list of checkpoints, each resolvable on its own; the page
+# is bounded so that "show me the history" never becomes the whole log again.
+_HISTORY_PAGE = 20
+
 _ROLE_CONTEXT_ENTRY_TYPES: dict[Role, frozenset[str]] = {
     Role.DEVELOPER: frozenset(
         {
@@ -176,7 +184,7 @@ class ContextMixin:
                 for ticket in tickets
             ),
         }
-        return self._compile_context(
+        compiled = self._compile_context(
             payload,
             token_budget=budget,
             priority=("tickets", "verified_behaviors"),
@@ -184,6 +192,15 @@ class ContextMixin:
             compactors=(self._compact_feature_rollup,),
             protected=frozenset({"feature"}),
         )
+        compiled["context_snapshot_id"] = self._record_context_snapshot(
+            compiled,
+            project_id=feature["project_id"],
+            subject_type="feature",
+            subject_id=feature_id,
+            role=actor.role.value,
+            source_versions={"feature_version": feature["version"]},
+        )
+        return compiled
 
     def get_ticket_context(
         self,
@@ -409,16 +426,145 @@ class ContextMixin:
             protected=_PROTECTED_SECTIONS
             | _ROLE_REQUIRED_SECTIONS.get(actor.role, frozenset()),
         )
-        self._record_context_snapshot(
-            compiled["context_snapshot_id"],
+        compiled["context_snapshot_id"] = self._record_context_snapshot(
+            compiled,
             project_id=project_id,
             subject_type="ticket",
             subject_id=ticket_id,
             role=actor.role.value,
             source_versions=source_versions,
-            generated_at=compiled["generated_at"],
         )
         return compiled
+
+    def resolve_context_reference(self, actor: Actor, reference: str) -> dict[str, Any]:
+        """Resolve one typed reference a packet cited, under the packet's own rules.
+
+        A compacted packet says what it left out and names each omission by a
+        reference. Resolving one costs the caller only that item, which is the
+        point of citing rather than inlining. Visibility follows the packet: an
+        entry type a role never sees in a packet is not visible here either,
+        and a project the actor is not scoped to is not found.
+        """
+        if not isinstance(reference, str) or not reference.startswith("ctx:"):
+            raise ValidationError("reference must be a typed ctx: reference from a packet")
+        parts = reference.split(":")
+        kind = parts[1] if len(parts) > 2 else ""
+        with self.store.connection() as connection:
+            if kind == "entry" and len(parts) == 3:
+                return self._resolve_entry(connection, actor, parts[2])
+            if kind == "candidate" and len(parts) == 4 and parts[3] in {
+                "developer_claims", "changed_paths"
+            }:
+                return self._resolve_candidate_section(connection, actor, parts[2], parts[3])
+            if kind == "finding" and len(parts) == 3:
+                return self._resolve_finding(connection, actor, parts[2])
+            if kind == "ticket" and len(parts) == 5 and parts[4] == "history":
+                return self._resolve_ticket_history(connection, actor, parts[2])
+        raise ValidationError(
+            "Unsupported reference; resolvable forms are ctx:entry:<id>, "
+            "ctx:candidate:<id>:developer_claims, ctx:candidate:<id>:changed_paths, "
+            "ctx:finding:<id> and ctx:ticket:<id>:v<n>:history"
+        )
+
+    def _resolve_entry(
+        self, connection: Connection, actor: Actor, entry_id: str
+    ) -> dict[str, Any]:
+        entry = _row(connection.execute(
+            "SELECT * FROM context_entries WHERE entry_id = ?", (entry_id,)
+        ).fetchone())
+        if entry is None:
+            raise NotFoundError("Context entry not found")
+        require_project(actor, entry["project_id"])
+        allowed = _ROLE_CONTEXT_ENTRY_TYPES.get(actor.role)
+        if allowed is not None and entry["entry_type"] not in allowed:
+            raise AuthorizationError("This entry type is not part of your role's packet")
+        return {
+            "reference": f"ctx:entry:{entry_id}",
+            "entry": {
+                key: entry[key]
+                for key in (
+                    "entry_id", "entry_type", "content", "source_ref",
+                    "artifact_commit", "actor_role", "ticket_id", "feature_id",
+                    "created_at", "superseded_by",
+                )
+            },
+        }
+
+    def _resolve_candidate_section(
+        self, connection: Connection, actor: Actor, candidate_id: str, section: str
+    ) -> dict[str, Any]:
+        candidate = _row(connection.execute(
+            "SELECT * FROM candidates WHERE candidate_id = ?", (candidate_id,)
+        ).fetchone())
+        if candidate is None:
+            raise NotFoundError("Candidate not found")
+        self._authorized_ticket(connection, actor, candidate["ticket_id"])
+        if section == "changed_paths":
+            value: Any = self._candidate_with_changed_paths(connection, candidate)["changed_paths"]
+        else:
+            value = candidate.get("developer_claims") or []
+        return {
+            "reference": f"ctx:candidate:{candidate_id}:{section}",
+            "candidate_id": candidate_id,
+            "ticket_id": candidate["ticket_id"],
+            "commit_sha": candidate["commit_sha"],
+            section: value,
+        }
+
+    def _resolve_finding(
+        self, connection: Connection, actor: Actor, finding_id: str
+    ) -> dict[str, Any]:
+        finding = _row(connection.execute(
+            """
+            SELECT f.*, c.ticket_id FROM qa_findings f
+            JOIN candidates c ON c.candidate_id = f.candidate_id
+            WHERE f.finding_id = ?
+            """,
+            (finding_id,),
+        ).fetchone())
+        if finding is None:
+            raise NotFoundError("QA finding not found")
+        self._authorized_ticket(connection, actor, finding["ticket_id"])
+        return {
+            "reference": f"ctx:finding:{finding_id}",
+            "finding": {
+                key: finding[key]
+                for key in (
+                    "finding_id", "candidate_id", "ticket_id", "criterion", "status",
+                    "severity", "observation", "evidence_refs", "created_at",
+                )
+            },
+        }
+
+    def _resolve_ticket_history(
+        self, connection: Connection, actor: Actor, ticket_id: str
+    ) -> dict[str, Any]:
+        if actor.role not in {Role.PLANNER, Role.ADMIN}:
+            raise AuthorizationError(
+                "Only Planner or Admin may expand ticket decision history"
+            )
+        ticket, _project_id = self._authorized_ticket(connection, actor, ticket_id)
+        rows = connection.execute(
+            """
+            SELECT entry_id, entry_type, content, source_ref, actor_role, created_at,
+                   superseded_by
+            FROM context_entries
+            WHERE ticket_id = ? OR (ticket_id IS NULL AND feature_id = ?)
+            ORDER BY created_at DESC LIMIT ?
+            """,
+            (ticket_id, ticket["feature_id"], _HISTORY_PAGE),
+        ).fetchall()
+        allowed = _ROLE_CONTEXT_ENTRY_TYPES.get(actor.role)
+        entries = [
+            {**_row(row), "content": _checkpoint(row["content"])}  # type: ignore[dict-item]
+            for row in rows
+            if allowed is None or row["entry_type"] in allowed
+        ]
+        return {
+            "reference": f"ctx:ticket:{ticket_id}:v{ticket['version']}:history",
+            "entries": entries,
+            "next_step": "resolve ctx:entry:<id> for the full text of one entry",
+        }
 
     def _inherited_constraints(
         self, ticket_id: str, ticket: dict[str, Any]
@@ -467,29 +613,36 @@ class ContextMixin:
 
     def _record_context_snapshot(
         self,
-        snapshot_id: str,
+        compiled: dict[str, Any],
         *,
         project_id: str,
         subject_type: str,
         subject_id: str,
         role: str,
         source_versions: dict[str, Any],
-        generated_at: str,
-    ) -> None:
+    ) -> str:
         """Persist what a reader observed, so a later write can be checked against it.
 
-        The identifier is derived from the packet's own content, so identical
-        state compiles to an identical row and re-reading unchanged context
-        writes nothing new.
+        The row is found by the packet's content digest, so identical state
+        compiles to the same row and re-reading unchanged context writes
+        nothing new. The name returned is the row's short counter identifier,
+        which is what the packet carries and what a writer quotes back.
         """
+        digest = _snapshot_digest(compiled)
         with self.store.connection(immediate=True) as connection:
+            existing = connection.execute(
+                "SELECT snapshot_id FROM context_snapshots WHERE content_digest = ?",
+                (digest,),
+            ).fetchone()
+            if existing is not None:
+                return str(existing["snapshot_id"])
+            snapshot_id = _id(connection, "ctxsnap")
             connection.execute(
                 """
                 INSERT INTO context_snapshots
                     (snapshot_id, project_id, subject_type, subject_id, role,
-                     source_versions, generated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(snapshot_id) DO NOTHING
+                     source_versions, generated_at, content_digest)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot_id,
@@ -498,9 +651,11 @@ class ContextMixin:
                     subject_id,
                     role,
                     _serialize(source_versions),
-                    generated_at,
+                    compiled["generated_at"],
+                    digest,
                 ),
             )
+        return snapshot_id
 
     def require_fresh_context(
         self,
@@ -795,7 +950,7 @@ class ContextMixin:
         # Same-width placeholders so the envelope is measured, not added after the
         # packet has already been fitted to its budget.
         payload["estimated_tokens"] = token_budget
-        payload["context_snapshot_id"] = f"ctxsnap_{'0' * 32}"
+        payload["context_snapshot_id"] = _SNAPSHOT_PLACEHOLDER
 
         # These compactors remove duplicated narration and attach typed refs;
         # they are semantic projections, not merely overflow recovery.
@@ -825,7 +980,6 @@ class ContextMixin:
 
         omitted.sort(key=lambda entry: (entry["section"], entry["reason"]))
         payload["estimated_tokens"] = _estimate_tokens(payload)
-        payload["context_snapshot_id"] = _snapshot_id(payload)
         return payload
 
     def _compact_history(
@@ -856,6 +1010,37 @@ class ContextMixin:
     ) -> None:
         """Keep artifact identity and finding state; shorten only their narration."""
         candidate = payload.get("candidate")
+        ticket = payload.get("ticket")
+        if (
+            candidate
+            and isinstance(candidate.get("changed_paths"), list)
+            and isinstance(ticket, dict)
+        ):
+            # Submission already refused any path outside the write scope, so
+            # the full list repeats file_scope one path at a time. A path that
+            # is nevertheless outside scope (scope narrowed after submission) is
+            # the one fact worth the room, so that case keeps the whole list.
+            paths = candidate["changed_paths"]
+            scope = self._ticket_file_scope(payload)
+            outside = [
+                path for path in paths if not self._path_is_in_any_scope(path, scope)
+            ]
+            if paths and not outside:
+                candidate["changed_paths_summary"] = {
+                    "count": len(paths),
+                    "within_file_scope": True,
+                }
+                del candidate["changed_paths"]
+                omitted.append(
+                    {
+                        "section": "candidate.changed_paths",
+                        "reason": "compacted_to_reference",
+                        "omitted_count": len(paths),
+                        "references": [
+                            f"ctx:candidate:{candidate['candidate_id']}:changed_paths"
+                        ],
+                    }
+                )
         drop_claims = payload.get("role") in {
             Role.DEVELOPER.value, Role.INTEGRATOR.value
         } or _estimate_tokens(payload) > token_budget
@@ -889,6 +1074,19 @@ class ContextMixin:
                 "references": references,
             }
         )
+
+    def _ticket_file_scope(self, payload: dict[str, Any]) -> list[str]:
+        """The write scope as stored, even for a role whose projection hides it."""
+        ticket = payload.get("ticket") or {}
+        if isinstance(ticket.get("file_scope"), list):
+            return list(ticket["file_scope"])
+        with self.store.connection() as connection:
+            row = connection.execute(
+                "SELECT file_scope FROM tickets WHERE ticket_id = ?",
+                (ticket.get("ticket_id"),),
+            ).fetchone()
+        stored = _row(row)
+        return list(stored["file_scope"]) if stored and stored.get("file_scope") else []
 
     def _compact_feature_rollup(
         self, payload: dict[str, Any], omitted: list[dict[str, Any]], token_budget: int

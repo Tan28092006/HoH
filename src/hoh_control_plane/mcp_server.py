@@ -527,6 +527,21 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             ),
         )
 
+    @server.tool(name="context.resolve", structured_output=True)
+    def context_resolve(reference: str) -> dict[str, Any]:
+        """Resolve one typed reference cited by a packet's omitted_sections.
+
+        Accepts ctx:entry:<id>, ctx:candidate:<id>:developer_claims,
+        ctx:candidate:<id>:changed_paths, ctx:finding:<id> and, for Planner or
+        Admin, ctx:ticket:<id>:v<n>:history. Returns only that item.
+        """
+        arguments = {"reference": reference}
+        return invoke(
+            "context.resolve",
+            arguments,
+            lambda: service.resolve_context_reference(actor, **arguments),
+        )
+
     @server.tool(name="spec.digest", structured_output=True)
     def spec_digest(
         project_id: str,

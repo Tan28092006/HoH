@@ -73,7 +73,7 @@ class ExperienceMixin:
                 )
                 note_id = str(existing["note_id"])
             else:
-                note_id = _id("exp")
+                note_id = _id(connection, "exp")
                 now = _iso()
                 connection.execute(
                     """

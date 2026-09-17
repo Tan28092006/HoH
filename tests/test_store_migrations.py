@@ -503,16 +503,18 @@ def test_every_additive_column_is_in_the_shared_schema(tmp_path) -> None:
 
 def test_a_database_missing_every_added_column_upgrades_cleanly(tmp_path) -> None:
     """The whole list at once, which is what a long-dormant deployment looks like."""
-    from hoh_control_plane.store import ADDITIVE_COLUMNS, SQLiteStore
+    from hoh_control_plane.store import ADDITIVE_COLUMNS, MIGRATED_INDEXES, SQLiteStore
 
     path = tmp_path / "old.db"
     SQLiteStore(path).initialize()
     connection = sqlite3.connect(path)
     try:
-        # The migrated index is built on one of these columns, so it has to go
-        # first -- which is the same order the real upgrade path implies: the
+        # The migrated indexes are built on these columns, so they have to go
+        # first -- which is the same order the real upgrade path implies: an
         # index is created by the migration, after the column it indexes.
-        connection.execute("DROP INDEX IF EXISTS audit_events_correlation")
+        for statement in MIGRATED_INDEXES:
+            name = statement.split("IF NOT EXISTS ", 1)[1].split()[0]
+            connection.execute(f'DROP INDEX IF EXISTS "{name}"')
         for table, column, _declaration in ADDITIVE_COLUMNS:
             connection.execute(f'ALTER TABLE "{table}" DROP COLUMN "{column}"')
         connection.commit()

@@ -10,13 +10,13 @@ from datetime import timedelta
 import hashlib
 import json
 import math
-import secrets
 import socket
 import threading
 import time
 
 from hoh_control_plane.domain import Actor, Role, AuthorizationError, ConflictError, ValidationError
 from hoh_control_plane.service._common import (
+    _id,
     _iso,
     _now,
     _required_execution_capabilities,
@@ -45,7 +45,7 @@ def notify_waiters(connection):
             sender.setblocking(False)
             for row in rows:
                 port, nonce = row['notification_port'], row['wait_id']
-                if isinstance(port, int) and 1024 <= port <= 65535 and isinstance(nonce, str) and len(nonce) == 48:
+                if isinstance(port, int) and 1024 <= port <= 65535 and isinstance(nonce, str) and 0 < len(nonce) <= 64:
                     try:
                         sender.sendto(nonce.encode('ascii'), ('127.0.0.1', port))
                     except (OSError, UnicodeError):
@@ -353,7 +353,7 @@ def _deliver(service, actor, project, candidates, wait_id=None):
             if exists or not _reserve(db, actor, project, key):
                 continue
             payload = {**payload, 'project_id': project, 'role': actor.role.value}
-            identifier = 'delivery_' + secrets.token_hex(16)
+            identifier = _id(db, 'delivery')
             db.execute("INSERT INTO agent_event_deliveries VALUES (?,?,?,?,?,'pending',?,NULL)",
                        (identifier, actor.agent_id, project, key, json.dumps(payload), _iso()))
             return {'status': 'event', 'event_id': identifier, 'event': payload, 'replayed': False}
@@ -374,10 +374,14 @@ async def wait_for_event(service, actor, project_id, *, timeout_seconds=43200,
     receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     receiver.bind(('127.0.0.1', 0))
     receiver.setblocking(False)
-    wait_id = secrets.token_hex(24)
+    wait_id = ''
     registered, state = False, 'disconnected'
     try:
         with service.store.connection(immediate=True) as db:
+            # Allocated under the same write lock as the waiter row it names;
+            # the authenticated identity, not the id's length, is what protects
+            # a resume.
+            wait_id = _id(db, 'wait')
             service._refresh_presence(db, actor, WAIT_PRESENCE_SECONDS)
             # Resolve project existence before installing the foreign-key record.
             service._one(db, 'SELECT project_id FROM projects WHERE project_id=?', (project_id,))

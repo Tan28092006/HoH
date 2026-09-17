@@ -894,7 +894,8 @@ CREATE TABLE IF NOT EXISTS context_snapshots (
     subject_id TEXT NOT NULL,
     role TEXT NOT NULL,
     source_versions TEXT NOT NULL,
-    generated_at TEXT NOT NULL
+    generated_at TEXT NOT NULL,
+    content_digest TEXT
 );
 
 CREATE INDEX IF NOT EXISTS context_snapshots_subject
@@ -960,6 +961,13 @@ CREATE TABLE IF NOT EXISTS agent_event_reservations (
     agent_id TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     PRIMARY KEY(project_id, event_key)
+);
+
+-- One counter per identifier prefix. Incremented inside the writer's own
+-- transaction, so an identifier is unique for the same reason the row is.
+CREATE TABLE IF NOT EXISTS id_sequences (
+    prefix TEXT PRIMARY KEY,
+    next_value INTEGER NOT NULL
 );
 """
 
@@ -1030,6 +1038,10 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # NULL until the next sync recomputes it, which the reader falls back for.
     ("spec_sections", "subtree_end_line", "INTEGER"),
     ("spec_sections", "subtree_tokens", "INTEGER"),
+    # A snapshot is now named by a counter and deduplicated by its content
+    # digest. Rows written before the column was added were named by the digest
+    # itself and keep NULL here; they remain valid freshness tokens.
+    ("context_snapshots", "content_digest", "TEXT"),
 )
 
 # Indexes that cannot be declared in SCHEMA. The schema script runs before these
@@ -1041,6 +1053,8 @@ MIGRATED_INDEXES: tuple[str, ...] = (
     "ON audit_events (correlation_id)",
     "CREATE INDEX IF NOT EXISTS audit_events_kind_aggregate "
     "ON audit_events (event_type, aggregate_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS context_snapshots_content "
+    "ON context_snapshots (content_digest)",
 )
 
 

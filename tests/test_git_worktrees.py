@@ -159,7 +159,15 @@ def test_developer_worktree_binds_a_candidate_to_its_ticket_and_branch(
     assert submitted["candidate"]["commit_sha"] == candidate_commit
     assert submitted["candidate"]["changed_paths"] == ["src/checkout/retry.txt"]
     assert context["worktree"]["branch_ref"] == prepared["worktree"]["branch_ref"]
-    assert context["candidate"]["changed_paths"] == ["src/checkout/retry.txt"]
+    # In-scope paths are summarised in the packet and resolvable by reference.
+    assert "changed_paths" not in context["candidate"]
+    assert context["candidate"]["changed_paths_summary"] == {
+        "count": 1, "within_file_scope": True,
+    }
+    resolved = service.resolve_context_reference(
+        actors["qa"], f"ctx:candidate:{submitted['candidate']['candidate_id']}:changed_paths"
+    )
+    assert resolved["changed_paths"] == ["src/checkout/retry.txt"]
 
 
 def test_worktree_provision_is_queued_then_completed_by_a_detached_worker(

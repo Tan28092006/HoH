@@ -14,6 +14,7 @@ from hoh_control_plane.service._common import (
     ValidationError,
     WorkspaceModel,
     _bounded_join,
+    _file_token,
     _id,
     _iso,
     _now,
@@ -190,7 +191,7 @@ class WorktreeMixin:
             _safe_path_segment(ticket_id, "ticket_id"),
             _safe_path_segment(agent_id, "agent_id"),
         ]
-        return self.recovery_root.joinpath(*segments) / f"{_id('recovery')}.patch"
+        return self.recovery_root.joinpath(*segments) / f"recovery_{_file_token()}.patch"
 
     def _assign_worktree(
         self,
@@ -207,6 +208,11 @@ class WorktreeMixin:
         directory. If authorization expires during Git, the unpublished checkout
         is retained for operator recovery; it is never handed to an agent.
         """
+        # The attempt number is allocated in its own short write before Git runs,
+        # so the branch and directory names exist before the publish lock is
+        # taken and never depend on how long provisioning takes.
+        with self.store.connection(immediate=True) as connection:
+            generation = _id(connection, "attempt")
         prepared = self.git_worktrees.prepare(
             repository_path=snapshot["repository"]["repository_path"],
             default_branch=snapshot["project"]["default_branch"],
@@ -214,7 +220,7 @@ class WorktreeMixin:
             ticket_id=ticket_id,
             agent_id=actor.agent_id,
             start_commit=None if takeover is None else takeover["start_commit"],
-            generation=_id("attempt"),
+            generation=generation,
         )
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
@@ -329,7 +335,7 @@ class WorktreeMixin:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    _id("wtassign"),
+                    _id(connection, "wtassign"),
                     ticket_id,
                     project_id,
                     actor.agent_id,
@@ -428,7 +434,7 @@ class WorktreeMixin:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                _id("ctx"),
+                _id(connection, "ctx"),
                 project_id,
                 ticket["feature_id"],
                 ticket["ticket_id"],
@@ -486,7 +492,7 @@ class WorktreeMixin:
                     raise ConflictError("Ticket already has an active worktree provision")
                 return {"ticket": ticket, "provision": active, "reused": False}
 
-            provision_id = _id("worktree_job")
+            provision_id = _id(connection, "worktree_job")
             timestamp = _iso()
             connection.execute(
                 """

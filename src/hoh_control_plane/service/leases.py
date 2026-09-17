@@ -167,7 +167,7 @@ class LeaseMixin:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    _id("toolcall"), project_id, actor.agent_id, actor.role.value, tool_name,
+                    _id(connection, "toolcall"), project_id, actor.agent_id, actor.role.value, tool_name,
                     json.dumps(input_summary), outcome, error_code, _iso(),
                 ),
             )
@@ -297,7 +297,7 @@ class LeaseMixin:
                     raise ConflictError(
                         "Ticket write scope conflicts with active ticket " + conflicting_ticket_id
                     )
-            lease_id = _id("lease")
+            lease_id = _id(connection, "lease")
             connection.execute(
                 """
                 INSERT INTO leases

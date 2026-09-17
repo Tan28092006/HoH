@@ -110,7 +110,7 @@ class IdempotencyMixin:
                 VALUES (?, ?, ?, ?, ?, ?, ?, 'IN_PROGRESS', ?, ?)
                 """,
                 (
-                    _id("idem"),
+                    _id(connection, "idem"),
                     idempotency_key,
                     agent_id,
                     actor.role.value,

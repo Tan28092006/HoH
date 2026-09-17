@@ -172,7 +172,7 @@ class ValidationMixin:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                _id("event"),
+                _id(connection, "event"),
                 event_type,
                 aggregate_type,
                 aggregate_id,

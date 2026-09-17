@@ -100,7 +100,7 @@ class PlannerJobMixin:
                 artifact_commit=artifact_commit,
             )
             return refreshed
-        planner_job_id = _id("plan")
+        planner_job_id = _id(connection, "plan")
         connection.execute(
             """
             INSERT INTO planner_jobs
@@ -284,7 +284,7 @@ class PlannerJobMixin:
                     },
                     sort_keys=True,
                 ).encode("utf-8")
-            ).hexdigest()
+            ).hexdigest()[:16]
             failure_ref = f"failure:{fingerprint}"
             context = _row(connection.execute(
                 """
@@ -301,7 +301,7 @@ class PlannerJobMixin:
                     ticket["status"] == TicketStatus.DONE.value
                 ):
                     raise ConflictError("A terminal ticket cannot receive an execution failure")
-                entry_id = _id("ctx")
+                entry_id = _id(connection, "ctx")
                 connection.execute(
                     """
                     INSERT INTO context_entries
@@ -482,7 +482,7 @@ class PlannerJobMixin:
 
             timestamp = _iso()
             next_version = int(ticket["version"]) + 1
-            entry_id = _id("ctx")
+            entry_id = _id(connection, "ctx")
             connection.execute(
                 """
                 INSERT INTO context_entries
@@ -669,7 +669,7 @@ class PlannerJobMixin:
                 {"planner_job_id": planner_job["planner_job_id"], "severity": severity.value},
             )
             return self._planner_intervention(connection, existing["intervention_id"])
-        intervention_id = _id("wake")
+        intervention_id = _id(connection, "wake")
         connection.execute(
             """
             INSERT INTO planner_interventions
@@ -871,7 +871,7 @@ class PlannerJobMixin:
             if existing is not None:
                 raise ConflictError("Planner job is already leased by another Planner")
             timestamp = _now()
-            lease_id = _id("planlease")
+            lease_id = _id(connection, "planlease")
             connection.execute(
                 """
                 INSERT INTO planner_job_leases

@@ -59,16 +59,16 @@ def test_discovery_returns_metadata_and_refs_not_ticket_bodies(
         assert f'"{field}"' not in payload, f"discovery inlined {field}"
     assert "An objective long enough" not in payload
     for feature in discovered["features"]:
-        assert feature["pending_ticket_refs"]
+        assert feature["pending_ticket_count"] == len(feature["tickets"])
         assert isinstance(feature["blocked_ticket_count"], int)
         for ticket in feature["tickets"]:
             assert ticket["ticket_ref"] == f"ticket:{ticket['ticket_id']}"
+            # A Planner row carries identity and routing only: the one call it
+            # could recommend is ticket.get_context on the ticket_ref beside it.
             assert set(ticket) == {
                 "ticket_id", "ticket_ref", "feature_id", "title", "ticket_type",
                 "status", "priority", "required_role", "version", "context_ref",
-                "recommended_calls",
             }
-            assert ticket["recommended_calls"][0]["tool"] == "ticket.get_context"
 
 
 def test_discovery_stays_small_next_to_the_full_ticket_context(
@@ -80,7 +80,7 @@ def test_discovery_stays_small_next_to_the_full_ticket_context(
 
     discovered = service.discover_work(planner, "project-1")
 
-    refs = [ref for f in discovered["features"] for ref in f["pending_ticket_refs"]]
+    refs = [t["ticket_ref"] for f in discovered["features"] for t in f["tickets"]]
     one_packet = service.get_ticket_context(planner, refs[0])
     assert len(json.dumps(discovered)) < len(json.dumps(one_packet)) * len(refs)
 
