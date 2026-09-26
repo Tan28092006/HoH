@@ -205,10 +205,18 @@ def make_prompts(root, project, instance='primary'):
         prompts[role] = f'''Set up HoH for this Windows chat.
 Role: {role}; project: {project}; instance: {instance}.
 
-1. Identify Codex or Claude Code. Run this exact PowerShell command once; do not
-   guess another executable or repeat setup:
+1. Identify Codex or Claude Code, then run the command in the block below exactly
+   once. Copy it from the block rather than retyping it, and do not guess another
+   executable or run setup twice.
+
+   ```powershell
    & '{python}' -I -m hoh_control_plane.local_agent setup --root '{service_root}' --project '{project}' --role {role} --instance {instance} --client codex --upgrade-skills --transport shared-http
-   For Claude Code, replace only `--client codex` with `--client claude-code`.
+   ```
+
+   For Claude Code, replace only `--client codex` with `--client claude-code`. If
+   it fails with a ModuleNotFoundError whose module name contains backslashes,
+   your client escaped the underscores: delete them and run it once more. Landing
+   the same command intact is not a repeat of setup, so do not stop to ask.
 2. Load `$hoh-control-plane` and `$hoh-{role}`. Use only MCP
    `hoh-{actor.agent_id}`. If it is absent after setup, keep HoH running and
    fully reopen Codex Desktop, or reload the VS Code extension host; do not use a

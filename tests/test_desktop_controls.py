@@ -271,24 +271,52 @@ def test_gui_wait_profiles_have_long_timeout_and_unique_instances(desktop, tmp_p
     prompt = make_prompts(root, 'shop', instance='codex-1')['developer']
     assert 'work.wait_for_event' in prompt
     assert 'resume_wait_id' in prompt
-    assert 'status=superseded' in prompt
     assert '--instance codex-1' in prompt
     assert result['server_name'] in prompt
     expected_python = (root / '.venv' / 'Scripts' / 'python.exe').as_posix()
     assert f"& '{expected_python}' -I" in prompt
     assert f"--root '{root.as_posix()}'" in prompt
-    assert r'\.venv' not in prompt
-    assert 'Dấu `/` trong đường dẫn là chủ ý' in prompt
-    assert 'Thoát hoàn toàn Codex desktop' in prompt
-    assert 'reload task/renderer không nạp lại inventory MCP' in prompt
-    assert 'không thử MCP mặc định' in prompt
-    assert 'snapshot trước work.claim đã stale' in prompt
+    assert 'fully reopen Codex Desktop' in prompt
     planner_prompt = make_prompts(root, 'shop', instance='codex-1')['planner']
-    assert 'delivery_completed' in planner_prompt
-    assert 'planner.sync_repository' in planner_prompt
+    assert 'sync repository' in planner_prompt
     integrator_prompt = make_prompts(root, 'shop', instance='codex-1')['integrator']
-    assert 'wake Planner' in integrator_prompt
+    assert 'mainline SHA' in integrator_prompt
     assert client.get('/local/agents?project_id=shop').json() == {'agents': []}
+
+
+def test_the_setup_command_survives_a_markdown_client(desktop, tmp_path):
+    """The command reaches PowerShell as written, or setup cannot even start.
+
+    A Planner setup was blocked because the command sat in the prompt as ordinary
+    list text, so a client read `hoh_control_plane` as two italic markers and
+    escaped them. PowerShell received `hoh\\_control\\_plane` and reported
+    ModuleNotFoundError, and the prompt's own "do not repeat setup" rule then
+    stopped the chat rather than letting it retype one command.
+    """
+    from hoh_control_plane.local_agent import make_prompts
+    client, root = desktop
+    client.post('/local/projects', json={'project_id': 'shop', 'name': 'Shop'}, headers=headers(client))
+
+    for role, prompt in make_prompts(root, 'shop', instance='codex-1').items():
+        command = next(
+            line for line in prompt.splitlines() if ' -I -m ' in line
+        )
+        # A fenced block is copied verbatim; paragraph text is not.
+        fences = [
+            index for index, line in enumerate(prompt.splitlines())
+            if line.strip().startswith('```')
+        ]
+        command_line = prompt.splitlines().index(command)
+        assert len(fences) == 2, role
+        assert fences[0] < command_line < fences[1], f"{role}: command is outside the fence"
+        assert 'hoh_control_plane.local_agent setup' in command, role
+        # No backslash anywhere: not in the interpreter path, not in --root, and
+        # nothing a client could mistake for an escape it should preserve.
+        assert '\\' not in prompt, role
+        # And if a client escapes it anyway, the prompt says how to clear it
+        # without treating a retype as a second setup.
+        assert 'ModuleNotFoundError' in prompt, role
+        assert 'not a repeat of setup' in prompt, role
 
 
 def test_desktop_host_launcher_escapes_the_calling_process_job():

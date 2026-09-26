@@ -1,6 +1,6 @@
 # Context distribution under long-running operation
 
-Reviewed at 0.3.20 and updated through 0.3.22 against the live database (3 projects, 22 open tickets) and
+Reviewed at 0.3.20 and updated through 0.3.23 against the live database (3 projects, 22 open tickets) and
 the service code. The question: when one role agent works for hours or days,
 does HoH still hand it less, and better, context than a single agent holding
 the whole project in chat would carry?
@@ -27,9 +27,9 @@ about 1,000 tokens before any history exists.
 
 ## Edge cases and their status
 
-Status: **enforced** (server refuses or corrects it today), **fixed in 0.3.20**,
-**0.3.21** or **0.3.22**, **proposed** (worth a ticket), **documented**
-(operator or Planner discipline).
+Status: **enforced** (server refuses or corrects it today), **fixed in** a named
+release, **proposed** (worth a ticket), **documented** (operator or Planner
+discipline).
 
 ### Stale memory inside one long chat
 
@@ -142,6 +142,17 @@ Counters live in the database, so a restore from backup is self-consistent.
 Merging rows from two databases is not a supported operation. Rows created
 before 0.3.20 keep their long ids, and packets for old tickets show both shapes
 until superseded. **Documented.**
+
+### A generated command crossing a Markdown client
+
+The setup command sat in the prompt as list text, so a client escaped the
+underscores in `hoh_control_plane` and PowerShell reported `ModuleNotFoundError`
+for `hoh\_control\_plane`. The prompt's "do not repeat setup" rule then held the
+chat rather than letting it retype one command, so a new project's Planner never
+bootstrapped. **Fixed in 0.3.23:** the command is in a fenced block, and the
+prompt authorises exactly one retype for this named failure. The test that was
+supposed to guard this class of defect had been failing since 0.3.19 on removed
+wording; it is rewritten and joined by a per-role escaping test.
 
 ### Test environment drift
 
