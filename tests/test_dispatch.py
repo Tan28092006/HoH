@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from conftest import FakeProber
 from hoh_control_plane.domain import Actor, ConflictError, Role, TicketStatus, ValidationError
 from hoh_control_plane.service import ControlPlaneService
 
@@ -145,10 +146,13 @@ def test_strict_qa_work_waits_for_a_session_with_its_execution_equipment(
         execution_capabilities=["browser_interaction", "screenshot"], machine_id="qa-host-a",
     )
     assert service.get_agent_inbox(actors["qa"], "project-1")["offers"] == []
+    # Approval rests on host-observed evidence, taken with no lease (HOH-278).
+    service.capability_prober = FakeProber("qa-host-a", {"browser_interaction", "screenshot"})
+    preflight = service.run_capability_preflight(actors["qa"], "project-1")
     approved = service.configure_agent_capability_profile(
         actors["planner"], "project-1", actors["qa"].agent_id,
         ["browser_interaction", "screenshot"],
-        ["evidence://qa-01/browser-preflight"],
+        [preflight["preflight_ref"]],
     )
     assert approved["approved_execution_capabilities"] == [
         "browser_interaction", "screenshot"
@@ -190,9 +194,11 @@ def test_agent_reregistration_preserves_independent_capability_approval(service,
         actors["qa"], skills=["hoh-qa"], execution_capabilities=["runtime_trace"],
         machine_id="qa-host-a",
     )
+    service.capability_prober = FakeProber("qa-host-a", {"runtime_trace"})
+    preflight = service.run_capability_preflight(actors["qa"], "project-1")
     service.configure_agent_capability_profile(
         actors["planner"], "project-1", actors["qa"].agent_id,
-        ["runtime_trace"], ["evidence://qa-01/runtime-preflight"],
+        ["runtime_trace"], [preflight["preflight_ref"]],
     )
 
     presence = service.register_agent(
@@ -201,9 +207,7 @@ def test_agent_reregistration_preserves_independent_capability_approval(service,
 
     assert presence["execution_capabilities"] == []
     assert presence["approved_execution_capabilities"] == ["runtime_trace"]
-    assert presence["capability_approval_refs"] == [
-        "evidence://qa-01/runtime-preflight"
-    ]
+    assert presence["capability_approval_refs"] == [preflight["preflight_ref"]]
     assert presence["capability_approved_machine_id"] == "qa-host-a"
 
 

@@ -845,7 +845,18 @@ class DiscoveryMixin:
                     connection, project_id, presence
                 ) if actor.role is Role.QA else []
             )
+        # A block on approval alone is settled here, where QA observes it: with
+        # a preflight already recorded the Planner job is opened now, so nobody
+        # waits on anybody. No probe runs on this path.
+        capability_preflight = (
+            self._settle_capability_blocks(actor, project_id)
+            if any(
+                blocker["missing_approval"] and not blocker["missing_declaration"]
+                for blocker in capability_blockers
+            ) else None
+        )
         return {
+            "capability_preflight": capability_preflight,
             "agent": presence,
             "active_leases": active_leases,
             "offers": offers,
@@ -879,12 +890,12 @@ class DiscoveryMixin:
             "required": sorted(required),
             "missing_declaration": missing_declaration,
             "missing_approval": missing_approval,
-            "machine_id": (presence or {}).get("machine_id"),
             "approval_machine_matches": machine_matches,
             "next_action": (
                 "verify available equipment and re-register; Planner provisions remaining gaps"
                 if missing_declaration
-                else "Planner verifies public preflight evidence and approves this machine profile"
+                else "run qa.run_capability_preflight once, then wait silently; HoH opens the "
+                "Planner approval job from its result"
                 if missing_approval
                 else "claim candidate"
             ),

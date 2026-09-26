@@ -78,3 +78,27 @@ def seeded(service: ControlPlaneService, actors: dict[str, Actor]) -> dict[str, 
         ready=True,
     )
     return {"project": project, "feature": feature, "ticket": ticket}
+
+
+from hoh_control_plane.capability_probe import ProbeOutcome
+
+
+class FakeProber:
+    """A machine with exactly the equipment a test says it has."""
+
+    def __init__(self, host: str = "qa-host-a",
+                 equipped=("browser_interaction", "build_execution")) -> None:
+        self.host = host
+        self.equipped = set(equipped)
+        self.calls: list[str] = []
+
+    def host_names(self) -> set[str]:
+        return {self.host}
+
+    def probe(self, capability, *, repository_path, test_command, configured_command):
+        self.calls.append(capability)
+        if configured_command:
+            return ProbeOutcome(True, "exit_zero", "configured_command", 5, "d" * 64)
+        if capability in self.equipped:
+            return ProbeOutcome(True, "exit_zero", "builtin:test", 5, "c" * 64)
+        return ProbeOutcome(False, "no_preflight_defined", "none")

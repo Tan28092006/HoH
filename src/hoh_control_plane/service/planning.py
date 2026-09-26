@@ -983,6 +983,22 @@ class PlanningMixin:
                     "QA agent must register a stable machine_id before capability approval",
                     {"reason": "capability_machine_missing"},
                 )
+            # The rule the cards used to state and nothing enforced: approve only
+            # what this agent declared and what host-run evidence proves on the
+            # machine it is registered from.
+            undeclared = sorted(set(normalized) - set(presence.get("execution_capabilities") or []))
+            if undeclared:
+                raise ValidationError(
+                    "Approval may cover only capabilities this QA agent has declared",
+                    {"reason": "capability_not_declared", "capabilities": undeclared},
+                )
+            proven = self._proven_by_preflight(connection, project_id, presence, refs)
+            unproven = sorted(set(normalized) - proven)
+            if unproven:
+                raise ValidationError(
+                    "Approval exceeds what the cited host preflight proves",
+                    {"reason": "capability_not_proven", "capabilities": unproven},
+                )
             connection.execute(
                 """UPDATE agent_presence
                    SET approved_execution_capabilities = ?, capability_approval_refs = ?,
@@ -999,9 +1015,16 @@ class PlanningMixin:
                 "agent_presence", agent_id, 1,
                 {"capabilities": normalized, "evidence_ref_count": len(refs)},
             )
-            return self._one(
-                connection, "SELECT * FROM agent_presence WHERE agent_id = ?", (agent_id,)
+            resolved = self._resolve_capability_review_jobs(
+                connection, actor, project_id, agent_id, set(normalized),
+                "Capability approved from host preflight " + ", ".join(refs) + ".",
             )
+            return {
+                **self._one(
+                    connection, "SELECT * FROM agent_presence WHERE agent_id = ?", (agent_id,)
+                ),
+                "resolved_planner_jobs": resolved,
+            }
 
     def _validated_validation_contract(
         self, acceptance_criteria: list[str], contract: list[dict[str, Any]]

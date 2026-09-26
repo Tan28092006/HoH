@@ -969,6 +969,37 @@ CREATE TABLE IF NOT EXISTS id_sequences (
     prefix TEXT PRIMARY KEY,
     next_value INTEGER NOT NULL
 );
+
+-- QA equipment as observed by the HoH host, never as reported by QA. A Planner
+-- approves capabilities only against these rows, for the same agent and the
+-- same machine. The machine is kept as a fingerprint, never as its name, and a
+-- probe keeps an output digest, never the output.
+CREATE TABLE IF NOT EXISTS capability_preflights (
+    preflight_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    agent_id TEXT NOT NULL,
+    machine_fingerprint TEXT NOT NULL,
+    host_matches_machine INTEGER NOT NULL,
+    requested_capabilities TEXT NOT NULL,
+    outcomes TEXT NOT NULL,
+    record_digest TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS capability_preflights_agent
+    ON capability_preflights (project_id, agent_id, created_at);
+
+-- Preflight commands a Planner configures for capabilities no built-in probe
+-- can observe. A command is configuration, like the project test command, so it
+-- lives here rather than in the portable verification profile.
+CREATE TABLE IF NOT EXISTS project_capability_preflights (
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    capability TEXT NOT NULL,
+    command TEXT NOT NULL,
+    configured_by TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, capability)
+);
 """
 
 

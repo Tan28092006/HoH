@@ -31,8 +31,10 @@ own equipment, or transfers evidence to another SHA.
 
 `missing_declaration` means this session has not proved it can call equipment:
 check the real tool and re-register once with the verified subset. Do not declare
-a capability to unlock a claim. `missing_approval` means Planner must approve
-public preflight evidence on the same `machine_id`; keep the candidate frozen.
+a capability to unlock a claim. `missing_approval` means call
+`qa.run_capability_preflight` once: the HoH host probes this machine, no lease is
+needed, and HoH opens the Planner approval job from the result. Then wait
+silently; keep the candidate frozen.
 
 Read [runner-and-capabilities.md](references/runner-and-capabilities.md) for a
 blocked runner, provenance, recovery or Planner handoff. Read

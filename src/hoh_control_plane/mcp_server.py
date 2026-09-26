@@ -810,7 +810,13 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             capabilities: list[str],
             evidence_refs: list[str],
         ) -> dict[str, Any]:
-            """Approve a QA agent's verified equipment from durable public evidence."""
+            """Approve a QA agent's equipment from host preflight records only.
+
+            evidence_refs must be preflight:<id> records taken for this agent on
+            its registered machine, and capabilities must be both declared by the
+            agent and proven by those records; anything else is refused.
+            Approving closes the capability review job it answers.
+            """
             arguments = {
                 "project_id": project_id,
                 "agent_id": agent_id,
@@ -820,6 +826,24 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             return invoke(
                 "planner.configure_agent_capability_profile", arguments,
                 lambda: service.configure_agent_capability_profile(actor, **arguments),
+            )
+
+        @server.tool(name="planner.configure_capability_preflight", structured_output=True)
+        def planner_configure_capability_preflight(
+            project_id: str, capability: str, command: list[str], reason: str,
+        ) -> dict[str, Any]:
+            """Set the host preflight command for a capability no built-in probe covers.
+
+            The command runs on the HoH host in the repository; exit status zero
+            proves the capability. An empty command removes it. Built-in probes
+            cover source_inspection, git_worktree, dependency_manifest,
+            build_execution, browser_interaction and screenshot.
+            """
+            arguments = {"project_id": project_id, "capability": capability,
+                         "command": command, "reason": reason}
+            return invoke(
+                "planner.configure_capability_preflight", arguments,
+                lambda: service.configure_capability_preflight(actor, **arguments),
             )
 
         @server.tool(name="planner.create_project", structured_output=True)
@@ -1640,6 +1664,21 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
                 arguments,
                 lambda: service.get_merge_candidate(actor, **arguments),
             )
+
+    if actor.role is Role.QA:
+
+        @server.tool(name="qa.run_capability_preflight", structured_output=True)
+        async def qa_run_capability_preflight(project_id: str) -> dict[str, Any]:
+            """Have the HoH host observe this machine's declared QA equipment.
+
+            Needs no claim or lease. Returns a preflight_ref and what it proved;
+            for a QA-ready candidate blocked only on approval, HoH opens one
+            Planner job naming the exact approval call. Run it once, then wait.
+            """
+            arguments = {"project_id": project_id}
+            return await anyio.to_thread.run_sync(lambda: invoke(
+                "qa.run_capability_preflight", arguments,
+                lambda: service.run_capability_preflight(actor, **arguments)))
 
     if actor.role in {Role.QA, Role.ADMIN}:
 

@@ -66,6 +66,8 @@ from hoh_control_plane.service._common import (
 from hoh_control_plane.service.planning import PlanningMixin
 from hoh_control_plane.service.session import SessionMixin
 from hoh_control_plane.service.discovery import DiscoveryMixin
+from hoh_control_plane.capability_probe import HostCapabilityProber
+from hoh_control_plane.service.capability import CapabilityMixin
 from hoh_control_plane.service.context import ContextMixin
 from hoh_control_plane.service.experience import ExperienceMixin
 from hoh_control_plane.service.spec import SpecMixin
@@ -91,6 +93,7 @@ class ControlPlaneService(
     WorktreeMixin,
     IntegrationMixin,
     QaMixin,
+    CapabilityMixin,
     CandidateMixin,
     DeveloperMixin,
     BoardMixin,
@@ -110,6 +113,8 @@ class ControlPlaneService(
         artifacts = store.artifact_root
         self.git_worktrees = GitWorktreeManager(artifacts / "worktrees")
         self.project_tests = ProjectTestRunner(artifacts / "evidence")
+        # Capability evidence is observed by this host, never reported by QA.
+        self.capability_prober = HostCapabilityProber()
         # Recovery patches stay outside the worktree root so no agent can reach
         # another agent's abandoned work through its own assigned worktree.
         self.recovery_root = artifacts / "recovery"

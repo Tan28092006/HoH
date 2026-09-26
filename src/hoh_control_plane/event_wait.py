@@ -318,9 +318,13 @@ def _pending(service, actor, project, kind=None, identifier=None):
                         missing_approval.update(unapproved)
                 if not ticket_refs:
                     continue
+                evidence_refs, proven = service.latest_capability_preflight_refs(
+                    db, project, qa['agent_id'], machine_id
+                )
                 fingerprint = hashlib.sha256(json.dumps({
                     'agent_id': qa['agent_id'],
                     'machine_id': machine_id,
+                    'evidence_refs': evidence_refs,
                     'declared': sorted(declared),
                     'approved': sorted(approved),
                     'missing_declaration': sorted(missing_declaration),
@@ -332,18 +336,26 @@ def _pending(service, actor, project, kind=None, identifier=None):
                     {
                         'kind': 'capability_review_required',
                         'agent_id': qa['agent_id'],
-                        'machine_id': machine_id,
                         'declared_capabilities': sorted(declared),
                         'missing_declaration': sorted(missing_declaration),
                         'missing_approval': sorted(missing_approval),
                         'approval_machine_matches': machine_matches,
+                        'evidence_refs': evidence_refs,
+                        'proven_capabilities': proven,
                         'ticket_refs': ticket_refs,
                         'next_action': (
                             'provision or route missing equipment and have QA verify '
-                            'then re-register; approve only separately verified public evidence'
+                            'then re-register'
                             if missing_declaration else
-                            'verify public preflight evidence, then call '
-                            'planner.configure_agent_capability_profile'
+                            'call planner.configure_agent_capability_profile with the '
+                            'proven capabilities and these evidence_refs'
+                            if evidence_refs and missing_approval <= set(proven) else
+                            'the host preflight cannot prove every missing capability; '
+                            'provision it or configure planner.configure_capability_preflight, '
+                            'then QA reruns qa.run_capability_preflight'
+                            if evidence_refs else
+                            'no host preflight yet; QA is told to run qa.run_capability_preflight '
+                            'and HoH opens your approval job from it'
                         ),
                     },
                 ))
