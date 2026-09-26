@@ -301,7 +301,8 @@ def test_shared_host_loads_new_profiles_and_revokes_without_restart(service, tmp
         assert rejected.status_code == 401 and token not in rejected.text
 
 
-def test_shared_http_reconnect_fences_old_wait_and_keeps_same_actor(service, actors):
+def test_shared_http_reconnect_fences_old_wait_and_keeps_same_actor(service, actors, monkeypatch):
+    monkeypatch.setattr('hoh_control_plane.event_wait.MIN_MCP_WAIT_SECONDS', 0)
     from concurrent.futures import ThreadPoolExecutor
     import time
     from starlette.testclient import TestClient

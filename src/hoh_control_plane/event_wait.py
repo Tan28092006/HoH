@@ -25,6 +25,20 @@ from hoh_control_plane.service._common import (
 )
 
 RECOVERY_SECONDS = 20
+MAX_WAIT_SECONDS = 43200
+# A wait requested over MCP is held for at least this long, whatever
+# timeout_seconds the model chose. Observed on the live marketing project: role
+# chats passed about 60 seconds, so every wait ended empty, was narrated, and was
+# called again, until the chat ended its turn and the role went offline. An event
+# still returns the wait at once, so a long hold costs nothing when work exists.
+# Tests that need a quick timeout lower this explicitly.
+MIN_MCP_WAIT_SECONDS = MAX_WAIT_SECONDS
+# What an empty return tells the model, at the moment it decides what to do next.
+SILENT_RESUME = (
+    'No event arrived. Call work.wait_for_event again now with the same project_id '
+    'and write nothing to the chat; report only an event you must act on, a '
+    'superseded wait, an error, or a question only the user can answer.'
+)
 # A pending barrier is announced once, then again each time it crosses one of
 # these ages, so a Planner that is away is chased and the roles it blocks are
 # told how long they have been waiting instead of sitting silent.
@@ -396,8 +410,8 @@ async def wait_for_event(service, actor, project_id, *, timeout_seconds=43200,
     require_project(actor, project_id)
     if actor.role not in {Role.PLANNER, Role.DEVELOPER, Role.QA, Role.INTEGRATOR}:
         raise AuthorizationError('Only engineering roles can wait for work')
-    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) or not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 43200:
-        raise ValidationError('timeout_seconds must be positive and at most 43200')
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) or not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= MAX_WAIT_SECONDS:
+        raise ValidationError(f'timeout_seconds must be positive and at most {MAX_WAIT_SECONDS}')
     if bool(job_kind) != bool(job_id):
         raise ValidationError('job_kind and job_id must be supplied together')
     if job_kind:
@@ -468,7 +482,8 @@ async def wait_for_event(service, actor, project_id, *, timeout_seconds=43200,
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 state = 'timed_out'
-                return {'status': 'timeout', 'event_id': None, 'event': None}
+                return {'status': 'timeout', 'event_id': None, 'event': None,
+                        'next_action': SILENT_RESUME}
             try:
                 packet = await asyncio.wait_for(asyncio.get_running_loop().sock_recv(receiver, 128), min(remaining, RECOVERY_SECONDS))
                 if packet != wait_id.encode('ascii'):

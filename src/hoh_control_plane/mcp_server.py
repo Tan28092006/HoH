@@ -354,6 +354,10 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
                                       resume_wait_id: str | None = None) -> dict[str, Any]:
             """Keep this GUI chat waiting without model polling until work or a job result arrives.
 
+            The server holds this call for up to 12 hours and returns the moment an
+            event arrives; a shorter timeout_seconds is raised to that hold, so do
+            not pass one. While waiting write nothing to the chat. If the result is
+            status=timeout, call this again at once, still without chat text.
             Register first. Pass ack_event_id from the previous delivery when handled.
             For a queued job pass kind provision/submission/qa/merge and its ID; the
             server maintains its valid lease while this call is connected. On return,
@@ -365,7 +369,15 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             means this request must stop, without retrying or claiming anything.
             Multiple MCP processes do not prove that multiple chats are working.
             """
+            from hoh_control_plane import event_wait
             from hoh_control_plane.event_wait import wait_for_event
+            if (
+                isinstance(timeout_seconds, (int, float))
+                and not isinstance(timeout_seconds, bool)
+                and 0 < timeout_seconds < event_wait.MIN_MCP_WAIT_SECONDS
+            ):
+                # Raised, never lowered: an invalid value still reaches validation.
+                timeout_seconds = event_wait.MIN_MCP_WAIT_SECONDS
             arguments = dict(project_id=project_id, timeout_seconds=timeout_seconds,
                              ack_event_id=ack_event_id, job_kind=job_kind, job_id=job_id,
                              resume_wait_id=resume_wait_id)

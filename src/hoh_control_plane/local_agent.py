@@ -235,6 +235,10 @@ Role: {role}; project: {project}; instance: {instance}.
    opened a Planner job. In GUI event mode call `work.wait_for_event` only after
    current work is handled; an event is not a lease and a stopped chat cannot be
    revived by MCP.
+7. While waiting, write nothing to the chat. A wait that returns without an
+   event, or that you resume after a reconnect, is not news: call it again at
+   once with no message. Speak only for an event you act on, a superseded wait,
+   an error, or a question only the user can answer.
 
 At setup completion, state the client, exact MCP server, role, project, workspace
 model and next action briefly.'''

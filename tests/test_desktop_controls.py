@@ -385,3 +385,24 @@ def test_claude_profile_upgrade_handles_idle_timeout_and_preserves_higher_overri
     preserved = json.loads(path.read_text())
     assert preserved['mcpServers'][name]['timeout'] == 90000000
     assert preserved['unrelated'] == {'keep':True}
+
+
+def test_the_card_and_every_setup_prompt_say_to_wait_silently(desktop):
+    """A role chat that narrates empty waits grows its context until it stops."""
+    from hoh_control_plane.local_agent import make_prompts
+
+    client, root = desktop
+    client.post(
+        "/local/projects", json={"project_id": "shop", "name": "Shop"},
+        headers=headers(client),
+    )
+
+    card = (
+        Path(__file__).resolve().parents[1] / 'skills' / 'hoh-control-plane' / 'SKILL.md'
+    ).read_text(encoding='utf-8')
+    assert "write nothing to the chat" in card
+    assert "call it again at" in card
+
+    for role, prompt in make_prompts(root, "shop", instance="codex-1").items():
+        assert "While waiting, write nothing to the chat" in prompt, role
+        assert "resume after a reconnect" in prompt, role

@@ -42,8 +42,9 @@ Git/docs/spec changes and active ticket direction.
 ## Event-driven GUI sessions
 
 When the operator requests continuous event-driven work, use
-`work.wait_for_event(project_id=..., timeout_seconds=43200)` after handling ready
-work. Keep the GUI turn open waiting for that MCP result; do not finish the turn
+`work.wait_for_event(project_id=...)` after handling ready work. The server holds
+the wait for up to 12 hours whatever timeout is passed, and an empty return says
+to call it again silently. Keep the GUI turn open waiting for that MCP result; do not finish the turn
 merely because the inbox is empty. This is an ordinary asynchronous MCP tool,
 usable from Codex app and Claude Code's VS Code extension without creating a
 separate CLI conversation or a recurring model task.

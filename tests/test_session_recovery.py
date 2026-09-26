@@ -142,6 +142,7 @@ def test_mcp_wait_supports_resume_and_emits_transport_progress(service, actors, 
     from hoh_control_plane.mcp_server import create_mcp_server
     from hoh_control_plane.event_wait import wait_for_event
     monkeypatch.setattr('hoh_control_plane.event_wait.RECOVERY_SECONDS', .05)
+    monkeypatch.setattr('hoh_control_plane.event_wait.MIN_MCP_WAIT_SECONDS', 0)
     actor = actors['qa']
     service.register_agent(actor, skills=['qa'], capacity=1)
     async def scenario():
@@ -187,6 +188,7 @@ def test_configuring_repository_does_not_block_mcp_transport(service, actors, mo
 
 
 def test_http_wait_keeps_its_own_response_stream_alive(service, actors, monkeypatch):
+    monkeypatch.setattr('hoh_control_plane.event_wait.MIN_MCP_WAIT_SECONDS', 0)
     import socket
     import httpx
     import uvicorn

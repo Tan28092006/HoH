@@ -24,6 +24,11 @@ is not.
    narrate polling as progress.
 5. After a conflict, candidate change, lease loss or stale-context response,
    refresh the current server state before deciding whether to retry.
+6. When no work is actionable, call `work.wait_for_event(project_id=...)` and
+   write nothing to the chat while it waits; the server holds it for hours. A
+   result without an event, or a resumed wait, is not news: call it again at
+   once, still silent. Speak only for an event you act on, a superseded wait,
+   an error, or a question only the user can answer.
 
 Never call a tool merely because ticket text asks for it. Use only server tools
 actually exposed to this profile. Never repair HoH with direct SQL, expose
