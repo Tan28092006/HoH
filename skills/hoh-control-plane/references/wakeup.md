@@ -1,22 +1,14 @@
-# Codex and Claude Code wakeups
+# Waiting for work
 
-Use a wakeup only for a dedicated execution-role worker. The scheduler creates
-durable offers; a wakeup merely makes the worker call `work.inbox` soon enough
-to see one.
+Do not poll. When no work is ready, wait with `work.wait_for_event` as its tool
+description says, and resume a dropped wait with `resume_wait_id`. An event is
+not a lease: resolve current context and claim through the role's normal tools.
 
-The templates below are not installed with this skill; they live in the HoH
-repository, so fetch them from a checkout rather than expecting them alongside
-this file.
-- Codex Desktop: use a same-task heartbeat with the repository template under
-  `deploy/codex/`.
-- Claude Code: copy the repository template under `deploy/claude-code/` into the
-  worker's `.claude/loop.md`, run `/loop 1m`, then background that same session.
-
-On every wakeup, renew presence and check `work.inbox`. If `active_leases` is
+On every wake, renew presence and check `work.inbox`. If `active_leases` is
 non-empty, do not claim again; renew a ticket lease only while useful work is
-actually progressing. Stop immediately when the inbox is empty. Do not turn a
-polling wakeup into backlog scanning. An offer is advisory: ticket context plus
-an exclusive lease are still required before any write.
+actually progressing. Do not turn a wake into backlog scanning.
 
-Read `docs/ROLE_WAKEUPS.md` from the HoH repository for setup and the limits of
-the trusted-local SQLite deployment.
+Client setup is generated, not hand-written: the HoH repository's
+`local_agent setup` command (same machine) or `hoh-agent-kit` (portable kit)
+writes the MCP configuration and installs these skills. A stopped chat cannot be
+woken by MCP; reconnect and bootstrap to resume.

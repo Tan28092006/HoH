@@ -203,8 +203,8 @@ hardening work.
 
 Change the Planner's scope from `*` to `hoh-control-plane`. Keep all project
 mutations through role MCP tools; the browser UI is observation-only. When a
-Developer or QA worker should poll automatically, add the matching same-session
-heartbeat in [ROLE_WAKEUPS.md](ROLE_WAKEUPS.md). Do not rely on it for push
+Developer or QA worker should wait for hand-offs, use the generated setup in
+[ROLE_WAKEUPS.md](ROLE_WAKEUPS.md). Do not rely on it for push
 delivery: stopped sessions remain represented by a pending durable queue item.
 
 Before adding another machine, complete the remote foundation work: PostgreSQL,

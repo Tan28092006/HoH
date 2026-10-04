@@ -361,10 +361,14 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             status=timeout, call this again at once, still without chat text.
             Register first. Pass ack_event_id from the previous delivery when handled.
             For a queued job pass kind provision/submission/qa/merge and its ID; the
-            server maintains its valid lease while this call is connected. On return,
-            resolve current context and claim/poll through the normal role tools.
-            Events are hints, never ownership. Stopping/closing the chat ends its wait.
-            Client MCP timeout must exceed timeout_seconds (kit config sets 86400).
+            server maintains its valid lease while this call is connected; on its
+            event call the returned poll_tool once. Otherwise, on return, resolve
+            current context and claim through the normal role tools. Events are
+            hints, never ownership; acknowledge one once handled or obsolete, or it
+            is replayed. Speak only for an event you act on, a superseded wait, an
+            error, or a question only the user can answer: ask it and stop rather
+            than hide it inside a wait. Stopping/closing the chat ends its wait.
+            Client MCP timeout must exceed the hold (generated configs set 86400 s).
             After this same chat reconnects, use event_wait.wait_id from bootstrap
             as resume_wait_id to replace only that old wait. A superseded result
             means this request must stop, without retrying or claiming anything.

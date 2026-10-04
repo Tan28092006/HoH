@@ -33,67 +33,16 @@ credentials/identities; HoH leases are keyed by identity, not chat/session ID.
 Several MCP processes for one profile can be normal client setup; their count
 alone does not establish that multiple chats are doing work as that identity.
 
-For Planner, repository/spec synchronization and the Planner control cycle are a
-mandatory barrier immediately after bootstrap and before resuming an idle
-`wait_id`. Restore an owned active Planner job first when needed to preserve its
-lease, but never jump from “no lease” directly back to waiting without reviewing
-Git/docs/spec changes and active ticket direction.
+Planner runs its role control cycle (see the Planner skill) after bootstrap and
+before resuming an idle wait; restore an owned active Planner job first.
 
 ## Event-driven GUI sessions
 
-When the operator requests continuous event-driven work, use
-`work.wait_for_event(project_id=...)` after handling ready work. The server holds
-the wait for up to 12 hours whatever timeout is passed, and an empty return says
-to call it again silently. Keep the GUI turn open waiting for that MCP result; do not finish the turn
-merely because the inbox is empty. This is an ordinary asynchronous MCP tool,
-usable from Codex app and Claude Code's VS Code extension without creating a
-separate CLI conversation or a recurring model task.
-
-Immediately before an execution role waits, inspect its last terminal operation.
-If a durable/reproducible error still has no Planner job, call
-`work.report_failure` once with its failed job and narrow evidence references.
-Do not report normal control flow (`context_stale`, lease/state conflict, empty
-inbox), a still-running job or the first transient timeout. Existing QA verdict,
-runner-infrastructure and merge-failure paths already notify Planner and must not
-be duplicated.
-
-The host sends a wake hint after a committed change. The open tool resolves
-authorized durable work, reserves one notification recipient, and returns a
-small event. The event is not ownership: refresh context, validate readiness,
-then claim with the normal role tool. Keep `event_id`; acknowledge it using
-`ack_event_id` on the next wait once handled or found obsolete. A disconnected
-delivery is replayed until acknowledged; stale claimed offers are suppressed.
-
-When this same chat resumes after Stop, timeout or restart, keep its original
-instance. Inspect bootstrap assignments first. If `event_wait` is present in
-`session.bootstrap`, pass its `wait_id` as `resume_wait_id` on the next
-`work.wait_for_event`, including the owned job parameters when resuming a job.
-This atomically replaces only that previously observed wait; it does not change
-any ticket lease, job, worktree or identity. No separate permission is needed to
-resume the operator's same chat. If the wait changed in the meantime, refresh
-bootstrap once; repeated contention means stop and report actual concurrent use.
-A `superseded` response means this old request must stop without retrying,
-claiming or instructing the user to close the replacement chat. A different
-simultaneous worker still needs its own instance.
-
-For a durable worker job, replace repeated model polling with this same tool:
-pass `job_kind` (`provision`, `submission`, `qa`, or `merge`) and `job_id`.
-The host validates ownership and maintains the job's existing valid ticket
-lease while connected. After the event, invoke its `poll_tool` once to retrieve
-the authoritative result. Resume the correct assignment/worktree afterward.
-Do not call an idle-work wait while holding unrelated unfinished work.
-
-Codex's configured MCP tool timeout must exceed the wait; generated profiles
-set 86400 seconds. Claude profiles set per-server `timeout` to 86400000 ms:
-its separate idle limit otherwise aborts silent stdio calls after 30 minutes.
-HoH sends MCP progress and checks the transport while waiting. These protocol
-messages and server maintenance consume no model
-polling turns. Timeout/reconnection can require a new turn; this is not an
-unlimited background agent. Stop, closing the chat, sleeping the machine or
-stopping HoH interrupts the connection; recover a stranded wait as described
-above. A dead process's presence expires within 90 seconds.
-Ordinary MCP cannot restart a stopped chat. Ask and stop when human input is
-needed instead of hiding a question inside a long wait.
+Wait with `work.wait_for_event` as its tool description says, which is the one
+authoritative statement of the wait protocol; after Stop, timeout or restart,
+keep this chat's instance and resume with `resume_wait_id` from bootstrap's
+`event_wait`. A different simultaneous worker needs its own instance. Report an
+unhandled durable failure first, as the base skill's hard stops say.
 
 For an active assignment, resolve current ticket context and its required fields.
 In supervised deployments, a queued job waits for the service-host worker pool.

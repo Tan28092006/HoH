@@ -31,7 +31,9 @@ REQUIRED_FILES = (
     "hoh-integrator/SKILL.md",
 )
 MARKDOWN_LINK = re.compile(r"\]\(([^)]+)\)")
-TOOL_REFERENCE = re.compile(r"`([a-z_]+\.[a-z_]+)`")
+# A backticked `role.verb` or `role.verb(...)` call. Only tokens whose prefix is a
+# real tool namespace count, so a file name or field path is not a tool name.
+TOOL_REFERENCE = re.compile(r"`([a-z_]+\.[a-z_]+)(?:`|\()")
 BACKTICKED_PATH = re.compile(r"`([A-Za-z0-9_.][A-Za-z0-9_./-]*/[A-Za-z0-9_./-]*)`")
 # Directories holding material a skill tells an agent to open. A skill may also
 # name a source path, but only as an example of a ticket's write scope, which is
@@ -158,34 +160,33 @@ def test_an_uninstalled_repository_path_is_always_marked_as_one() -> None:
     assert unmarked == []
 
 
-def test_the_assets_the_wakeup_reference_names_are_still_unportable() -> None:
-    """Records why those files are named rather than shipped.
+def test_client_configs_are_generated_not_hand_written() -> None:
+    """Hand-written prompts and configs drifted from the skills (H9).
 
-    If they ever become portable, the installer could distribute them and the
-    reference could stop sending readers to a checkout; this test failing is the
-    signal to revisit that decision rather than a defect on its own.
+    `local_agent setup` and `hoh-agent-kit` generate every client config; a
+    hand-written copy under deploy/ must not come back.
     """
-    unportable = {
-        asset.relative_to(REPOSITORY_ROOT).as_posix()
-        for named in ("deploy/codex", "deploy/claude-code", "docs/ROLE_WAKEUPS.md")
-        for asset in (
-            [REPOSITORY_ROOT / named]
-            if (REPOSITORY_ROOT / named).is_file()
-            else (REPOSITORY_ROOT / named).rglob("*")
+    reintroduced = [
+        named
+        for named in ("deploy/codex", "deploy/claude-code", "deploy/antigravity")
+        if (REPOSITORY_ROOT / named).exists()
+    ]
+
+    assert reintroduced == []
+
+
+def test_skills_do_not_restate_the_wait_constants() -> None:
+    """The work.wait_for_event tool description is the one statement of the wait (H10)."""
+    constants = re.compile(r"43200|86400|\b12\s*h\b|12[- ]hours?", re.IGNORECASE)
+    offenders = {
+        document.relative_to(REPOSITORY_ROOT).as_posix(): constants.findall(
+            document.read_text(encoding="utf-8")
         )
-        if asset.is_file()
-        and FORBIDDEN_CONTENT.search(asset.read_text(encoding="utf-8", errors="ignore"))
+        for document in _skill_markdown()
+        if constants.search(document.read_text(encoding="utf-8"))
     }
 
-    assert unportable == {
-        "deploy/claude-code/hoh-developer.mcp.json",
-        "deploy/claude-code/hoh-planner.mcp.json",
-        "deploy/claude-code/hoh-qa.mcp.json",
-        "deploy/codex/hoh-developer.toml",
-        "deploy/codex/hoh-planner.toml",
-        "deploy/codex/hoh-qa.toml",
-        "docs/ROLE_WAKEUPS.md",
-    }
+    assert offenders == {}
 
 
 def test_no_installed_file_carries_a_local_path_or_credential() -> None:
@@ -207,9 +208,14 @@ def test_no_installed_file_carries_a_local_path_or_credential() -> None:
 def test_skills_only_name_registered_mcp_tools() -> None:
     """A skill must never instruct an agent to call a tool the server does not expose."""
     registered = _registered_tool_names()
+    namespaces = {name.split(".", 1)[0] for name in registered}
     unavailable: dict[str, list[str]] = {}
     for document in _skill_markdown():
-        named = set(TOOL_REFERENCE.findall(document.read_text(encoding="utf-8")))
+        named = {
+            name
+            for name in TOOL_REFERENCE.findall(document.read_text(encoding="utf-8"))
+            if name.split(".", 1)[0] in namespaces
+        }
         missing = sorted(name for name in named if name not in registered)
         if missing:
             unavailable[document.relative_to(REPOSITORY_ROOT).as_posix()] = missing

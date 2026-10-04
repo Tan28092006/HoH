@@ -387,7 +387,7 @@ def test_claude_profile_upgrade_handles_idle_timeout_and_preserves_higher_overri
     assert preserved['unrelated'] == {'keep':True}
 
 
-def test_the_card_and_every_setup_prompt_say_to_wait_silently(desktop):
+def test_the_card_and_every_setup_prompt_point_at_the_wait_tool(desktop):
     """A role chat that narrates empty waits grows its context until it stops."""
     from hoh_control_plane.local_agent import make_prompts
 
@@ -400,9 +400,15 @@ def test_the_card_and_every_setup_prompt_say_to_wait_silently(desktop):
     card = (
         Path(__file__).resolve().parents[1] / 'skills' / 'hoh-control-plane' / 'SKILL.md'
     ).read_text(encoding='utf-8')
-    assert "write nothing to the chat" in card
-    assert "call it again at" in card
+    from hoh_control_plane import mcp_server
+
+    # The tool description is the one place the silent-wait rule is stated; the
+    # card and every prompt point at it instead of restating it.
+    source = Path(mcp_server.__file__).read_text(encoding='utf-8')
+    assert "While waiting write nothing to the chat" in source
+    assert "call this again at once" in source
+    assert "as its tool" in card and "description says" in card
 
     for role, prompt in make_prompts(root, "shop", instance="codex-1").items():
-        assert "While waiting, write nothing to the chat" in prompt, role
-        assert "resume after a reconnect" in prompt, role
+        assert "as its tool" in prompt and "description says" in prompt, role
+        assert "resume_wait_id" in prompt, role

@@ -50,7 +50,7 @@ dispatch queued work to live agents:
 
 Open <http://127.0.0.1:8765>. The local runner enables local identity headers and seeds a demo project. To attach the role-scoped MCP to separate Codex or Claude agents, follow [docs/LOCAL_SETUP.md](./docs/LOCAL_SETUP.md).
 
-For automatic queue checks in a long-lived Codex or Claude Code role worker,
+For how a long-lived Codex or Claude Code role worker waits for hand-offs,
 see [docs/ROLE_WAKEUPS.md](./docs/ROLE_WAKEUPS.md).
 
 To use this repository as the first project managed by HoH itself, follow the

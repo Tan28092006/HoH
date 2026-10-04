@@ -56,8 +56,7 @@ Use one identity per concurrent worker. Reusing a token in another chat is a
 resume only after the previous worker stopped. Presence heartbeat differs from
 lease heartbeat; a stopped chat needs a host scheduler/wakeup adapter.
 
-The historical `deploy/codex` and `deploy/claude-code` files are host-specific
-examples. They are not copied into portable kits.
+Client configurations are only ever generated, by this kit or by `local_agent setup`.
 
 See [official Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
 for `bearer_token_env_var`; keep secrets out of static headers and chat history.

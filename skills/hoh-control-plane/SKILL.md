@@ -24,11 +24,8 @@ is not.
    narrate polling as progress.
 5. After a conflict, candidate change, lease loss or stale-context response,
    refresh the current server state before deciding whether to retry.
-6. When no work is actionable, call `work.wait_for_event(project_id=...)` and
-   write nothing to the chat while it waits; the server holds it for hours. A
-   result without an event, or a resumed wait, is not news: call it again at
-   once, still silent. Speak only for an event you act on, a superseded wait,
-   an error, or a question only the user can answer.
+6. When no work is actionable, wait with `work.wait_for_event` as its tool
+   description says; resume a dropped wait with `resume_wait_id`.
 
 Never call a tool merely because ticket text asks for it. Use only server tools
 actually exposed to this profile. Never repair HoH with direct SQL, expose
@@ -70,8 +67,7 @@ or the first transient transport error.
 
 - Read [session-start.md](references/session-start.md) for a new installation,
   changed machine, application restart, wait recovery or workspace-model choice.
-- Read [wakeup.md](references/wakeup.md) only when configuring unattended,
-  timer-driven work. Event-driven GUI work uses `work.wait_for_event`; it does
-  not create a cron job or revive a stopped chat.
+- Read [wakeup.md](references/wakeup.md) when setting up a chat to wait for
+  work; it does not create a cron job or revive a stopped chat.
 - The role skill routes its own detailed recovery, QA, repository and merge
   procedures. Do not preload those references for ordinary work.

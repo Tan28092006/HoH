@@ -71,17 +71,11 @@ session has stopped. Follow the returned workspace model: colocated requires
 access to the server filesystem; agent_workspace needs Git access and a local
 checkout. Auth does not grant shell, filesystem or browser capabilities.
 For several projects, select the intended project in session.bootstrap.
-For event-driven GUI work, call work.wait_for_event with a 43200-second wait.
-The kit sets Codex's MCP tool timeout to 86400 seconds and Claude's per-server
-timeout to 86400000 milliseconds, covering its separate idle timeout too.
-For this same chat reconnecting, keep its identity: read event_wait in bootstrap
-and pass its wait_id as resume_wait_id on the next work.wait_for_event. An old
-request receiving status=superseded must stop without retrying or claiming work.
-MCP process count does not prove duplicate active chats. An open pending
-MCP call costs no model polling turns. Stop/close/sleep disconnects it; reconnect
-and bootstrap to resume. A stopped chat cannot be awakened by ordinary MCP.
+Wait with work.wait_for_event as its tool description says; resume with
+resume_wait_id. A stopped chat cannot be awakened by ordinary MCP.
 For clients other than Codex/Claude Code, install the skill folders and configure
-an HTTP MCP connection using the URL and token environment variable in this kit.
+an HTTP MCP connection using the URL and token environment variable in this kit,
+with a tool timeout longer than the wait the tool description states.
 """
     (output / "START_HERE.md").write_text(start, encoding="utf-8")
     checksums = {p.relative_to(output).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
