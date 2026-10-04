@@ -29,6 +29,10 @@ from hoh_control_plane.service._common import (
 )
 
 
+class _RepositoryObservationMoved(ConflictError):
+    """The stored repository observation changed while a sync inspected Git."""
+
+
 class PlanningMixin:
     """Planner-authorized project, feature and ticket lifecycle."""
 
@@ -179,9 +183,21 @@ class PlanningMixin:
         return {"project": configured_project, "repository_path": normalized_path}
 
     def sync_repository(self, actor: Actor, project_id: str) -> dict[str, Any]:
-        """Fetch remote truth and open a mandatory Planner reconciliation boundary."""
+        """Fetch remote truth and open a mandatory Planner reconciliation boundary.
+
+        The observation is compare-and-set against both the remote refs and the
+        observed mainline commit. A merge that completes while the fetch runs
+        advances the mainline; the sync then retries once from fresh state rather
+        than writing the stale SHA back and opening a spurious reconciliation.
+        """
         require_role(actor, Role.PLANNER, Role.ADMIN)
         require_project(actor, project_id)
+        try:
+            return self._sync_repository_once(actor, project_id)
+        except _RepositoryObservationMoved:
+            return self._sync_repository_once(actor, project_id)
+
+    def _sync_repository_once(self, actor: Actor, project_id: str) -> dict[str, Any]:
         with self.store.connection() as connection:
             project = self._one(
                 connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
@@ -313,8 +329,11 @@ class PlanningMixin:
             )
             if current["repository_path"] != repository["repository_path"]:
                 raise ConflictError("Project repository changed while its upstream was fetched")
-            if (current.get("observed_remote_refs") or "{}") != previous_refs_raw:
-                raise ConflictError(
+            if (
+                (current.get("observed_remote_refs") or "{}") != previous_refs_raw
+                or current.get("observed_mainline_commit") != previous_mainline
+            ):
+                raise _RepositoryObservationMoved(
                     "Repository observation changed while remote refs were inspected; sync again"
                 )
             changed = (

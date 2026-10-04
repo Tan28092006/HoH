@@ -252,3 +252,57 @@ async def test_planner_sync_repository_is_callable_through_mcp(
     )
 
     assert manifest["relation"] == "up_to_date"
+
+
+def test_a_merge_landing_during_the_fetch_is_not_overwritten_or_reconciled_twice(
+    service, actors, seeded, tmp_path: Path, monkeypatch
+) -> None:
+    repository, _remote = _tracked_repository(tmp_path)
+    service.configure_repository(actors["planner"], "project-1", str(repository))
+    service.sync_repository(actors["planner"], "project-1")
+    keep_open_tickets(service, actors["planner"])
+
+    def reconciliations() -> list[dict]:
+        with service.store.connection() as connection:
+            return [dict(row) for row in connection.execute(
+                "SELECT reconciliation_id, status FROM repository_reconciliations "
+                "WHERE project_id = 'project-1'"
+            ).fetchall()]
+
+    before = reconciliations()
+    real_sync_upstream = service.git_worktrees.sync_upstream
+    calls: list[str] = []
+    merged: dict[str, str] = {}
+
+    def sync_upstream_with_concurrent_merge(repository_path, default_branch):
+        manifest = real_sync_upstream(repository_path, default_branch)
+        calls.append(manifest["local_commit"])
+        if len(calls) == 1:
+            # A queued merge completes after the fetch but before the sync
+            # commits: Git's branch and the observed mainline both advance.
+            (repository / "merged.txt").write_text("merged\n", encoding="utf-8")
+            _git(repository, "add", "merged.txt")
+            _git(repository, "commit", "-m", "Merged candidate")
+            merged["commit"] = _git(repository, "rev-parse", "HEAD")
+            with service.store.connection(immediate=True) as connection:
+                connection.execute(
+                    "UPDATE project_repositories SET observed_mainline_commit = ? "
+                    "WHERE project_id = 'project-1'",
+                    (merged["commit"],),
+                )
+        return manifest
+
+    monkeypatch.setattr(service.git_worktrees, "sync_upstream", sync_upstream_with_concurrent_merge)
+    manifest = service.sync_repository(actors["planner"], "project-1")
+
+    assert len(calls) == 2
+    assert calls[1] == merged["commit"]
+    assert manifest["local_commit"] == merged["commit"]
+    assert manifest["changed"] is False
+    assert manifest["reconciliation_id"] is None
+    assert reconciliations() == before
+    with service.store.connection() as connection:
+        observed = connection.execute(
+            "SELECT observed_mainline_commit FROM project_repositories WHERE project_id = 'project-1'"
+        ).fetchone()[0]
+    assert observed == merged["commit"]

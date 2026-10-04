@@ -76,14 +76,13 @@ class GitWorktreeManager:
         """
         repository = Path(self.validate_repository(repository_path))
         local_ref = f"refs/heads/{default_branch}"
-        local_commit = self._resolve_commit(repository, local_ref)
         remote = self._git(
             repository, "config", "--get", f"branch.{default_branch}.remote", check=False
         ).stdout.strip()
         if not remote:
             return {
                 "relation": "no_upstream",
-                "local_commit": local_commit,
+                "local_commit": self._resolve_commit(repository, local_ref),
                 "upstream_ref": None,
                 "upstream_commit": None,
                 "ahead": 0,
@@ -119,6 +118,9 @@ class GitWorktreeManager:
                     "Could not fetch the configured Git upstream; repository freshness is unknown",
                     {"reason": "upstream_fetch_failed", "remote": remote},
                 )
+        # Read the local branch only after the fetch: a merge that lands while
+        # the fetch runs must be observed, not overwritten by a stale SHA.
+        local_commit = self._resolve_commit(repository, local_ref)
         remote_branches: dict[str, str] = {}
         if remote != ".":
             refs = self._git(
