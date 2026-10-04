@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from conftest import keep_open_tickets
+from barrier_helpers import keep_open_tickets
 
 from hoh_control_plane.domain import Actor, AuthorizationError, ConflictError, Role
 from hoh_control_plane.mcp_server import create_mcp_server

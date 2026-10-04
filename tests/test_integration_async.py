@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from conftest import keep_open_tickets
+from barrier_helpers import keep_open_tickets
 
 from hoh_control_plane import mcp_server
 from hoh_control_plane.domain import AuthorizationError, ConflictError, ValidationError

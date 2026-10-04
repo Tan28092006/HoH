@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from conftest import keep_open_tickets
+from barrier_helpers import keep_open_tickets
 
 from conftest import FakeProber
 from hoh_control_plane.domain import Actor, ConflictError, Role, TicketStatus, ValidationError

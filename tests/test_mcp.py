@@ -4,7 +4,7 @@ from pathlib import Path
 import sqlite3
 
 import pytest
-from conftest import keep_open_tickets
+from barrier_helpers import keep_open_tickets
 
 from mcp.server.fastmcp.exceptions import ToolError
 
