@@ -4,6 +4,7 @@ from pathlib import Path
 import sqlite3
 
 import pytest
+from conftest import keep_open_tickets
 
 from mcp.server.fastmcp.exceptions import ToolError
 
@@ -527,8 +528,15 @@ async def test_developer_and_qa_mcp_flow_records_test_run_and_verdict(tmp_path) 
     )
 
     assert verdict["ticket"]["status"] == "VERIFIED"
-    context = service.get_ticket_context(planner, "DEV-102")
-    assert any(entry["entry_type"] == "qa_test_run" for entry in context["context_entries"])
+    # The run is recorded durably; since 0.3.18 role packets carry test runs in
+    # their own sections rather than repeating the narration entry.
+    with store.connection() as connection:
+        recorded = connection.execute(
+            "SELECT content FROM context_entries WHERE ticket_id = ? AND entry_type = 'qa_test_run'",
+            ("DEV-102",),
+        ).fetchall()
+    assert len(recorded) == 1
+    assert recorded[0]["content"] == "The isolated regression suite passed."
 
 
 @pytest.mark.anyio
@@ -984,6 +992,9 @@ async def test_planner_mcp_recovers_a_blocked_candidate_for_a_fresh_qa_claim(
     )
     blocked = rejected
     assert blocked["ticket"]["status"] == "BLOCKED"
+    # The rejection opened a reconciliation barrier, which refuses every claim
+    # first; Planner resolves it so the BLOCKED state itself is what refuses.
+    keep_open_tickets(service, actors["planner"])
     with pytest.raises(ToolError, match="BLOCKED"):
         await developer_server.call_tool("work.claim", {
             "ticket_id": ticket["ticket_id"], "expected_version": blocked["ticket"]["version"]})
