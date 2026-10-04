@@ -24,8 +24,8 @@ ticket state here; `tests/test_repo_docs.py` caps it at 900 words.
   against any other source tree. It runs across workers (`-n auto`, about 4
   minutes for the full suite; `-n 0` for serial). Targeted runs may add
   `--no-cov`; the full suite must clear the 80% coverage gate.
-- `main` does not pass every test. Before blaming your change, compare failures
-  with a run of unchanged `main`.
+- `main` is green (987 passed, 30 skipped on 2026-10-04). A failure after your
+  change is yours until a run of unchanged `main` shows otherwise.
 - A local development instance: [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md).
   Never start a component without the host environment: with no
   `HOH_DATABASE_PATH` it creates a stray database.
