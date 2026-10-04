@@ -11,7 +11,7 @@ from test_integration_async import REGRESSION_COMMAND, _candidate_ready_for_inte
 def ready(service,actors,seeded,tmp_path):
     repo,ticket,candidate,verified = _candidate_ready_for_integration(service,actors,seeded,tmp_path)
     claim = _claimed_for_integration(service,actors,ticket,verified)
-    job = service.queue_merge_candidate(actors['integrator'],ticket['ticket_id'],claim['lease']['lease_id'],claim['ticket']['version'])['merge_job']
+    job = service.queue_merge_candidate(actors['integrator'],ticket['ticket_id'],claim['lease']['lease_id'],claim['ticket']['version'], context_snapshot_id=service.get_ticket_context(actors['integrator'], ticket['ticket_id'])["context_snapshot_id"])['merge_job']
     return repo,ticket,candidate['candidate'],claim,job
 
 
@@ -29,7 +29,7 @@ def test_queue_binds_current_candidate_not_older_row_with_same_sha(service,actor
             c.execute(f"UPDATE {table} SET candidate_id='cand_current' WHERE candidate_id=?",(old,))
         c.execute("UPDATE audit_events SET payload=replace(payload,?,'cand_current') WHERE aggregate_id=?",(old,ticket['ticket_id']))
     claim = _claimed_for_integration(service,actors,ticket,verified)
-    job = service.queue_merge_candidate(actors['integrator'],ticket['ticket_id'],claim['lease']['lease_id'],claim['ticket']['version'])['merge_job']
+    job = service.queue_merge_candidate(actors['integrator'],ticket['ticket_id'],claim['lease']['lease_id'],claim['ticket']['version'], context_snapshot_id=service.get_ticket_context(actors['integrator'], ticket['ticket_id'])["context_snapshot_id"])['merge_job']
     assert job['candidate_id'] == 'cand_current'
 
 

@@ -37,6 +37,7 @@ def _setup_candidate_ticket(service, actors, seeded, tmp_path: Path):
         prepared["base_commit"],
         prepared["branch_ref"],
         ["Feature is implemented and ready for QA verification."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     return repository, submitted["ticket"], submitted["candidate"], worktree
 
@@ -336,6 +337,7 @@ def test_developer_rebase_takeover_and_replacement_candidate_creation(
         prepared["base_commit"],
         prepared["branch_ref"],
         ["Rebased feature ready for QA."],
+        context_snapshot_id=service.get_ticket_context(actors["developer_2"], rework_ticket["ticket_id"])["context_snapshot_id"],
     )
 
     # AC 4: New immutable candidate_id created, old candidate preserved

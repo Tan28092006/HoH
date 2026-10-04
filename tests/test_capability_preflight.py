@@ -55,6 +55,7 @@ def blocked(service, actors, seeded):
         actors["developer"], ticket["ticket_id"], claimed["lease"]["lease_id"],
         claimed["ticket"]["version"], "a" * 40, "b" * 40, "agent/dev-01/DEV-142",
         ["Ready for independent QA."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     service.register_agent(
         actors["qa"], skills=["hoh-qa"], execution_capabilities=CAPABILITIES, machine_id=HOST,
@@ -175,6 +176,7 @@ def test_a_ticket_that_becomes_blocked_after_the_preflight_still_gets_its_job(
     service.submit_candidate(
         actors["developer"], ticket["ticket_id"], claimed["lease"]["lease_id"],
         claimed["ticket"]["version"], "a" * 40, "b" * 40, "agent/dev-01/DEV-142", ["Ready."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
 
     inbox = service.get_agent_inbox(actors["qa"], "project-1")

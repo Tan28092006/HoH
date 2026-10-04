@@ -67,6 +67,7 @@ def _gate_ready_candidate(service, actors, seeded, tmp_path: Path, *, retry_body
         prepared["worktree"]["base_commit"],
         prepared["worktree"]["branch_ref"],
         ["Retry implementation is ready for QA."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     qa_claim = service.claim_qa(
         actors["qa"], ticket["ticket_id"], candidate["ticket"]["version"], 900
@@ -94,6 +95,7 @@ def _gate_ready_candidate(service, actors, seeded, tmp_path: Path, *, retry_body
             }
             for index, criterion in enumerate(ticket["acceptance_criteria"], start=1)
         ],
+        context_snapshot_id=service.get_ticket_context(actors["qa"], ticket["ticket_id"])["context_snapshot_id"],
     )
     integration = service.claim_integration(
         actors["integrator"],
@@ -266,6 +268,7 @@ def test_gate_reruns_cleanly_after_an_earlier_integration_attempt(
         _git(worktree, "rev-parse", "main"),
         _git(worktree, "branch", "--show-current"),
         ["Regression repaired."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     qa_claim = service.claim_qa(
         actors["qa"], ticket["ticket_id"], repaired["ticket"]["version"], 900
@@ -293,6 +296,7 @@ def test_gate_reruns_cleanly_after_an_earlier_integration_attempt(
             }
             for index, criterion in enumerate(ticket["acceptance_criteria"], start=1)
         ],
+        context_snapshot_id=service.get_ticket_context(actors["qa"], ticket["ticket_id"])["context_snapshot_id"],
     )
     second_integration = service.claim_integration(
         actors["integrator"], ticket["ticket_id"], verified["ticket"]["version"], 900
@@ -341,6 +345,7 @@ def test_a_candidate_with_no_configured_test_command_still_merges(
         prepared["worktree"]["base_commit"],
         prepared["worktree"]["branch_ref"],
         ["No project test command is configured yet."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     qa_claim = service.claim_qa(
         actors["qa"], ticket["ticket_id"], candidate["ticket"]["version"], 900
@@ -368,6 +373,7 @@ def test_a_candidate_with_no_configured_test_command_still_merges(
             }
             for index, criterion in enumerate(ticket["acceptance_criteria"], start=1)
         ],
+        context_snapshot_id=service.get_ticket_context(actors["qa"], ticket["ticket_id"])["context_snapshot_id"],
     )
     integration = service.claim_integration(
         actors["integrator"], ticket["ticket_id"], verified["ticket"]["version"], 900

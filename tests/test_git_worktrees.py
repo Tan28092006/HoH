@@ -85,6 +85,7 @@ def _candidate_ready_for_integration(service, actors, seeded, tmp_path: Path):
         prepared["worktree"]["base_commit"],
         prepared["worktree"]["branch_ref"],
         ["Retry implementation is ready for QA."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     qa_claim = service.claim_qa(
         actors["qa"], ticket["ticket_id"], candidate["ticket"]["version"], 900
@@ -112,6 +113,7 @@ def _candidate_ready_for_integration(service, actors, seeded, tmp_path: Path):
             }
             for index, criterion in enumerate(ticket["acceptance_criteria"], start=1)
         ],
+        context_snapshot_id=service.get_ticket_context(actors["qa"], ticket["ticket_id"])["context_snapshot_id"],
     )
     return repository, ticket, candidate, verified
 
@@ -151,6 +153,7 @@ def test_developer_worktree_binds_a_candidate_to_its_ticket_and_branch(
         prepared["worktree"]["base_commit"],
         prepared["worktree"]["branch_ref"],
         ["Retry implementation is committed in the assigned worktree."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     context = service.get_ticket_context(actors["qa"], ticket["ticket_id"])
 
@@ -248,6 +251,7 @@ def test_rework_handoffs_to_a_new_developer_without_touching_the_prior_worktree(
         first_worktree["base_commit"],
         first_worktree["branch_ref"],
         ["First candidate is ready for QA."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     qa_claim = service.claim_qa(
         actors["qa"], ticket["ticket_id"], first_candidate["ticket"]["version"], 900
@@ -274,6 +278,7 @@ def test_rework_handoffs_to_a_new_developer_without_touching_the_prior_worktree(
                 ],
             }
         ],
+        context_snapshot_id=service.get_ticket_context(actors["qa"], ticket["ticket_id"])["context_snapshot_id"],
     )
     # QA rejection opens a Planner reconciliation atomically with the verdict.
     keep_open_tickets(service, actors["planner"])
@@ -309,6 +314,7 @@ def test_rework_handoffs_to_a_new_developer_without_touching_the_prior_worktree(
         handed_off["base_commit"],
         handed_off["branch_ref"],
         ["The rejected candidate was continued in a separate worktree."],
+        context_snapshot_id=service.get_ticket_context(actors["developer_2"], ticket["ticket_id"])["context_snapshot_id"],
     )
 
     assert second_candidate["candidate"]["base_commit"] == first_worktree["base_commit"]
@@ -349,6 +355,7 @@ def test_rework_handoff_uses_current_main_when_the_rejected_candidate_has_base_d
         first_worktree["base_commit"],
         first_worktree["branch_ref"],
         ["The first candidate is ready for QA."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     (repository / "mainline.txt").write_text("mainline moved\n", encoding="utf-8")
     _git(repository, "add", "mainline.txt")
@@ -379,6 +386,7 @@ def test_rework_handoff_uses_current_main_when_the_rejected_candidate_has_base_d
                 ],
             }
         ],
+        context_snapshot_id=service.get_ticket_context(actors["qa"], ticket["ticket_id"])["context_snapshot_id"],
     )
     # QA rejection opens a Planner reconciliation atomically with the verdict.
     keep_open_tickets(service, actors["planner"])
@@ -430,6 +438,7 @@ def test_candidate_is_rejected_when_actual_diff_exceeds_declared_write_scope(
             prepared["worktree"]["base_commit"],
             prepared["worktree"]["branch_ref"],
             ["This deliberately changes an unrelated file."],
+            context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
         )
 
 
@@ -520,6 +529,7 @@ def test_configured_repository_rejects_candidate_from_another_branch(
             prepared["worktree"]["base_commit"],
             "hoh/project-1/DEV-142/someone-else",
             ["This must be rejected."],
+            context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
         )
 
 
@@ -808,6 +818,7 @@ def test_the_prior_branch_is_never_accepted_for_a_candidate_after_takeover(
             first_worktree["base_commit"],
             first_worktree["branch_ref"],
             ["Late submission from the replaced Developer."],
+            context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
         )
 
     with pytest.raises(ValidationError, match="branch"):
@@ -820,6 +831,7 @@ def test_the_prior_branch_is_never_accepted_for_a_candidate_after_takeover(
             first_worktree["base_commit"],
             first_worktree["branch_ref"],
             ["Submitting from the prior Developer's branch."],
+            context_snapshot_id=service.get_ticket_context(actors["developer_2"], ticket["ticket_id"])["context_snapshot_id"],
         )
 
     context = service.get_ticket_context(
@@ -890,4 +902,5 @@ def test_replacement_candidate_is_still_bound_to_the_ticket_write_scope(
             prepared["worktree"]["base_commit"],
             prepared["worktree"]["branch_ref"],
             ["Touches a path outside the declared write scope."],
+            context_snapshot_id=service.get_ticket_context(actors["developer_2"], ticket["ticket_id"])["context_snapshot_id"],
         )

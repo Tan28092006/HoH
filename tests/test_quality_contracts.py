@@ -160,6 +160,7 @@ def test_qa_cannot_verify_with_the_wrong_scenario_or_evidence_type(
                     ],
                 }
             ],
+            context_snapshot_id=service.get_ticket_context(actors["qa"], ticket["ticket_id"])["context_snapshot_id"],
         )
 
 
@@ -190,6 +191,7 @@ def test_verdict_returns_a_materialized_evidence_bundle(
         actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"],
         candidate["candidate"]["candidate_id"], qa_claim["ticket"]["version"],
         "passed", findings,
+        context_snapshot_id=service.get_ticket_context(actors["qa"], ticket["ticket_id"])["context_snapshot_id"],
     )
 
     assert len(result["evidence_bundle"]["verified_records"]) == len(findings)

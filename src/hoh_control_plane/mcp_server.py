@@ -34,6 +34,7 @@ from hoh_control_plane.domain import (
     ValidationError,
 )
 from hoh_control_plane.service import ControlPlaneService
+from hoh_control_plane.service._common import require_snapshot_id
 from hoh_control_plane.store_factory import store_from_environment
 from hoh_control_plane.store import ContentionError
 
@@ -1852,19 +1853,8 @@ def _project_for_call(
 
 
 def _require_snapshot(context_snapshot_id: Any, tool_name: str) -> str:
-    """A consequential write must name the packet it was decided from.
-
-    The freshness check only runs against a snapshot the caller supplies, so an
-    omitted snapshot silently skipped it. Submission, verdict and merge are the
-    three writes whose staleness costs a whole iteration, so they refuse to run
-    without one rather than trusting that the packet was re-read.
-    """
-    if not isinstance(context_snapshot_id, str) or not context_snapshot_id.strip():
-        raise ValidationError(
-            f"{tool_name} requires context_snapshot_id: call ticket.get_context "
-            "immediately before this write and pass the context_snapshot_id it returns"
-        )
-    return context_snapshot_id.strip()
+    """Fail fast at the transport; the service enforces the same rule."""
+    return require_snapshot_id(context_snapshot_id, tool_name)
 
 
 def _strip_reference(reference: str, kind: str) -> str:

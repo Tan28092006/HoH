@@ -47,6 +47,7 @@ def _qa_failed(service, actors, seeded, status: str = "failed"):
     candidate = service.submit_candidate(
         actors["developer"], ticket["ticket_id"], claim["lease"]["lease_id"],
         claim["ticket"]["version"], "a" * 40, "b" * 40, "agent/dev-01/DEV-142", ["Ready."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     qa_claim = service.claim_qa(
         actors["qa"], ticket["ticket_id"], candidate["ticket"]["version"], 900
@@ -73,6 +74,7 @@ def _qa_failed(service, actors, seeded, status: str = "failed"):
                 ],
             }
         ],
+        context_snapshot_id=service.get_ticket_context(actors["qa"], ticket["ticket_id"])["context_snapshot_id"],
     )
 
 

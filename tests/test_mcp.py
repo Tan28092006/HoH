@@ -747,6 +747,7 @@ async def test_a_qa_failure_on_an_upgraded_database_is_not_reported_as_a_state_c
         actors["developer"], ticket["ticket_id"], claim["lease"]["lease_id"],
         claim["ticket"]["version"], "a" * 40, "b" * 40, "agent/dev-01/DEV-142",
         ["Ready for QA."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     qa_claim = service.claim_qa(
         actors["qa"], ticket["ticket_id"], candidate["ticket"]["version"], 900
@@ -819,6 +820,7 @@ async def test_planner_mcp_requeues_stale_candidate_with_audit_redaction(
         prepared["base_commit"],
         prepared["branch_ref"],
         ["Feature is ready for QA."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     candidate = submitted["candidate"]
 

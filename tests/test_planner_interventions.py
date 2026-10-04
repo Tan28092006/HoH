@@ -61,6 +61,7 @@ def _qa_failed(service, actors, ticket):
         "b" * 40,
         "agent/dev-01/DEV-142",
         ["Ready for QA."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     qa_claim = service.claim_qa(
         actors["qa"], ticket["ticket_id"], candidate["ticket"]["version"], 900
@@ -73,6 +74,7 @@ def _qa_failed(service, actors, ticket):
         qa_claim["ticket"]["version"],
         "failed",
         [_failing_finding(ticket["acceptance_criteria"][0])],
+        context_snapshot_id=service.get_ticket_context(actors["qa"], ticket["ticket_id"])["context_snapshot_id"],
     )
 
 
@@ -160,6 +162,7 @@ def test_an_integration_conflict_still_raises_its_request(
         ticket["ticket_id"],
         integration["lease"]["lease_id"],
         integration["ticket"]["version"],
+        context_snapshot_id=service.get_ticket_context(actors["integrator"], ticket["ticket_id"])["context_snapshot_id"],
     )
     (repository / "mainline.txt").write_text("new mainline work\n", encoding="utf-8")
     _git(repository, "add", "mainline.txt")

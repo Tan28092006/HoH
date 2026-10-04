@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from hoh_control_plane.domain import ContextStaleError, Role
+from hoh_control_plane.domain import ContextStaleError, Role, ValidationError
 
 
 def _snapshot(service, actor, ticket_id: str) -> str:
@@ -260,3 +260,28 @@ def test_a_snapshot_holds_no_narrative_only_versions(service, actors, seeded) ->
         "repository_reconciliation_refs",
         "retirement",
     }
+
+
+@pytest.mark.parametrize("snapshot", [None, "", "   "])
+@pytest.mark.parametrize(
+    ("method", "role", "tool", "arguments"),
+    [
+        ("submit_candidate", "developer", "dev.submit_candidate",
+         ("lease", 1, "a" * 40, "b" * 40, "branch", [])),
+        ("queue_candidate_submission", "developer", "dev.submit_candidate",
+         ("lease", 1, "a" * 40, "b" * 40, "branch", [])),
+        ("submit_qa_verdict", "qa", "qa.submit_verdict",
+         ("lease", "cand", 1, "passed", [{"criterion": "x"}])),
+        ("queue_merge_candidate", "integrator", "integrator.merge_candidate",
+         ("lease", 1)),
+    ],
+)
+def test_the_service_refuses_a_consequential_write_without_a_snapshot(
+    service, actors, seeded, method, role, tool, arguments, snapshot
+) -> None:
+    """The rule holds whichever transport calls the service, not only MCP."""
+    with pytest.raises(ValidationError, match=f"{tool} requires context_snapshot_id"):
+        getattr(service, method)(
+            actors[role], seeded["ticket"]["ticket_id"], *arguments,
+            context_snapshot_id=snapshot,
+        )

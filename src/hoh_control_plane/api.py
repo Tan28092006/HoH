@@ -106,6 +106,7 @@ class CandidateRequest(StrictModel):
     base_commit: str = Field(min_length=40, max_length=64, pattern=r"^[0-9a-fA-F]+$")
     branch_ref: str = Field(min_length=1, max_length=300)
     developer_claims: list[str] = Field(default_factory=list, max_length=50)
+    context_snapshot_id: str = Field(min_length=1, max_length=100)
 
 
 class EvidenceInput(StrictModel):
@@ -131,6 +132,7 @@ class VerdictRequest(StrictModel):
     expected_version: int = Field(ge=1)
     verdict: str = Field(pattern=r"^(passed|failed)$")
     findings: list[FindingInput] = Field(min_length=1, max_length=50)
+    context_snapshot_id: str = Field(min_length=1, max_length=100)
 
 
 # An idle board does not need a tighter loop than a person can perceive, and a

@@ -13,7 +13,7 @@ def queued_merge(service, actors, seeded, tmp_path):
     repository, ticket, candidate, verified = _candidate_ready_for_integration(service, actors, seeded, tmp_path)
     claim = _claimed_for_integration(service, actors, ticket, verified)
     job = service.queue_merge_candidate(actors['integrator'], ticket['ticket_id'],
-                                       claim['lease']['lease_id'], claim['ticket']['version'])['merge_job']
+                                       claim['lease']['lease_id'], claim['ticket']['version'], context_snapshot_id=service.get_ticket_context(actors['integrator'], ticket['ticket_id'])["context_snapshot_id"])['merge_job']
     return repository, candidate['candidate'], job
 
 

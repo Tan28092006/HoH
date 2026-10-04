@@ -231,6 +231,7 @@ def test_failed_qa_becomes_rework_context_bound_to_candidate(
         base_commit="b" * 40,
         branch_ref="agent/dev-01/DEV-142",
         developer_claims=["Retry no longer duplicates an order"],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], "DEV-142")["context_snapshot_id"],
     )
     qa_claim = service.claim_qa(
         actors["qa"],
@@ -260,6 +261,7 @@ def test_failed_qa_becomes_rework_context_bound_to_candidate(
                 ],
             }
         ],
+        context_snapshot_id=service.get_ticket_context(actors["qa"], "DEV-142")["context_snapshot_id"],
     )
 
     assert verdict["ticket"]["status"] == TicketStatus.REWORK.value
@@ -288,6 +290,7 @@ def test_successful_qa_verifies_ticket(
         "d" * 40,
         "agent/dev-01/DEV-142",
         ["Both acceptance criteria pass locally"],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], "DEV-142")["context_snapshot_id"],
     )
     qa_claim = service.claim_qa(
         actors["qa"], "DEV-142", submitted["ticket"]["version"], 900
@@ -317,6 +320,7 @@ def test_successful_qa_verifies_ticket(
                 seeded["ticket"]["acceptance_criteria"], start=1
             )
         ],
+        context_snapshot_id=service.get_ticket_context(actors["qa"], "DEV-142")["context_snapshot_id"],
     )
 
     assert verdict["ticket"]["status"] == TicketStatus.VERIFIED.value

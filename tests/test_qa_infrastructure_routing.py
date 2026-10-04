@@ -57,5 +57,5 @@ def test_evidence_gap_does_not_dispatch_developer_but_assertion_failure_does(
             "criterion": ticket["acceptance_criteria"][0], "status": finding_status,
             "observation": "runner evidence missing" if finding_status == "insufficient_evidence" else "assertion failed",
             "evidence": [{"type": "test_result", "observation": "observed", "storage_ref": "evidence://inline"}],
-        }])
+        }], context_snapshot_id=service.get_ticket_context(actors["qa"], ticket["ticket_id"])["context_snapshot_id"])
     assert result["ticket"]["status"] == expected

@@ -71,6 +71,7 @@ def _blocked_candidate_with_insufficient_evidence(service, actors, seeded, tmp_p
         prepared["worktree"]["base_commit"],
         prepared["worktree"]["branch_ref"],
         ["Retry implementation is ready for QA."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     candidate_id = candidate["candidate"]["candidate_id"]
     qa_claim = service.claim_qa(
@@ -104,6 +105,7 @@ def _blocked_candidate_with_insufficient_evidence(service, actors, seeded, tmp_p
             }
             for criterion in ticket["acceptance_criteria"]
         ],
+        context_snapshot_id=service.get_ticket_context(actors["qa"], ticket["ticket_id"])["context_snapshot_id"],
     )
     with service.store.connection() as connection:
         finding_ids = [
@@ -181,6 +183,7 @@ def test_recovery_reopens_a_blocked_ticket_for_an_independent_fresh_qa_verdict(
             }
             for index, criterion in enumerate(ticket["acceptance_criteria"])
         ],
+        context_snapshot_id=service.get_ticket_context(actors["qa"], ticket["ticket_id"])["context_snapshot_id"],
     )
     assert verified["ticket"]["status"] == "VERIFIED"
 

@@ -334,6 +334,23 @@ def test_rest_api_runs_developer_to_qa_rework_flow(tmp_path: Path) -> None:
                 "message": "Baseline recorded",
             },
         )
+        def snapshot(headers: dict[str, str]) -> str:
+            return client.get(
+                f"/api/v1/tickets/{ticket['ticket_id']}/context", headers=headers
+            ).json()["data"]["context_snapshot_id"]
+
+        missing = client.post(
+            f"/api/v1/tickets/{ticket['ticket_id']}/candidates",
+            headers=dev_headers,
+            json={
+                "lease_id": claim["lease"]["lease_id"],
+                "expected_version": claim["ticket"]["version"],
+                "commit_sha": "a" * 40,
+                "base_commit": "b" * 40,
+                "branch_ref": "agent/dev-api-01/DEV-142",
+            },
+        )
+        assert missing.status_code == 422, "REST must not bypass the snapshot rule"
         candidate = client.post(
             f"/api/v1/tickets/{ticket['ticket_id']}/candidates",
             headers=dev_headers,
@@ -344,6 +361,7 @@ def test_rest_api_runs_developer_to_qa_rework_flow(tmp_path: Path) -> None:
                 "base_commit": "b" * 40,
                 "branch_ref": "agent/dev-api-01/DEV-142",
                 "developer_claims": ["Retry path repaired"],
+                "context_snapshot_id": snapshot(dev_headers),
             },
         ).json()["data"]
         qa_claim = client.post(
@@ -362,6 +380,7 @@ def test_rest_api_runs_developer_to_qa_rework_flow(tmp_path: Path) -> None:
                 "candidate_id": candidate["candidate"]["candidate_id"],
                 "expected_version": qa_claim["ticket"]["version"],
                 "verdict": "failed",
+                "context_snapshot_id": snapshot(qa_headers),
                 "findings": [
                     {
                         "criterion": criteria[0],

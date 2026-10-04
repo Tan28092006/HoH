@@ -150,6 +150,7 @@ def test_concurrent_developer_and_qa_activity_on_different_tickets_completes_cle
                     developer, ticket["ticket_id"], claim["lease"]["lease_id"],
                     claim["ticket"]["version"], "a" * 40, "b" * 40,
                     "agent/dev-01/DEV-CONTENTION-1", ["Ready for QA."],
+                    context_snapshot_id=service.get_ticket_context(developer, ticket["ticket_id"])["context_snapshot_id"],
                 )
                 return
         except BaseException as error:  # noqa: BLE001 - surfaced to the test thread
@@ -169,6 +170,7 @@ def test_concurrent_developer_and_qa_activity_on_different_tickets_completes_cle
                     developer, ticket["ticket_id"], claim["lease"]["lease_id"],
                     claim["ticket"]["version"], "c" * 40, "d" * 40,
                     "agent/dev-01/DEV-CONTENTION-2", ["Ready for QA."],
+                    context_snapshot_id=service.get_ticket_context(developer, ticket["ticket_id"])["context_snapshot_id"],
                 )
                 qa_claim = service.claim_qa(
                     qa, ticket["ticket_id"], candidate["ticket"]["version"], 900
@@ -187,6 +189,7 @@ def test_concurrent_developer_and_qa_activity_on_different_tickets_completes_cle
                             "storage_ref": "evidence://x",
                         }],
                     }],
+                    context_snapshot_id=service.get_ticket_context(qa, ticket["ticket_id"])["context_snapshot_id"],
                 )
                 return
         except BaseException as error:  # noqa: BLE001 - surfaced to the test thread
@@ -270,6 +273,7 @@ def test_database_created_by_the_previous_schema_supports_concurrent_activity(
         actors_by_role["developer"], ticket["ticket_id"], claim["lease"]["lease_id"],
         claim["ticket"]["version"], head, prepared["worktree"]["base_commit"],
         prepared["worktree"]["branch_ref"], ["Ready for QA."],
+        context_snapshot_id=service.get_ticket_context(actors_by_role["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     qa_claim = service.claim_qa(actors_by_role["qa"], ticket["ticket_id"], candidate["ticket"]["version"], 900)
     queued = service.queue_project_tests(
