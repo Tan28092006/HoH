@@ -24,10 +24,10 @@ introduced it. The "Guards" column says what change should trigger that read.
 | [0.3.25](RELEASE_0.3.25.md) | Lease-free host-observed capability preflight; approval enforced by server (HOH-278) | QA capability approval |
 | [0.3.26](RELEASE_0.3.26.md) | One suite run per ticket (gate reuses QA run), server-resolved disjoint merges, wake-up re-arm, parallel tests | Merge gate, reconciliation auto-keep, QA run reuse |
 | [0.3.27](RELEASE_0.3.27.md) | Recovery and regression entries reach role packets; main green | Packet entry-type projection |
+| [0.3.28](RELEASE_0.3.28.md) | Correctness wave 1: no Git in the write lock, service-enforced snapshots, idempotency, exact evidence match, sync CAS, legacy merge removed, Planner job expiry | Candidate submission, idempotency, repository sync |
 
 Releases before 0.3.14 are described in
 [RUNTIME_OPERATIONS](../RUNTIME_OPERATIONS.md),
 [OPERATIONAL_VALIDATION](../OPERATIONAL_VALIDATION.md) and the Git history.
 Validation records for installed releases live with the installation, in
 `D:/HoH-service/release/`.
-| [0.3.28](RELEASE_0.3.28.md) | Correctness wave 1: no Git in the write lock, service-enforced snapshots, idempotency, exact evidence match, sync CAS, legacy merge removed, Planner job expiry | Candidate submission, idempotency, repository sync |
