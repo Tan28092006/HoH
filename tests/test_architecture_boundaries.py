@@ -54,7 +54,7 @@ ALLOWED_EXCEPTIONS = {
     ("service.discovery", "agent_wakeup"),
     # Barrier age is computed in the wait loop; it belongs with the barrier in
     # the service, which would remove this lazy import.
-    ("service.planning", "event_wait"),
+    ("service.repository_reconciliation", "event_wait"),
 }
 
 

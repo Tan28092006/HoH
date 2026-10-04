@@ -63,7 +63,14 @@ from hoh_control_plane.service._common import (
     timedelta,
     uuid4,
 )
-from hoh_control_plane.service.planning import PlanningMixin
+from hoh_control_plane.service.project_setup import ProjectSetupMixin
+from hoh_control_plane.service.repository_reconciliation import RepositoryReconciliationMixin
+from hoh_control_plane.service.project_policy import ProjectPolicyMixin
+from hoh_control_plane.service.ticket_authoring import TicketAuthoringMixin
+from hoh_control_plane.service.ticket_retirement import TicketRetirementMixin
+from hoh_control_plane.service.candidate_recovery import CandidateRecoveryMixin
+from hoh_control_plane.service.requirements import RequirementsMixin
+from hoh_control_plane.service.planner_context import PlannerContextMixin
 from hoh_control_plane.service.session import SessionMixin
 from hoh_control_plane.service.discovery import DiscoveryMixin
 from hoh_control_plane.capability_probe import HostCapabilityProber
@@ -85,7 +92,14 @@ from hoh_control_plane.service.validation import ValidationMixin
 
 class ControlPlaneService(
     SessionMixin,
-    PlanningMixin,
+    ProjectSetupMixin,
+    RepositoryReconciliationMixin,
+    ProjectPolicyMixin,
+    TicketAuthoringMixin,
+    TicketRetirementMixin,
+    CandidateRecoveryMixin,
+    RequirementsMixin,
+    PlannerContextMixin,
     DiscoveryMixin,
     ContextMixin,
     ExperienceMixin,
