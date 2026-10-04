@@ -30,3 +30,4 @@ Releases before 0.3.14 are described in
 [OPERATIONAL_VALIDATION](../OPERATIONAL_VALIDATION.md) and the Git history.
 Validation records for installed releases live with the installation, in
 `D:/HoH-service/release/`.
+| [0.3.28](RELEASE_0.3.28.md) | Correctness wave 1: no Git in the write lock, service-enforced snapshots, idempotency, exact evidence match, sync CAS, legacy merge removed, Planner job expiry | Candidate submission, idempotency, repository sync |
