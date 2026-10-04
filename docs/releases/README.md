@@ -23,6 +23,7 @@ introduced it. The "Guards" column says what change should trigger that read.
 | [0.3.24](RELEASE_0.3.24.md) | A waiting role holds one long wait and stays silent (HOH-275) | `work.wait`, GUI event wait |
 | [0.3.25](RELEASE_0.3.25.md) | Lease-free host-observed capability preflight; approval enforced by server (HOH-278) | QA capability approval |
 | [0.3.26](RELEASE_0.3.26.md) | One suite run per ticket (gate reuses QA run), server-resolved disjoint merges, wake-up re-arm, parallel tests | Merge gate, reconciliation auto-keep, QA run reuse |
+| [0.3.27](RELEASE_0.3.27.md) | Recovery and regression entries reach role packets; main green | Packet entry-type projection |
 
 Releases before 0.3.14 are described in
 [RUNTIME_OPERATIONS](../RUNTIME_OPERATIONS.md),
