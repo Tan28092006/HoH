@@ -20,6 +20,7 @@ from hoh_control_plane.service._common import (
     _iso,
     _now,
     _row,
+    Path,
     hashlib,
     re,
     require_project,
@@ -1076,6 +1077,19 @@ class IntegrationMixin:
             profile = snapshot["profile"]
             command = profile["test_command"]
             self._test_command(command)
+            # Fast-forward needs main at the frozen base. If main already moved,
+            # the gate would run for nothing and the merge would drift anyway.
+            current_main = self.git_worktrees._resolve_commit(
+                Path(repository["repository_path"]), f"refs/heads/{project['default_branch']}")
+            if current_main != candidate["base_commit"]:
+                return self._complete_queued_merge(merge_job_id, False, current_main)
+            reused = self._reusable_qa_run(job["candidate_id"], command, profile["timeout_seconds"])
+        except DomainError as error:
+            return self.fail_queued_merge(merge_job_id, str(error))
+        if reused is not None:
+            return self._finish_gate_and_merge(
+                merge_job_id, job, actor, candidate, repository, project, reused, gate_mode="reused_qa_run")
+        try:
             with self.git_worktrees.integration_checkout(
                 repository_path=repository["repository_path"], project_id=job["project_id"],
                 ticket_id=job["ticket_id"], candidate_commit=candidate["commit_sha"],
@@ -1097,6 +1111,37 @@ class IntegrationMixin:
             if execution.exit_code != 0 or execution.timed_out:
                 return self._complete_queued_merge(merge_job_id, False, candidate["base_commit"],
                     regression_failure=f"Integration regression failed; inspect {gate_run['storage_ref']} and submit corrected source for independent QA.")
+        except DomainError as error:
+            return self.fail_queued_merge(merge_job_id, str(error))
+        return self._finish_gate_and_merge(
+            merge_job_id, job, actor, candidate, repository, project, gate_run["test_run_id"],
+            gate_mode="executed")
+
+    def _reusable_qa_run(self, candidate_id: str, command: list[str], timeout_seconds: int) -> str | None:
+        """A passing QA run of the frozen command on this exact candidate commit.
+
+        Fast-forward only lands when main equals the candidate's base, so the tree
+        that reaches main is the candidate commit QA already ran. Re-running the
+        same command on the same commit costs a full suite and proves nothing new.
+        Only a QA job (not an earlier gate) with the same digest and timeout counts.
+        """
+        digest = hashlib.sha256("\0".join(command).encode()).hexdigest()
+        with self.store.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT r.test_run_id FROM qa_test_runs r
+                JOIN qa_test_jobs j ON j.test_run_id = r.test_run_id
+                WHERE r.candidate_id = ? AND r.command_digest = ? AND j.timeout_seconds = ?
+                  AND r.exit_code = 0 AND r.timed_out = 0 AND j.status = 'COMPLETED'
+                ORDER BY r.created_at DESC LIMIT 1
+                """,
+                (candidate_id, digest, timeout_seconds),
+            ).fetchone()
+        return None if row is None else row["test_run_id"]
+
+    def _finish_gate_and_merge(self, merge_job_id, job, actor, candidate, repository, project,
+                               test_run_id: str, *, gate_mode: str) -> dict[str, Any]:
+        try:
             # A hold or revoked lease during a long gate must still prevent Git.
             current = self._release_policy_snapshot(actor, job["ticket_id"])
             self._require_release_evidence(current)
@@ -1109,7 +1154,8 @@ class IntegrationMixin:
                 self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
                 self._event(connection, actor, job["project_id"], "integration.gate_passed", "merge_job",
                     merge_job_id, job["expected_version"], {"candidate_id": job["candidate_id"],
-                        "candidate_commit": candidate["commit_sha"], "test_run_id": gate_run["test_run_id"]})
+                        "candidate_commit": candidate["commit_sha"], "test_run_id": test_run_id,
+                        "gate_mode": gate_mode})
         except DomainError as error:
             return self.fail_queued_merge(merge_job_id, str(error))
         try:

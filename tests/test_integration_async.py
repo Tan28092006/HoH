@@ -573,3 +573,102 @@ def test_a_barrier_opened_during_the_merge_does_not_strand_a_landed_candidate(
         assert connection.execute(
             "SELECT status FROM tickets WHERE ticket_id = ?", (ticket["ticket_id"],)
         ).fetchone()["status"] == "DONE"
+
+
+def _mark_run_as_qa_job(service, candidate, ticket, timeout_seconds: int = 60) -> None:
+    candidate_id = candidate["candidate"]["candidate_id"]
+    digest = hashlib.sha256("\0".join(REGRESSION_COMMAND).encode()).hexdigest()
+    with service.store.connection(immediate=True) as connection:
+        connection.execute(
+            """
+            INSERT INTO qa_test_jobs
+                (test_run_id, project_id, candidate_id, ticket_id, lease_id, test_command,
+                 command_digest, timeout_seconds, worktree_path, candidate_commit,
+                 requested_by, status, created_at)
+            VALUES (?, 'project-1', ?, ?, 'lease_qa', '[]', ?, ?, 'unused', ?, 'qa-01',
+                    'COMPLETED', '2026-01-01T00:00:00Z')
+            """,
+            (f"testrun_{candidate_id[-8:]}_0", candidate_id, ticket["ticket_id"], digest,
+             timeout_seconds, candidate["candidate"]["commit_sha"]),
+        )
+
+
+def test_gate_reuses_a_passing_qa_run_of_the_same_commit_and_command(
+    service, actors, seeded, tmp_path: Path, monkeypatch
+) -> None:
+    # Fast-forward lands exactly the commit QA ran, so rerunning the identical
+    # frozen command only repeats a full suite.
+    repository, ticket, candidate, verified = _candidate_ready_for_integration(
+        service, actors, seeded, tmp_path
+    )
+    _mark_run_as_qa_job(service, candidate, ticket)
+    integration = _claimed_for_integration(service, actors, ticket, verified)
+    queued = service.queue_merge_candidate(
+        actors["integrator"], ticket["ticket_id"],
+        integration["lease"]["lease_id"], integration["ticket"]["version"],
+    )
+    executions: list[object] = []
+    monkeypatch.setattr(service.project_tests, "execute", lambda *a, **k: executions.append(a))
+
+    completed = service.execute_queued_merge(queued["merge_job"]["merge_job_id"])
+
+    assert completed["status"] == "COMPLETED"
+    assert executions == []
+    assert _git(repository, "rev-parse", "main") == candidate["candidate"]["commit_sha"]
+    with service.store.connection() as connection:
+        proof = connection.execute(
+            "SELECT payload FROM audit_events WHERE event_type = 'integration.gate_passed'"
+        ).fetchone()
+    assert '"gate_mode": "reused_qa_run"' in proof["payload"]
+
+
+def test_gate_still_runs_when_the_qa_run_used_another_timeout(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    repository, ticket, candidate, verified = _candidate_ready_for_integration(
+        service, actors, seeded, tmp_path
+    )
+    _mark_run_as_qa_job(service, candidate, ticket, timeout_seconds=5)
+    integration = _claimed_for_integration(service, actors, ticket, verified)
+    queued = service.queue_merge_candidate(
+        actors["integrator"], ticket["ticket_id"],
+        integration["lease"]["lease_id"], integration["ticket"]["version"],
+    )
+
+    completed = service.execute_queued_merge(queued["merge_job"]["merge_job_id"])
+
+    assert completed["status"] == "COMPLETED"
+    with service.store.connection() as connection:
+        proof = connection.execute(
+            "SELECT payload FROM audit_events WHERE event_type = 'integration.gate_passed'"
+        ).fetchone()
+    assert '"gate_mode": "executed"' in proof["payload"]
+
+
+def test_drift_before_the_gate_skips_the_suite(
+    service, actors, seeded, tmp_path: Path, monkeypatch
+) -> None:
+    # Fast-forward cannot land on a moved main; finding that out after an
+    # 18-minute gate wasted the whole run.
+    repository, ticket, candidate, verified = _candidate_ready_for_integration(
+        service, actors, seeded, tmp_path
+    )
+    integration = _claimed_for_integration(service, actors, ticket, verified)
+    queued = service.queue_merge_candidate(
+        actors["integrator"], ticket["ticket_id"],
+        integration["lease"]["lease_id"], integration["ticket"]["version"],
+    )
+    (repository / "teammate.txt").write_text("pushed meanwhile\n", encoding="utf-8")
+    _git(repository, "add", "teammate.txt")
+    _git(repository, "commit", "-m", "Teammate change")
+    executions: list[object] = []
+    monkeypatch.setattr(service.project_tests, "execute", lambda *a, **k: executions.append(a))
+
+    service.execute_queued_merge(queued["merge_job"]["merge_job_id"])
+
+    assert executions == []
+    assert _git(repository, "rev-parse", "main") != candidate["candidate"]["commit_sha"]
+    with service.store.connection() as connection:
+        assert connection.execute(
+            "SELECT 1 FROM audit_events WHERE event_type = 'integration.base_drift'"
+        ).fetchone() is not None
