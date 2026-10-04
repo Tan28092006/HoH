@@ -208,10 +208,14 @@ def test_a_decision_survives_compaction_that_removes_narration(
     narration = [
         entry for entry in packet["context_entries"] if entry["entry_type"] == "progress_update"
     ]
-    # Shortening comes before dropping, so at this budget the narration is still
-    # present but has been reduced to checkpoints.
-    assert narration, "the run is still visible"
-    assert all(len(entry["content"]) < 400 for entry in narration), "narration is what gives way"
+    # Since 0.3.18 a Developer packet is role-projected: narration is never
+    # carried, but the run is still counted and addressable as history.
+    assert not narration, "narration is what gives way"
+    history = [
+        item for item in packet["omitted_sections"]
+        if item["section"] == "context_entries.history"
+    ]
+    assert history and history[0]["omitted_count"] >= 12, "the run is still visible"
     assert packet["estimated_tokens"] <= 2_000
 
 

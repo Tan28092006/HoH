@@ -190,19 +190,36 @@ def test_compaction_retains_criteria_constraints_candidate_sha_and_findings(
 def test_packet_fits_a_budget_above_the_protected_floor(
     service, actors, seeded, tmp_path: Path
 ) -> None:
+    # Role projection (0.3.18) keeps only the current entry of each durable type,
+    # so a default packet already sits near its protected floor. Planner's
+    # deliberate history view is what still outgrows a budget, so that is the
+    # packet compaction must fit; every role must fit the same budget too.
     ticket, _candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
+    for index in range(24):
+        service.append_planner_context(
+            actors["planner"],
+            entry_type="planner_decision",
+            content=f"Decision {index}: " + "bounded planning state " * 30,
+            ticket_id=ticket["ticket_id"],
+        )
+
+    full = service.get_ticket_context(
+        actors["planner"], ticket["ticket_id"],
+        token_budget=MAX_TOKEN_BUDGET, include_history=True,
+    )
+    bounded = service.get_ticket_context(
+        actors["planner"], ticket["ticket_id"],
+        token_budget=FIT_BUDGET, include_history=True,
+    )
+    assert full["estimated_tokens"] > FIT_BUDGET
+    assert bounded["estimated_tokens"] <= FIT_BUDGET
+    assert bounded["omitted_sections"]
 
     for actor in _all_roles(actors).values():
-        full = service.get_ticket_context(
-            actor, ticket["ticket_id"], token_budget=MAX_TOKEN_BUDGET
-        )
         bounded = service.get_ticket_context(
             actor, ticket["ticket_id"], token_budget=FIT_BUDGET
         )
-
-        assert full["estimated_tokens"] > FIT_BUDGET
         assert bounded["estimated_tokens"] <= FIT_BUDGET
-        assert bounded["omitted_sections"]
 
 
 def test_role_critical_sections_survive_a_budget_below_the_protected_floor(
@@ -265,32 +282,36 @@ def test_qa_packet_keeps_candidate_identity_and_test_interface(
 def test_verbose_history_becomes_a_checkpoint_with_typed_references(
     service, actors, seeded, tmp_path: Path
 ) -> None:
-    """Nothing is silently deleted: dropped history is still addressable."""
+    """Nothing is silently deleted: dropped history is still addressable.
+
+    Since 0.3.18 a role packet carries the current entry of each type its role
+    acts on; narration and older history leave the packet as one counted,
+    resolvable history reference instead of a list of entry references.
+    """
     ticket, _candidate, _decision = _rich_ticket(service, actors, seeded, tmp_path)
 
-    full = service.get_ticket_context(actors["developer"], ticket["ticket_id"])
-    bounded = service.get_ticket_context(
-        actors["developer"], ticket["ticket_id"], token_budget=TIGHT_BUDGET
+    for budget in (None, TIGHT_BUDGET):
+        packet = service.get_ticket_context(
+            actors["developer"], ticket["ticket_id"], token_budget=budget
+        )
+        assert not [
+            entry for entry in packet["context_entries"]
+            if entry["entry_type"] == "progress_update"
+        ]
+        history = [
+            entry for entry in packet["omitted_sections"]
+            if entry["section"] == "context_entries.history"
+        ]
+        assert len(history) == 1
+        assert history[0]["reason"] == "role_current_view"
+        assert history[0]["omitted_count"] >= 12
+        assert history[0]["references"] == [packet["context_ref"] + ":history"]
+
+    resolved = service.resolve_context_reference(
+        actors["planner"], history[0]["references"][0]
     )
-
-    verbose_before = [
-        entry for entry in full["context_entries"] if entry["entry_type"] == "progress_update"
-    ]
-    assert len(verbose_before) >= 12
-
-    entries_omitted = [
-        entry for entry in bounded["omitted_sections"] if entry["section"] == "context_entries"
-    ]
-    assert len(entries_omitted) == 1
-    references = entries_omitted[0]["references"]
-    assert references
-    assert all(reference.startswith("ctx:entry:") for reference in references)
-    assert entries_omitted[0]["omitted_count"] == len(references)
-
-    retained_ids = {entry["entry_id"] for entry in bounded["context_entries"]}
-    referenced_ids = {reference.removeprefix("ctx:entry:") for reference in references}
-    original_ids = {entry["entry_id"] for entry in full["context_entries"]}
-    assert retained_ids | referenced_ids == original_ids
+    assert resolved["entries"]
+    assert all(entry["entry_id"] for entry in resolved["entries"])
 
 
 def test_durable_decisions_are_checkpointed_with_a_resolvable_reference(
@@ -326,8 +347,15 @@ def test_old_typed_decisions_become_references_but_the_latest_checkpoint_survive
         for index in range(12)
     ]
 
+    # The default Planner packet carries only the newest decision of each type;
+    # older decisions are the deliberate history view (0.3.18).
+    current = service.get_ticket_context(actors["planner"], ticket["ticket_id"])
+    current_ids = {entry["entry_id"] for entry in current["context_entries"]}
+    assert decisions[-1]["entry_id"] in current_ids
+    assert not current_ids & {decision["entry_id"] for decision in decisions[:-1]}
+
     packet = service.get_ticket_context(
-        actors["planner"], ticket["ticket_id"], token_budget=2_000
+        actors["planner"], ticket["ticket_id"], token_budget=2_000, include_history=True
     )
 
     retained = {entry["entry_id"] for entry in packet["context_entries"]}
@@ -513,7 +541,9 @@ def test_an_execution_role_gets_feature_intent_and_a_planner_gets_the_whole_feat
     assert "priority" not in developer["feature"]
     # The Planner plans the feature, so it keeps the planning fields.
     assert "priority" in planner["feature"]
-    assert "created_at" in planner["feature"]
+    assert "parent_feature_id" in planner["feature"]
+    # Timestamps are bookkeeping for every role (0.3.18 packet projection).
+    assert "created_at" not in planner["feature"]
 
 
 def test_a_developer_gets_test_outcomes_without_qa_provenance_machinery(
@@ -532,7 +562,7 @@ def test_a_developer_gets_test_outcomes_without_qa_provenance_machinery(
     packets = {}
     for name in ("developer", "qa"):
         payload = {"feature": {}, "test_runs": [dict(run)], "context_entries": []}
-        service._project_role_sections(payload, actors[name])
+        service._project_role_sections(payload, actors[name], include_history=False)
         packets[name] = payload["test_runs"][0]
 
     assert packets["developer"]["exit_code"] == 1, "a Developer still sees the outcome"

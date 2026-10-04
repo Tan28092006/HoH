@@ -256,4 +256,7 @@ def test_a_snapshot_holds_no_narrative_only_versions(service, actors, seeded) ->
         "candidate_commit",
         "dependencies",
         "repository_revision",
+        # Barrier and retirement identity, never their narrative reasons.
+        "repository_reconciliation_refs",
+        "retirement",
     }
