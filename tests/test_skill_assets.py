@@ -55,9 +55,8 @@ def _skill_markdown() -> list[Path]:
 
 
 def _registered_tool_names() -> set[str]:
-    server = (REPOSITORY_ROOT / "src" / "hoh_control_plane" / "mcp_server.py").read_text(
-        encoding="utf-8"
-    )
+    tools = REPOSITORY_ROOT / "src" / "hoh_control_plane" / "mcp" / "tools"
+    server = "".join(path.read_text(encoding="utf-8") for path in sorted(tools.glob("*.py")))
     return set(re.findall(r'@server\.tool\(name="([^"]+)"', server))
 
 

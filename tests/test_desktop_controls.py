@@ -400,7 +400,7 @@ def test_the_card_and_every_setup_prompt_point_at_the_wait_tool(desktop):
     card = (
         Path(__file__).resolve().parents[1] / 'skills' / 'hoh-control-plane' / 'SKILL.md'
     ).read_text(encoding='utf-8')
-    from hoh_control_plane import mcp_server
+    from hoh_control_plane.mcp.tools import common as mcp_server
 
     # The tool description is the one place the silent-wait rule is stated; the
     # card and every prompt point at it instead of restating it.

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from hoh_control_plane import mcp_server
+from hoh_control_plane.mcp import workers as mcp_workers
 from hoh_control_plane.domain import ValidationError
 from hoh_control_plane.mcp_server import create_mcp_server
 
@@ -133,7 +134,7 @@ async def test_developer_mcp_acknowledges_candidate_submission_before_worker_val
     ticket, claim, prepared, commit = _prepared_candidate(service, actors, seeded, tmp_path)
     launched: list[tuple[Path, str]] = []
     monkeypatch.setattr(
-        mcp_server,
+        mcp_workers,
         "_start_candidate_submission_worker",
         lambda database_path, submission_id: launched.append((database_path, submission_id)),
     )

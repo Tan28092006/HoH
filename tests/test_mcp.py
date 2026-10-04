@@ -9,6 +9,7 @@ from barrier_helpers import keep_open_tickets
 from mcp.server.fastmcp.exceptions import ToolError
 
 import hoh_control_plane.mcp_server as mcp_server
+from hoh_control_plane.mcp import workers as mcp_workers
 from hoh_control_plane.domain import Actor, ConflictError, Role, ValidationError
 from hoh_control_plane.mcp_server import create_mcp_server
 from hoh_control_plane.service import ControlPlaneService
@@ -403,7 +404,7 @@ async def test_qa_mcp_queues_a_detached_project_test_worker(
     launched: list[tuple[object, str]] = []
     monkeypatch.setattr(service, "queue_project_tests", lambda *_args, **_kwargs: queued)
     monkeypatch.setattr(
-        mcp_server,
+        mcp_workers,
         "_start_qa_test_worker",
         lambda database_path, test_run_id: launched.append((database_path, test_run_id)),
     )
@@ -432,7 +433,7 @@ async def test_developer_mcp_queues_a_detached_worktree_provision(
     launched: list[tuple[object, str]] = []
     monkeypatch.setattr(service, "queue_worktree_provision", lambda *_args, **_kwargs: queued)
     monkeypatch.setattr(
-        mcp_server,
+        mcp_workers,
         "_start_worktree_provision_worker",
         lambda database_path, provision_id: launched.append((database_path, provision_id)),
     )

@@ -27,7 +27,12 @@ ORCHESTRATION = {
     "managed_worker", "integration_worker", "qa_worker", "worktree_worker",
     "candidate_submission_worker", "seed", "operations",
 }
-TRANSPORTS = {"mcp_server", "api", "__main__", "auth"}
+TRANSPORTS = {
+    "mcp_server", "api", "__main__", "auth",
+    "mcp", "mcp.invoke", "mcp.workers", "mcp.server", "mcp.http_app",
+    "mcp.tools", "mcp.tools.common", "mcp.tools.planner", "mcp.tools.developer",
+    "mcp.tools.qa", "mcp.tools.integrator",
+}
 CLIENT_SETUP = {
     "agent_kit", "local_agent", "local_credentials", "desktop_control",
     "profile_migration", "agent_assets.install",

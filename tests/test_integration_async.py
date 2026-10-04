@@ -10,6 +10,7 @@ import pytest
 from barrier_helpers import keep_open_tickets
 
 from hoh_control_plane import mcp_server
+from hoh_control_plane.mcp import workers as mcp_workers
 from hoh_control_plane.domain import AuthorizationError, ConflictError, ValidationError
 from hoh_control_plane.mcp_server import create_mcp_server
 
@@ -401,7 +402,7 @@ async def test_integrator_mcp_acknowledges_merge_before_worker_runs(
     integration = _claimed_for_integration(service, actors, ticket, verified)
     launched: list[tuple[Path, str]] = []
     monkeypatch.setattr(
-        mcp_server,
+        mcp_workers,
         "_start_merge_worker",
         lambda database_path, merge_job_id: launched.append((database_path, merge_job_id)),
     )
@@ -461,7 +462,7 @@ async def test_retried_mcp_merge_request_spawns_at_most_one_worker(
     integration = _claimed_for_integration(service, actors, ticket, verified)
     launched: list[tuple[Path, str]] = []
     monkeypatch.setattr(
-        mcp_server,
+        mcp_workers,
         "_start_merge_worker",
         lambda database_path, merge_job_id: launched.append((database_path, merge_job_id)),
     )
@@ -497,7 +498,7 @@ async def test_a_refused_merge_request_never_spawns_a_worker(
     integration = _claimed_for_integration(service, actors, ticket, verified)
     launched: list[tuple[Path, str]] = []
     monkeypatch.setattr(
-        mcp_server,
+        mcp_workers,
         "_start_merge_worker",
         lambda database_path, merge_job_id: launched.append((database_path, merge_job_id)),
     )
