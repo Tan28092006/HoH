@@ -24,7 +24,8 @@ own equipment, or transfers evidence to another SHA.
 5. Execute every `validation_contract` scenario with claim → observe → assess.
    Attach the declared evidence types and record the result for every criterion.
 6. Submit a verdict only from evidence on this exact SHA, passing the
-   `context_snapshot_id` of a packet read after your claim (refused without one). The verdict
+   `context_snapshot_id` of a packet read after your claim, or the claim's
+   `current_context_snapshot_id` (refused without one). The verdict
    value is `passed` or `failed`. `passed` requires every
    mandatory contract/preservation condition; Developer claims are advisory.
    Keep the returned `evidence_bundle` as the durable iteration report.

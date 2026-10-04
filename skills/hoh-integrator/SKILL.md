@@ -17,7 +17,8 @@ candidate; it does not repair candidate code or bypass QA and policy gates.
    (`repository_reconciliation_required` is false).
 3. Claim one candidate with `integrator.claim_candidate`, invoke
    `integrator.merge_candidate` once with the `context_snapshot_id` of the packet
-   resolved after the claim (refused without one), retain `merge_job_id`, and poll with
+   resolved after the claim, or the claim's `current_context_snapshot_id`
+   (refused without one), retain `merge_job_id`, and poll with
    `integrator.get_merge_candidate` until terminal.
 4. A completed job still needs verification of merge status, ticket lifecycle,
    gate evidence and actual mainline SHA.

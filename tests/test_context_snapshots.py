@@ -285,3 +285,54 @@ def test_the_service_refuses_a_consequential_write_without_a_snapshot(
             actors[role], seeded["ticket"]["ticket_id"], *arguments,
             context_snapshot_id=snapshot,
         )
+
+
+def test_a_claim_returns_the_snapshot_a_fresh_read_would_return(
+    service, actors, seeded
+) -> None:
+    """The agent can write from the claim result without re-reading the packet."""
+    ticket = seeded["ticket"]
+    claimed = service.claim_ticket(
+        actors["developer"], ticket["ticket_id"], ticket["version"], 900
+    )
+
+    fresh = service.get_ticket_context(actors["developer"], ticket["ticket_id"])
+    assert claimed["current_context_snapshot_id"] == fresh["context_snapshot_id"]
+    with service.store.connection() as connection:
+        service.require_fresh_context(
+            connection, ticket["ticket_id"], claimed["current_context_snapshot_id"]
+        )
+
+
+def test_a_known_snapshot_returns_only_an_unchanged_marker(service, actors, seeded) -> None:
+    ticket = seeded["ticket"]
+    developer = actors["developer"]
+    first = service.get_ticket_context(developer, ticket["ticket_id"])
+
+    again = service.get_ticket_context(
+        developer, ticket["ticket_id"], known_snapshot_id=first["context_snapshot_id"]
+    )
+    assert again == {"unchanged": True, "context_snapshot_id": first["context_snapshot_id"]}
+
+    service.claim_ticket(developer, ticket["ticket_id"], ticket["version"], 900)
+    moved = service.get_ticket_context(
+        developer, ticket["ticket_id"], known_snapshot_id=first["context_snapshot_id"]
+    )
+    assert "unchanged" not in moved
+    assert moved["context_snapshot_id"] != first["context_snapshot_id"]
+
+
+@pytest.mark.anyio
+async def test_known_snapshot_id_reaches_the_service_through_mcp(
+    service, actors, seeded
+) -> None:
+    from hoh_control_plane.mcp_server import create_mcp_server
+
+    ticket = seeded["ticket"]
+    server = create_mcp_server(service, actors["developer"])
+    first = (await server.call_tool("ticket.get_context", {"ticket_ref": ticket["ticket_id"]}))[1]
+    again = (await server.call_tool(
+        "ticket.get_context",
+        {"ticket_ref": ticket["ticket_id"], "known_snapshot_id": first["context_snapshot_id"]},
+    ))[1]
+    assert again == {"unchanged": True, "context_snapshot_id": first["context_snapshot_id"]}
