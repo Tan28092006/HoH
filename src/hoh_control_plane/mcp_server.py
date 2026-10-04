@@ -228,7 +228,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             )
             # Stable, machine-readable parity with the REST error body: a stdio
             # client branches on the code instead of parsing the prose.
-            raise ToolError(f"[{error.code}] {error}") from error
+            raise ToolError(_tool_error_text(error)) from error
         except (sqlite3.OperationalError, sqlite3.IntegrityError) as error:
             # Safety net: normalize any raw driver error that reaches this boundary
             # without an existing service-layer translation (e.g. a foreign-key
@@ -1815,6 +1815,36 @@ def _execution_role(value: str) -> Role:
     if role not in {Role.DEVELOPER, Role.QA, Role.INTEGRATOR}:
         raise ValidationError("required_role must be developer, qa or integrator")
     return role
+
+
+_RETRY_HINTS = {
+    "context_stale": "Re-read ticket.get_context, then retry with its context_snapshot_id.",
+    "repository_reconciliation_required": (
+        "Planner must reconcile first; call work.wait_for_event, then retry."
+    ),
+    "lease_expired": "The lease is gone; call work.discover and claim again.",
+}
+
+
+def _retry_hint(error: DomainError) -> str | None:
+    if error.code in _RETRY_HINTS:
+        return _RETRY_HINTS[error.code]
+    reason = error.details.get("reason") if isinstance(error.details, dict) else None
+    return _RETRY_HINTS.get(str(reason)) if reason else None
+
+
+def _tool_error_text(error: DomainError) -> str:
+    """`[code] message {json}`: the REST error body's details, readable by MCP clients."""
+    text = f"[{error.code}] {error}"
+    extra: dict[str, Any] = {}
+    if error.details:
+        extra["details"] = error.details
+    hint = _retry_hint(error)
+    if hint:
+        extra["retry_hint"] = hint
+    if extra:
+        text += " " + json.dumps(extra, separators=(",", ":"), sort_keys=True, default=str)
+    return text
 
 
 def _safe_input_summary(arguments: dict[str, Any]) -> dict[str, Any]:

@@ -37,7 +37,7 @@ class LeaseMixin:
                 raise AuthorizationError("Lease belongs to another actor")
             timestamp = _now()
             if datetime.fromisoformat(lease["expires_at"].replace("Z", "+00:00")) <= timestamp:
-                raise ConflictError("Lease has expired")
+                raise ConflictError("Lease has expired", {"reason": "lease_expired"})
             expires_at = _iso(timestamp + timedelta(seconds=lease_seconds))
             connection.execute(
                 "UPDATE leases SET heartbeat_at = ?, expires_at = ? WHERE lease_id = ?",
@@ -391,7 +391,7 @@ class LeaseMixin:
             raise AuthorizationError("Lease belongs to another actor")
         expires_at = datetime.fromisoformat(lease["expires_at"].replace("Z", "+00:00"))
         if expires_at <= _now():
-            raise ConflictError("Lease has expired")
+            raise ConflictError("Lease has expired", {"reason": "lease_expired"})
         return lease
 
     def _lease(self, connection: Connection, lease_id: str) -> dict[str, Any]:
