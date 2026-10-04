@@ -246,8 +246,12 @@ def test_one_ticket_wakes_one_idle_agent_instead_of_racing_models(service, actor
     asyncio.run(check())
 
 
-def test_planner_receives_new_intervention_job(service, actors):
+def test_planner_receives_new_intervention_job(service, actors, monkeypatch):
+    from hoh_control_plane import event_wait
     from hoh_control_plane.event_wait import wait_for_event
+    # A Planner wait also observes remote Git; this project has no repository, so
+    # mark it as just observed to keep the test on job delivery alone.
+    monkeypatch.setitem(event_wait._REPOSITORY_OBSERVED_AT, 'project-1', time.monotonic())
     register(service, actors['planner'])
     async def check():
         waiting = asyncio.create_task(wait_for_event(service, actors['planner'], 'project-1', timeout_seconds=2))

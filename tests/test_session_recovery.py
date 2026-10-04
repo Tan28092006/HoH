@@ -1,4 +1,5 @@
 import asyncio
+import time
 import json
 import subprocess
 import sys
@@ -16,8 +17,12 @@ def no_ready_work(service, seeded):
 
 
 @pytest.mark.parametrize('role', ['planner', 'developer', 'qa', 'integrator'])
-def test_reconnect_resumes_own_wait_and_fences_previous_call(service, actors, role):
+def test_reconnect_resumes_own_wait_and_fences_previous_call(service, actors, role, monkeypatch):
+    from hoh_control_plane import event_wait
     from hoh_control_plane.event_wait import wait_for_event
+    # A Planner wait also observes remote Git; this project has no repository, so
+    # mark it as just observed to keep the test on wait fencing alone.
+    monkeypatch.setitem(event_wait._REPOSITORY_OBSERVED_AT, 'project-1', time.monotonic())
     actor = actors[role]
     service.register_agent(actor, skills=[role], capacity=1)
 
