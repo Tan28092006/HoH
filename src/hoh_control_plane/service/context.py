@@ -112,8 +112,8 @@ _ROLE_CONTEXT_ENTRY_TYPES: dict[Role, frozenset[str]] = {
         {
             "planner_decision", "design_decision", "risk", "developer_blocker",
             "known_failure", "write_scope_updated", "ticket_fields_updated",
-            "worktree_handoff", "integration_base_drift", "bootstrap_integration",
-            "note",
+            "worktree_handoff", "worktree_recovery", "integration_base_drift",
+            "bootstrap_integration", "note",
         }
     ),
     Role.QA: frozenset(
@@ -133,7 +133,7 @@ _ROLE_CONTEXT_ENTRY_TYPES: dict[Role, frozenset[str]] = {
         {
             "planner_decision", "design_decision", "risk", "developer_blocker",
             "known_failure", "write_scope_updated", "ticket_fields_updated",
-            "integration_base_drift", "integration_authorization",
+            "worktree_recovery", "integration_base_drift", "integration_authorization",
             "bootstrap_integration", "note",
         }
     ),

@@ -257,9 +257,10 @@ def test_criterion_8_the_backend_refuses_what_a_role_may_not_do(
             title="t", objective="o", required_role=Role.DEVELOPER,
             acceptance_criteria=["c"], preservation_constraints=[], file_scope=["src/**"],
         ),
-        # A Planner cannot record work as landed; that is the Integrator's authority.
+        # A Developer cannot record work as landed. (A Planner may, but only
+        # while reconciling observed Git movement; see test_external_landing.)
         lambda: service.record_external_landing(
-            actors["planner"], ticket["ticket_id"], ticket["version"], "a" * 40, "reason",
+            actors["developer"], ticket["ticket_id"], ticket["version"], "a" * 40, "reason",
         ),
     ]
 
@@ -290,11 +291,23 @@ def test_criterion_8_a_forged_role_claim_is_not_believed(service, seeded) -> Non
 def test_criterion_9_a_replacement_continues_from_the_ticket_alone(
     service, actors, seeded, tmp_path: Path
 ) -> None:
+    # Since 0.3.18 progress narration is not carried in any role packet; what
+    # the previous agent reached travels as its committed checkpoint and a
+    # typed worktree_handoff entry, which is what this checks.
     service.configure_repository(actors["planner"], "project-1", str(_repository(tmp_path)))
     ticket = seeded["ticket"]
     first = service.claim_ticket(
         actors["developer"], ticket["ticket_id"], ticket["version"], 30
     )
+    worktree = service.prepare_worktree(
+        actors["developer"], ticket["ticket_id"], first["lease"]["lease_id"],
+        first["ticket"]["version"],
+    )["worktree"]
+    old_path = Path(worktree["worktree_path"])
+    (old_path / "half-finished.txt").write_text("partial work\n", encoding="utf-8")
+    _git(old_path, "add", "half-finished.txt")
+    _git(old_path, "commit", "-m", "Half-finished work the next agent has to pick up")
+    checkpoint = _git(old_path, "rev-parse", "HEAD")
     service.append_progress(
         actors["developer"],
         ticket["ticket_id"],
@@ -303,8 +316,18 @@ def test_criterion_9_a_replacement_continues_from_the_ticket_alone(
     )
     with service.store.connection(immediate=True) as connection:
         connection.execute(
-            "DELETE FROM leases WHERE ticket_id = ?", (ticket["ticket_id"],)
+            "UPDATE leases SET expires_at = ? WHERE ticket_id = ?",
+            ("2000-01-01T00:00:00+00:00", ticket["ticket_id"]),
         )
+    sweep = service.sweep_expired_leases(Actor("scheduler-01", Role.ADMIN, frozenset({"*"})))
+    version = next(
+        entry["version"] for entry in sweep["requeued"] if entry["ticket_id"] == ticket["ticket_id"]
+    )
+    second = service.claim_ticket(actors["developer_2"], ticket["ticket_id"], version, 900)
+    replacement = service.prepare_worktree(
+        actors["developer_2"], ticket["ticket_id"], second["lease"]["lease_id"],
+        second["ticket"]["version"],
+    )["worktree"]
 
     packet = service.get_ticket_context(
         actors["developer_2"], ticket["ticket_id"], 60_000
@@ -314,8 +337,10 @@ def test_criterion_9_a_replacement_continues_from_the_ticket_alone(
     assert packet["ticket"]["acceptance_criteria"], "what it must satisfy"
     assert packet["ticket"]["file_scope"], "where it may write"
     assert any(
-        "Half-finished" in entry["content"] for entry in packet["context_entries"]
+        entry["entry_type"] == "worktree_handoff" and entry["artifact_commit"] == checkpoint
+        for entry in packet["context_entries"]
     ), "and what the previous agent had reached, without its chat"
+    assert _git(Path(replacement["worktree_path"]), "rev-parse", "HEAD") == checkpoint
 
 
 # 10. Jira and GitHub can be replaced or switched off without losing workflow state.

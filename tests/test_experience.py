@@ -54,12 +54,19 @@ def test_a_lesson_stays_out_of_unrelated_work(service, actors, seeded) -> None:
     assert _experience(service, actors["developer"], "DEV-804") == []
 
 
-def test_an_agent_is_not_shown_its_own_ticket_s_lesson(service, actors, seeded) -> None:
+def test_a_lesson_stays_visible_on_its_own_ticket_for_a_replacement(service, actors, seeded) -> None:
+    """A replacement chat or teammate on the same ticket did not pay for the lesson.
+
+    Earlier behaviour hid a ticket's own lesson; experience transfer now keeps it
+    (see ExperienceMixin._relevant_experience).
+    """
     planner = actors["planner"]
     _ticket(service, planner, "DEV-805", ["src/payments/**"])
     service.record_experience(actors["developer"], "ticket:DEV-805", LESSON)
 
-    assert _experience(service, actors["developer"], "DEV-805") == []
+    surfaced = _experience(service, actors["developer_2"], "DEV-805")
+    assert [note["lesson"] for note in surfaced] == [LESSON]
+    assert surfaced[0]["learned_on_ticket"] == "DEV-805"
 
 
 def test_a_lesson_recorded_later_still_reaches_work_already_in_flight(

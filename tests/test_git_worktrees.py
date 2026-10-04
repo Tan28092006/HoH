@@ -7,6 +7,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 import pytest
+from conftest import keep_open_tickets
 
 from hoh_control_plane.domain import (
     Actor,
@@ -274,6 +275,8 @@ def test_rework_handoffs_to_a_new_developer_without_touching_the_prior_worktree(
             }
         ],
     )
+    # QA rejection opens a Planner reconciliation atomically with the verdict.
+    keep_open_tickets(service, actors["planner"])
 
     handoff_claim = service.claim_ticket(
         actors["developer_2"], ticket["ticket_id"], rework["ticket"]["version"], 900
@@ -377,6 +380,8 @@ def test_rework_handoff_uses_current_main_when_the_rejected_candidate_has_base_d
             }
         ],
     )
+    # QA rejection opens a Planner reconciliation atomically with the verdict.
+    keep_open_tickets(service, actors["planner"])
 
     handoff_claim = service.claim_ticket(
         actors["developer_2"], ticket["ticket_id"], rework["ticket"]["version"], 900
@@ -587,6 +592,11 @@ def _take_over(service, actors, ticket_id: str, agent: str = "developer_2"):
     return claim, prepared
 
 
+def _full_entry(service, actor, entry: dict) -> str:
+    reference = f"ctx:entry:{entry['entry_id']}"
+    return service.resolve_context_reference(actor, reference)["entry"]["content"]
+
+
 def _context_entries(service, actor, ticket_id: str, entry_type: str) -> list[dict]:
     entries = service.get_ticket_context(actor, f"ticket:{ticket_id}")["context_entries"]
     return [entry for entry in entries if entry["entry_type"] == entry_type]
@@ -708,7 +718,8 @@ def test_takeover_fails_closed_and_records_recovery_evidence_for_a_dirty_worktre
         service, actors["developer_2"], ticket["ticket_id"], "worktree_recovery"
     )
     assert len(recovery) == 1
-    content = recovery[0]["content"]
+    # The packet carries a checkpoint; the full account resolves by reference.
+    content = _full_entry(service, actors["developer_2"], recovery[0])
     assert "uncommitted-secret-body" not in content
     assert "untracked-secret-body" not in content
     assert "dev-01" in content
@@ -740,7 +751,7 @@ def test_takeover_fails_closed_when_the_prior_worktree_is_missing(
     )
     assert len(recovery) == 1
     assert recovery[0]["source_ref"] is None
-    assert "missing" in recovery[0]["content"]
+    assert "missing" in _full_entry(service, actors["developer_2"], recovery[0])
 
 
 def test_takeover_appends_assignment_history_without_overwriting_the_prior_record(

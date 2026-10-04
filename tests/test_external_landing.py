@@ -229,9 +229,13 @@ def test_it_certifies_nothing_about_quality(service, actors, landed) -> None:
 
 
 def test_only_the_integrator_may_record_a_landing(service, actors, landed) -> None:
-    for role in ("developer", "qa", "planner"):
+    for role in ("developer", "qa"):
         with pytest.raises(AuthorizationError):
             _record(service, actors[role], landed)
+    # Planner may record one only while reconciling observed Git movement.
+    with pytest.raises(ConflictError) as error:
+        _record(service, actors["planner"], landed)
+    assert error.value.details["reason"] == "repository_reconciliation_not_pending"
 
 
 def test_work_still_in_flight_must_finish_first(service, actors, landed) -> None:

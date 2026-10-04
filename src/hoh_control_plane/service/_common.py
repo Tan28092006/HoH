@@ -122,6 +122,7 @@ CONTEXT_ENTRY_TYPES = frozenset(
         "write_scope_updated",
         "ticket_fields_updated",
         "worktree_handoff",
+        "worktree_recovery",
         "integration_base_drift",
         "integration_authorization",
         "bootstrap_integration",
