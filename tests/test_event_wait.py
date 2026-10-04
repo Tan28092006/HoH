@@ -295,3 +295,39 @@ def test_barrier_rearms_a_wakeup_the_agent_already_acknowledged(service, actors)
         assert again['status'] == 'event'
         assert again['event']['ticket_ref'] == 'ticket:DEV-142'
     asyncio.run(scenario())
+
+
+def _abandoned_planner_job(service, actors):
+    import dataclasses
+    with service.store.connection(immediate=True) as db:
+        db.execute("INSERT INTO planner_jobs (planner_job_id,project_id,ticket_id,job_type,status,summary,evidence_refs,created_by,created_at,updated_at) VALUES ('plan-dead','project-1','DEV-142','developer_blocker','READY','Clarify requirement','[]','dev-01','now','now')")
+    dead = dataclasses.replace(actors['planner'], agent_id='planner-dead')
+    claimed = service.claim_planner_job(dead, 'plan-dead', lease_seconds=30)
+    assert claimed['planner_job']['status'] == 'IN_PROGRESS'
+    with service.store.connection(immediate=True) as db:
+        db.execute("UPDATE planner_job_leases SET expires_at='2000-01-01T00:00:00Z' WHERE planner_job_id='plan-dead'")
+
+
+def _planner_job_status(service):
+    with service.store.connection() as db:
+        return db.execute("SELECT status FROM planner_jobs WHERE planner_job_id='plan-dead'").fetchone()['status']
+
+
+def test_sweep_requeues_an_abandoned_planner_job(service, actors):
+    _abandoned_planner_job(service, actors)
+    admin = Actor('hoh-scheduler', Role.ADMIN, frozenset({'*'}))
+    result = service.sweep_expired_leases(admin)
+    assert result['planner_jobs_requeued'] == ['plan-dead']
+    assert _planner_job_status(service) == 'READY'
+
+
+def test_waiting_planner_is_woken_by_an_abandoned_planner_job(service, actors, monkeypatch):
+    from hoh_control_plane import event_wait
+    from hoh_control_plane.event_wait import wait_for_event
+    monkeypatch.setitem(event_wait._REPOSITORY_OBSERVED_AT, 'project-1', time.monotonic())
+    register(service, actors['planner'])
+    _abandoned_planner_job(service, actors)
+    result = asyncio.run(wait_for_event(service, actors['planner'], 'project-1', timeout_seconds=2))
+    assert result['event']['kind'] == 'planner_work'
+    assert result['event']['planner_job_id'] == 'plan-dead'
+    assert _planner_job_status(service) == 'READY'

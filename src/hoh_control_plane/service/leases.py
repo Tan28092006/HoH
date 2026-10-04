@@ -51,7 +51,7 @@ class LeaseMixin:
             return renewed
 
     def sweep_expired_leases(self, actor: Actor) -> dict[str, Any]:
-        """Recover expired Developer and QA leases without waiting for a later claim."""
+        """Recover expired Developer, QA and Planner job leases without waiting for a later claim."""
         require_role(actor, Role.ADMIN)
         timestamp = _now()
         requeued: list[dict[str, Any]] = []
@@ -114,7 +114,12 @@ class LeaseMixin:
                         "version": next_version,
                     }
                 )
-        return {"count": len(requeued), "requeued": requeued}
+            planner_jobs = self._expire_planner_job_leases(connection)
+        return {
+            "count": len(requeued),
+            "requeued": requeued,
+            "planner_jobs_requeued": planner_jobs,
+        }
 
     @staticmethod
     def _lease_owns_ticket_state(lease: dict[str, Any], ticket: dict[str, Any]) -> bool:
