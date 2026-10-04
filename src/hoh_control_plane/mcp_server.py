@@ -531,9 +531,12 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
         ticket_ref: str,
         token_budget: int | None = None,
         include_history: bool = False,
+        known_snapshot_id: str | None = None,
     ) -> dict[str, Any]:
         """Resolve one current role-bounded ticket packet.
 
+        Pass the context_snapshot_id you hold as known_snapshot_id: an unchanged
+        packet returns only {unchanged: true, context_snapshot_id}.
         Planner/Admin may set include_history only for a deliberate audit of older
         typed decisions. A larger token_budget alone never widens role visibility.
         """
@@ -543,9 +546,10 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
                 "ticket_ref": ticket_ref,
                 "token_budget": token_budget,
                 "include_history": include_history,
+                "known_snapshot_id": known_snapshot_id,
             },
             lambda: service.get_ticket_context(
-                actor, ticket_ref, token_budget, include_history
+                actor, ticket_ref, token_budget, include_history, known_snapshot_id
             ),
         )
 
@@ -554,8 +558,9 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
         """Resolve one typed reference cited by a packet's omitted_sections.
 
         Accepts ctx:entry:<id>, ctx:candidate:<id>:developer_claims,
-        ctx:candidate:<id>:changed_paths, ctx:finding:<id> and, for Planner or
-        Admin, ctx:ticket:<id>:v<n>:history. Returns only that item.
+        ctx:candidate:<id>:changed_paths, ctx:finding:<id>,
+        ctx:ticket:<id>[:v<n>][:<section>|:history] and
+        ctx:feature:<id>[:v<n>][:<section>]. Returns only that item.
         """
         arguments = {"reference": reference}
         return invoke(

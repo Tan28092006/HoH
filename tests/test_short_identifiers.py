@@ -157,11 +157,12 @@ def test_resolution_follows_the_packet_visibility_rules(service, actors, seeded)
     # ...but QA never sees developer_blocker entries, in a packet or by reference.
     with pytest.raises(AuthorizationError):
         service.resolve_context_reference(actors["qa"], f"ctx:entry:{entry_id}")
-    # History is a Planner/Admin audit view, exactly as include_history is.
-    with pytest.raises(AuthorizationError):
-        service.resolve_context_reference(
-            actors["developer"], f"ctx:ticket:{ticket['ticket_id']}:v1:history"
-        )
+    # An execution role resolves the history its packet cites, but only the
+    # entry types its packet may carry.
+    qa_history = service.resolve_context_reference(
+        actors["qa"], f"ctx:ticket:{ticket['ticket_id']}:v1:history"
+    )
+    assert all(entry["entry_id"] != entry_id for entry in qa_history["entries"])
     history = service.resolve_context_reference(
         actors["planner"], f"ctx:ticket:{ticket['ticket_id']}:v1:history"
     )
