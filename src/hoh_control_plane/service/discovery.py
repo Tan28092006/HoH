@@ -519,6 +519,7 @@ class DiscoveryMixin:
                 "validation_contract:configure",
                 "skill_policy:configure",
                 "experience:list",
+                "experience:retire",
             ],
             Role.DEVELOPER: [
                 "ticket:claim:developer",
