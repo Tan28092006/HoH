@@ -1510,6 +1510,8 @@ class PlanningMixin:
         self._bounded_list(acceptance_criteria, "acceptance_criteria", 30, 2000, required=True)
         self._bounded_list(preservation_constraints, "preservation_constraints", 30, 2000)
         self._bounded_list(file_scope, "file_scope", 100, 1000)
+        if file_scope:
+            file_scope = [self._directory_scope(scope) for scope in file_scope]
         normalized_contract = (
             self._validated_validation_contract(acceptance_criteria, validation_contract)
             if validation_contract is not None else []
