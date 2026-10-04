@@ -1,8 +1,29 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
+
+import hoh_control_plane
+
+_CHECKOUT_SOURCE = (Path(__file__).resolve().parents[1] / "src").resolve()
+_IMPORTED_FROM = Path(hoh_control_plane.__file__).resolve().parent
+
+# .venv-hoh has an editable install of an older worktree. Without PYTHONPATH
+# naming this checkout, the suite silently tests that tree instead, and a pass
+# means nothing. Checked before any other package import, so the message is this
+# one and not an ImportError from the stale tree. Use scripts/test.ps1, or set
+# HOH_TEST_ALLOW_FOREIGN_PACKAGE=1 when deliberately testing an installed package.
+if (
+    os.environ.get("HOH_TEST_ALLOW_FOREIGN_PACKAGE") != "1"
+    and not _IMPORTED_FROM.is_relative_to(_CHECKOUT_SOURCE)
+):
+    raise pytest.UsageError(
+        f"hoh_control_plane was imported from {_IMPORTED_FROM}, not from this "
+        f"checkout ({_CHECKOUT_SOURCE}). Run scripts\\test.ps1 or set "
+        f"PYTHONPATH={_CHECKOUT_SOURCE}."
+    )
 
 
 def pytest_addoption(parser):

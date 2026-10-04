@@ -56,11 +56,14 @@ see [docs/ROLE_WAKEUPS.md](./docs/ROLE_WAKEUPS.md).
 To use this repository as the first project managed by HoH itself, follow the
 role-by-role [dogfood runbook](./docs/DOGFOOD_HOH.md).
 
-Run the test suite:
+Run the test suite with the pinned interpreter and this checkout's source:
 
 ```powershell
-python -m pytest
+.\scripts\test.ps1
 ```
+
+Start with the [documentation map](docs/README.md) and the
+[architecture map](docs/ARCHITECTURE.md).
 
 ## MCP server
 
@@ -83,12 +86,8 @@ python -m hoh_control_plane.mcp_server
 Use the same command with role `planner`, `qa` or `integrator` for other agents. The backend, not the skill, enforces role permissions.
 
 The tool list is role-scoped: an agent only receives tools it is allowed to use.
-
-| Role | MCP write tools |
-| --- | --- |
-| Planner | `planner.create_project`, `planner.create_feature`, `planner.create_ticket`, `planner.set_ticket_ready`, `planner.append_context` |
-| Developer | `agent.register`, `agent.heartbeat`, `work.inbox`, `work.claim`, `work.heartbeat`, `dev.prepare_worktree`, `dev.get_worktree_provision`, `dev.append_progress`, `dev.report_blocker`, `dev.submit_candidate` |
-| QA | `agent.register`, `agent.heartbeat`, `work.inbox`, `qa.claim_candidate`, `qa.run_project_tests`, `qa.get_project_test_run`, `work.heartbeat`, `qa.record_test_run`, `qa.submit_verdict` |
+`identity.get_capabilities` returns the caller's list; `mcp_server.py` defines
+every tool and the role blocks that expose it.
 
 All roles receive `identity.get_capabilities`, `work.discover`, `feature.get_context`, `ticket.get_context`, `agent.register` and `agent.heartbeat`; only execution roles receive `work.inbox`. Every execution agent calls `agent.register` once per session and `work.inbox` whenever it becomes available. A hand-off remains pending with no QA/Dev online; when one or more eligible agents check in, each gets a short-lived offer. The first successful ticket lease wins atomically and closes the other offers. Each call is persisted with the calling agent, role, tool name, opaque target reference, timestamp and outcome. Free-text content, evidence observations, branch names, commit IDs, lease IDs and credentials are not copied to the activity log.
 
