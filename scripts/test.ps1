@@ -26,9 +26,10 @@ $PytestArgs = @($args)
 $env:PYTHONPATH = Join-Path $checkout "src"
 # The suite is dominated by Git subprocesses and runs about four times faster
 # across workers (17.6 min serial vs 4.3 min with 10 workers on the dev host).
-# Pass -n 0 to run serially, or your own -n.
+# Pass -n 0 to run serially, or your own -n. The default is 6, not auto: more
+# workers grew the Windows pagefile on this host until the disk filled.
 if (-not ($PytestArgs -match '^-n')) {
-    $PytestArgs = @('-n', 'auto') + @($PytestArgs)
+    $PytestArgs = @('-n', '6') + @($PytestArgs)
 }
 # Each full run creates hundreds of Git repositories. Keep them off the small
 # system drive and outside any repository (a test checks a non-Git directory).
