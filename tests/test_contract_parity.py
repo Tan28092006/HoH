@@ -221,3 +221,69 @@ def test_the_idempotency_conflict_code_is_identical_in_both_transports(
     assert excinfo.value.code == IdempotencyConflictError.code
     assert mismatch.status_code == IdempotencyConflictError.status_code
     assert mismatch.json()["error"]["code"] == IdempotencyConflictError.code
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("details", "hint_fragment"),
+    [
+        ({"missing_criteria": ["AC-1"], "contract_estimated_tokens": 1300}, None),
+        ({"reason": "repository_reconciliation_required"}, "work.wait_for_event"),
+        ({"reason": "lease_expired"}, "claim again"),
+    ],
+)
+async def test_mcp_and_rest_carry_the_same_error_details(
+    service, actors, seeded, tmp_path: Path, monkeypatch, details, hint_fragment
+) -> None:
+    """MCP used to drop DomainError.details; both transports now return them."""
+    import json
+
+    def refuse(*_args, **_kwargs):
+        raise ConflictError("refused for a reason", details)
+
+    monkeypatch.setattr(service, "claim_ticket", refuse)
+    ticket = seeded["ticket"]
+    mcp_message = await _mcp_error(
+        service,
+        actors["developer"],
+        "work.claim",
+        {"ticket_id": ticket["ticket_id"], "expected_version": ticket["version"]},
+    )
+    mcp_extra = json.loads(mcp_message[mcp_message.index("{"):])
+
+    app = _rest_app(tmp_path)
+    monkeypatch.setattr(app.state.service, "claim_ticket", refuse)
+    with TestClient(app) as client:
+        rest = client.post(
+            f"/api/v1/tickets/{ticket['ticket_id']}/leases",
+            headers=_headers("developer"),
+            json={"expected_version": ticket["version"]},
+        )
+
+    assert f"[{ConflictError.code}] refused for a reason " in mcp_message
+    assert mcp_extra["details"] == rest.json()["error"]["details"] == details
+    if hint_fragment:
+        assert hint_fragment in mcp_extra["retry_hint"]
+    else:
+        assert "retry_hint" not in mcp_extra
+
+
+@pytest.mark.anyio
+async def test_a_stale_context_error_carries_a_retry_hint_through_mcp(
+    service, actors, seeded, monkeypatch
+) -> None:
+    from hoh_control_plane.domain import ContextStaleError
+
+    def stale(*_args, **_kwargs):
+        raise ContextStaleError("stale", {"stale": ["ticket"]})
+
+    monkeypatch.setattr(service, "claim_ticket", stale)
+    ticket = seeded["ticket"]
+    message = await _mcp_error(
+        service,
+        actors["developer"],
+        "work.claim",
+        {"ticket_id": ticket["ticket_id"], "expected_version": ticket["version"]},
+    )
+    assert '"stale":["ticket"]' in message
+    assert "ticket.get_context" in message

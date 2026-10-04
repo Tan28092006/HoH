@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 
 from hoh_control_plane.service._common import (
     Actor,
@@ -9,6 +10,7 @@ from hoh_control_plane.service._common import (
     CLOSED_TICKET_STATUSES,
     ContextStaleError,
     DEFAULT_TOKEN_BUDGET,
+    MAX_TOKEN_BUDGET,
     NotFoundError,
     Role,
     ValidationError,
@@ -58,6 +60,14 @@ _REDUNDANT_SECTION_FIELDS: dict[str, tuple[str, ...]] = {
 # ticket inside it, so the feature is kept as intent rather than as planning
 # bookkeeping. A Planner keeps the whole row because the feature is its subject.
 _EXECUTION_FEATURE_FIELDS = ("feature_id", "title", "objective", "status", "version")
+_TICKET_SUMMARY_FIELDS = (
+    "ticket_id", "feature_id", "title", "status", "priority", "required_role",
+    "version", "dependency_ids",
+)
+_VERSION_TOKEN = re.compile(r"v[0-9]+")
+_PACKET_ENVELOPE_KEYS = frozenset(
+    {"context_snapshot_id", "estimated_tokens", "token_budget", "generated_at", "omitted_sections"}
+)
 
 # Section 7.2 gives a Developer known failures and their reproduction evidence,
 # not QA's provenance machinery. The outcome plus a resolvable reference is what
@@ -145,9 +155,16 @@ class ContextMixin:
     """Role-bounded context packet compilation and compaction."""
 
     def get_feature_context(
-        self, actor: Actor, feature_ref: str, token_budget: int | None = None
+        self,
+        actor: Actor,
+        feature_ref: str,
+        token_budget: int | None = None,
+        *,
+        _full_budget: bool = False,
     ) -> dict[str, Any]:
         budget = min(_validated_budget(token_budget), DEFAULT_TOKEN_BUDGET)
+        if _full_budget:
+            budget = MAX_TOKEN_BUDGET
         feature_id = self._strip_ref(feature_ref, "feature")
         with self.store.connection() as connection:
             feature = self._one(
@@ -209,7 +226,13 @@ class ContextMixin:
         ticket_ref: str,
         token_budget: int | None = None,
         include_history: bool = False,
+        known_snapshot_id: str | None = None,
+        *,
+        _full_budget: bool = False,
     ) -> dict[str, Any]:
+        """Compile the role's packet; `{unchanged, context_snapshot_id}` if the caller has it."""
+        if known_snapshot_id is not None and not isinstance(known_snapshot_id, str):
+            raise ValidationError("known_snapshot_id must be a string")
         requested_budget = _validated_budget(token_budget)
         if not isinstance(include_history, bool):
             raise ValidationError("include_history must be a boolean")
@@ -222,6 +245,8 @@ class ContextMixin:
             if include_history
             else min(requested_budget, DEFAULT_TOKEN_BUDGET)
         )
+        if _full_budget:
+            budget = MAX_TOKEN_BUDGET
         ticket_id = self._strip_ref(ticket_ref, "ticket")
         with self.store.connection() as connection:
             project_id = self._project_for_ticket(connection, ticket_id)
@@ -435,6 +460,8 @@ class ContextMixin:
             role=actor.role.value,
             source_versions=source_versions,
         )
+        if known_snapshot_id and compiled["context_snapshot_id"] == known_snapshot_id:
+            return {"unchanged": True, "context_snapshot_id": known_snapshot_id}
         return compiled
 
     def resolve_context_reference(self, actor: Actor, reference: str) -> dict[str, Any]:
@@ -459,13 +486,53 @@ class ContextMixin:
                 return self._resolve_candidate_section(connection, actor, parts[2], parts[3])
             if kind == "finding" and len(parts) == 3:
                 return self._resolve_finding(connection, actor, parts[2])
-            if kind == "ticket" and len(parts) == 5 and parts[4] == "history":
+            rest = parts[3:]
+            if rest and _VERSION_TOKEN.fullmatch(rest[0]):
+                rest = rest[1:]
+            if kind == "ticket" and rest == ["history"]:
                 return self._resolve_ticket_history(connection, actor, parts[2])
+            if kind == "ticket" and not rest:
+                return self._resolve_ticket_summary(connection, actor, parts[2], reference)
+            if kind == "feature" and not rest:
+                return self._resolve_feature_summary(connection, actor, parts[2], reference)
+        # A section the packet dropped for its budget: recompile without the
+        # budget, under the same role projection, and return only that section.
+        if kind in {"ticket", "feature"} and len(rest) == 1:
+            if kind == "ticket":
+                packet = self.get_ticket_context(actor, parts[2], _full_budget=True)
+            else:
+                packet = self.get_feature_context(actor, parts[2], _full_budget=True)
+            if rest[0] in packet and rest[0] not in _PACKET_ENVELOPE_KEYS:
+                return {"reference": reference, rest[0]: packet[rest[0]]}
         raise ValidationError(
             "Unsupported reference; resolvable forms are ctx:entry:<id>, "
             "ctx:candidate:<id>:developer_claims, ctx:candidate:<id>:changed_paths, "
-            "ctx:finding:<id> and ctx:ticket:<id>:v<n>:history"
+            "ctx:finding:<id>, ctx:ticket:<id>[:v<n>][:<section>|:history] and "
+            "ctx:feature:<id>[:v<n>][:<section>]"
         )
+
+    def _resolve_ticket_summary(
+        self, connection: Connection, actor: Actor, ticket_id: str, reference: str
+    ) -> dict[str, Any]:
+        ticket, _project_id = self._authorized_ticket(connection, actor, ticket_id)
+        return {
+            "reference": reference,
+            "ticket": {key: ticket.get(key) for key in _TICKET_SUMMARY_FIELDS},
+            "next_step": "call ticket.get_context for the full packet",
+        }
+
+    def _resolve_feature_summary(
+        self, connection: Connection, actor: Actor, feature_id: str, reference: str
+    ) -> dict[str, Any]:
+        feature = self._one(
+            connection, "SELECT * FROM features WHERE feature_id = ?", (feature_id,)
+        )
+        require_project(actor, feature["project_id"])
+        return {
+            "reference": reference,
+            "feature": {key: feature.get(key) for key in _EXECUTION_FEATURE_FIELDS},
+            "next_step": "call feature.get_context for the full packet",
+        }
 
     def _resolve_entry(
         self, connection: Connection, actor: Actor, entry_id: str
@@ -540,10 +607,8 @@ class ContextMixin:
     def _resolve_ticket_history(
         self, connection: Connection, actor: Actor, ticket_id: str
     ) -> dict[str, Any]:
-        if actor.role not in {Role.PLANNER, Role.ADMIN}:
-            raise AuthorizationError(
-                "Only Planner or Admin may expand ticket decision history"
-            )
+        # Execution roles see the history their packet cited, filtered to the
+        # entry types their packet may carry (below).
         ticket, _project_id = self._authorized_ticket(connection, actor, ticket_id)
         rows = connection.execute(
             """

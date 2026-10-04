@@ -343,12 +343,10 @@ class DiscoveryMixin:
             feature["tickets"].append(ticket_summary)
 
         discovered = {
-            "agent": {
-                "agent_id": actor.agent_id,
-                "role": actor.role.value,
-                "capabilities": self.capabilities(actor),
-            },
-            "project": project,
+            # session.bootstrap already returned the project row and the
+            # capability list; a discovery loop only needs to know where it is.
+            "agent": {"agent_id": actor.agent_id, "role": actor.role.value},
+            "project": {"project_id": project["project_id"], "name": project["name"]},
             "view": "tickets",
             "features": list(grouped.values()),
             "next_cursor": self._encoded_cursor(last) if has_more and last else None,
@@ -455,12 +453,10 @@ class DiscoveryMixin:
         )
         truncated = len(ordered) > limit
         return {
-            "agent": {
-                "agent_id": actor.agent_id,
-                "role": actor.role.value,
-                "capabilities": self.capabilities(actor),
-            },
-            "project": project,
+            # session.bootstrap already returned the project row and the
+            # capability list; a discovery loop only needs to know where it is.
+            "agent": {"agent_id": actor.agent_id, "role": actor.role.value},
+            "project": {"project_id": project["project_id"], "name": project["name"]},
             "view": "feature_rollup",
             "features": ordered[:limit],
             "feature_count": len(ordered),

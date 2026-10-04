@@ -15,6 +15,7 @@ from typing import Any, TypeVar
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import TextContent
 
 from hoh_control_plane.auth import (
     STDIO_TRANSPORT,
@@ -34,7 +35,7 @@ from hoh_control_plane.domain import (
     ValidationError,
 )
 from hoh_control_plane.service import ControlPlaneService
-from hoh_control_plane.service._common import require_snapshot_id
+from hoh_control_plane.service._common import delivered_json, require_snapshot_id
 from hoh_control_plane.store_factory import store_from_environment
 from hoh_control_plane.store import ContentionError
 
@@ -175,9 +176,27 @@ def _start_merge_worker(database_path: Path, merge_job_id: str) -> None:
     )
 
 
+class _CompactFastMCP(FastMCP):
+    """FastMCP whose text content is compact JSON instead of `indent=2`.
+
+    The structured content is unchanged. The text block is what most clients
+    put in front of the model, so it is the form the packet budget measures
+    (`delivered_json`); indentation alone cost about a third more tokens.
+    """
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        result = await super().call_tool(name, arguments)
+        if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict):
+            _content, structured = result
+            # A non-dict return value is wrapped as {"result": value} by FastMCP.
+            payload = structured["result"] if set(structured) == {"result"} else structured
+            return [TextContent(type="text", text=delivered_json(payload))], structured
+        return result
+
+
 def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_http: bool = False) -> FastMCP:
     """Create the smallest MCP tool surface permitted for one authenticated role."""
-    server = FastMCP(
+    server = _CompactFastMCP(
         "Harness Control Plane",
         stateless_http=stateless_http,
         transport_security=TransportSecuritySettings(
@@ -228,7 +247,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             )
             # Stable, machine-readable parity with the REST error body: a stdio
             # client branches on the code instead of parsing the prose.
-            raise ToolError(f"[{error.code}] {error}") from error
+            raise ToolError(_tool_error_text(error)) from error
         except (sqlite3.OperationalError, sqlite3.IntegrityError) as error:
             # Safety net: normalize any raw driver error that reaches this boundary
             # without an existing service-layer translation (e.g. a foreign-key
@@ -535,9 +554,12 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
         ticket_ref: str,
         token_budget: int | None = None,
         include_history: bool = False,
+        known_snapshot_id: str | None = None,
     ) -> dict[str, Any]:
         """Resolve one current role-bounded ticket packet.
 
+        Pass the context_snapshot_id you hold as known_snapshot_id: an unchanged
+        packet returns only {unchanged: true, context_snapshot_id}.
         Planner/Admin may set include_history only for a deliberate audit of older
         typed decisions. A larger token_budget alone never widens role visibility.
         """
@@ -547,9 +569,10 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
                 "ticket_ref": ticket_ref,
                 "token_budget": token_budget,
                 "include_history": include_history,
+                "known_snapshot_id": known_snapshot_id,
             },
             lambda: service.get_ticket_context(
-                actor, ticket_ref, token_budget, include_history
+                actor, ticket_ref, token_budget, include_history, known_snapshot_id
             ),
         )
 
@@ -558,8 +581,9 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
         """Resolve one typed reference cited by a packet's omitted_sections.
 
         Accepts ctx:entry:<id>, ctx:candidate:<id>:developer_claims,
-        ctx:candidate:<id>:changed_paths, ctx:finding:<id> and, for Planner or
-        Admin, ctx:ticket:<id>:v<n>:history. Returns only that item.
+        ctx:candidate:<id>:changed_paths, ctx:finding:<id>,
+        ctx:ticket:<id>[:v<n>][:<section>|:history] and
+        ctx:feature:<id>[:v<n>][:<section>]. Returns only that item.
         """
         arguments = {"reference": reference}
         return invoke(
@@ -1839,6 +1863,36 @@ def _execution_role(value: str) -> Role:
     if role not in {Role.DEVELOPER, Role.QA, Role.INTEGRATOR}:
         raise ValidationError("required_role must be developer, qa or integrator")
     return role
+
+
+_RETRY_HINTS = {
+    "context_stale": "Re-read ticket.get_context, then retry with its context_snapshot_id.",
+    "repository_reconciliation_required": (
+        "Planner must reconcile first; call work.wait_for_event, then retry."
+    ),
+    "lease_expired": "The lease is gone; call work.discover and claim again.",
+}
+
+
+def _retry_hint(error: DomainError) -> str | None:
+    if error.code in _RETRY_HINTS:
+        return _RETRY_HINTS[error.code]
+    reason = error.details.get("reason") if isinstance(error.details, dict) else None
+    return _RETRY_HINTS.get(str(reason)) if reason else None
+
+
+def _tool_error_text(error: DomainError) -> str:
+    """`[code] message {json}`: the REST error body's details, readable by MCP clients."""
+    text = f"[{error.code}] {error}"
+    extra: dict[str, Any] = {}
+    if error.details:
+        extra["details"] = error.details
+    hint = _retry_hint(error)
+    if hint:
+        extra["retry_hint"] = hint
+    if extra:
+        text += " " + json.dumps(extra, separators=(",", ":"), sort_keys=True, default=str)
+    return text
 
 
 def _safe_input_summary(arguments: dict[str, Any]) -> dict[str, Any]:

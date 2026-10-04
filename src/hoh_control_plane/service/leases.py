@@ -37,7 +37,7 @@ class LeaseMixin:
                 raise AuthorizationError("Lease belongs to another actor")
             timestamp = _now()
             if datetime.fromisoformat(lease["expires_at"].replace("Z", "+00:00")) <= timestamp:
-                raise ConflictError("Lease has expired")
+                raise ConflictError("Lease has expired", {"reason": "lease_expired"})
             expires_at = _iso(timestamp + timedelta(seconds=lease_seconds))
             connection.execute(
                 "UPDATE leases SET heartbeat_at = ?, expires_at = ? WHERE lease_id = ?",
@@ -335,13 +335,20 @@ class LeaseMixin:
                 {"lease_id": lease_id},
             )
             self._mark_queue_claimed(connection, ticket_id, actor.agent_id, timestamp)
-            return {
+            result = {
                 "ticket": self._ticket(connection, ticket_id),
                 "lease": self._lease(connection, lease_id),
                 # The snapshot the caller decided from, not a fresh identifier:
                 # inventing one here would name a packet nobody ever read.
                 "context_snapshot_id": context_snapshot_id,
             }
+        # The packet ticket.get_context returns right now, compiled and recorded
+        # after the claim committed: an agent can write from it without spending
+        # a round trip and a full packet on re-reading.
+        result["current_context_snapshot_id"] = self.get_ticket_context(
+            actor, ticket_id
+        )["context_snapshot_id"]
+        return result
 
     def _authorized_ticket(
         self, connection: Connection, actor: Actor, ticket_id: str
@@ -391,7 +398,7 @@ class LeaseMixin:
             raise AuthorizationError("Lease belongs to another actor")
         expires_at = datetime.fromisoformat(lease["expires_at"].replace("Z", "+00:00"))
         if expires_at <= _now():
-            raise ConflictError("Lease has expired")
+            raise ConflictError("Lease has expired", {"reason": "lease_expired"})
         return lease
 
     def _lease(self, connection: Connection, lease_id: str) -> dict[str, Any]:

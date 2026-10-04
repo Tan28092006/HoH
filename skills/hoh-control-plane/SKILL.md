@@ -39,9 +39,10 @@ The normal packet is role-projected and bounded. Start with the current ticket,
 contract, active artifact, decision and role-relevant evidence. A larger token
 budget does not widen visibility or load history. Only Planner/Admin may use
 `include_history=true`, and only for a concrete audit question. Resolve one
-cited `ctx:` reference at a time with `context.resolve` (a checkpointed entry,
-candidate claims or changed paths, a finding, or Planner history) instead of
-reloading all tickets, specs or old runs.
+cited `ctx:` reference at a time with `context.resolve` (an entry, candidate
+section, finding, dropped section, ticket or history) instead of reloading all
+tickets, specs or old runs. Re-read with `known_snapshot_id`: an unchanged packet
+returns only `{unchanged: true}`.
 
 Use `experience.record` only for a reusable, observable trap tied to relevant
 file scope. At most three matching advisory checkpoints appear in a packet;

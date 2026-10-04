@@ -285,9 +285,18 @@ def _required_execution_capabilities(ticket: dict[str, Any]) -> set[str]:
     }
 
 
+def delivered_json(payload: Any) -> str:
+    """The exact text an MCP tool result carries: compact, unescaped JSON."""
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False, default=str)
+
+
 def _estimate_tokens(payload: Any) -> int:
-    """Deterministic size proxy; exact tokenizer parity is not what the budget guards."""
-    return len(_serialize(payload)) // 4
+    """Size of what the agent receives (`delivered_json`), at about four characters a token.
+
+    Exact tokenizer parity is not what the budget guards; measuring the form
+    actually delivered is.
+    """
+    return len(delivered_json(payload)) // 4
 
 
 def _snapshot_digest(payload: dict[str, Any]) -> str:
