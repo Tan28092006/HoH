@@ -55,6 +55,7 @@ def test_candidate_submission_queues_without_running_git_validation(
     queued = service.queue_candidate_submission(
         actors["developer"], ticket["ticket_id"], claim["lease"]["lease_id"],
         claim["ticket"]["version"], commit, prepared["base_commit"], prepared["branch_ref"], ["Ready."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
 
     assert queued["submission"]["status"] == "QUEUED"
@@ -68,6 +69,7 @@ def test_candidate_submission_worker_freezes_one_candidate_then_poll_returns_it(
     queued = service.queue_candidate_submission(
         actors["developer"], ticket["ticket_id"], claim["lease"]["lease_id"],
         claim["ticket"]["version"], commit, prepared["base_commit"], prepared["branch_ref"], ["Ready."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
 
     completed = service.execute_queued_candidate_submission(queued["submission"]["submission_id"])
@@ -87,6 +89,7 @@ def test_duplicate_submission_reuses_one_job_and_one_candidate(
     arguments = (
         actors["developer"], ticket["ticket_id"], claim["lease"]["lease_id"],
         claim["ticket"]["version"], commit, prepared["base_commit"], prepared["branch_ref"], ["Ready."],
+        service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
 
     first = service.queue_candidate_submission(*arguments)
@@ -107,6 +110,7 @@ def test_candidate_submission_worker_persists_validation_failure_for_polling(
     queued = service.queue_candidate_submission(
         actors["developer"], ticket["ticket_id"], claim["lease"]["lease_id"],
         claim["ticket"]["version"], commit, prepared["base_commit"], prepared["branch_ref"], ["Ready."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     monkeypatch.setattr(
         service.git_worktrees, "verify_candidate", lambda **_kwargs: (_ for _ in ()).throw(ValidationError("bad commit"))

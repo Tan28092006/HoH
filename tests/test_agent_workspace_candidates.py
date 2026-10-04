@@ -7,11 +7,12 @@ service from what it fetched, never from what the agent said about its machine.
 from __future__ import annotations
 
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
 
-from hoh_control_plane.domain import Role, ValidationError, WorkspaceModel
+from hoh_control_plane.domain import ConflictError, Role, ValidationError, WorkspaceModel
 
 
 def _git(path: Path, *arguments: str) -> str:
@@ -93,6 +94,7 @@ def _submit(service, actors, remote, commit: str, base: str | None = None):
         base or remote["base"],
         remote["branch"],
         ["Implemented on my own machine and pushed the branch."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], remote["ticket"]["ticket_id"])["context_snapshot_id"],
     )
 
 
@@ -245,6 +247,7 @@ def test_a_colocated_project_still_requires_its_assigned_worktree(
             "1" * 40,
             "some/branch",
             ["No worktree was ever prepared."],
+            context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
         )
 
     assert "worktree" in str(error.value).lower()
@@ -267,3 +270,76 @@ def test_qa_and_integration_see_an_ordinary_frozen_candidate(
 
     assert qa_claim["ticket"]["status"] == "QA_IN_PROGRESS"
     assert qa_claim["ticket"]["candidate_commit"] == commit
+
+
+def _blocking_verification(service, monkeypatch, during=None):
+    """Hold the Git verification open until the test releases it."""
+    entered, release = threading.Event(), threading.Event()
+    verify = service.git_worktrees.verify_pushed_candidate
+
+    def blocked(**kwargs):
+        entered.set()
+        if during is not None:
+            during()
+        assert release.wait(10), "test never released the Git verification"
+        return verify(**kwargs)
+
+    monkeypatch.setattr(service.git_worktrees, "verify_pushed_candidate", blocked)
+    return entered, release
+
+
+def _submit_in_thread(service, actors, remote, commit):
+    outcome: dict[str, object] = {}
+
+    def run() -> None:
+        try:
+            outcome["result"] = _submit(service, actors, remote, commit)
+        except Exception as error:  # surfaced by the asserting test
+            outcome["error"] = error
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread, outcome
+
+
+def test_git_verification_does_not_hold_the_write_lock(
+    service, actors, remote, monkeypatch
+) -> None:
+    _git(remote["clone"], "checkout", "-b", remote["branch"])
+    commit = _commit_in_agent_clone(
+        remote["clone"], "src/checkout/retry.py", "def retry():\n    ...\n", "Add retry"
+    )
+    _git(remote["clone"], "push", "origin", remote["branch"])
+    entered, release = _blocking_verification(service, monkeypatch)
+    thread, outcome = _submit_in_thread(service, actors, remote, commit)
+    try:
+        assert entered.wait(10)
+        # Another writer gets the lock while Git is still running.
+        service.heartbeat(actors["developer"], remote["lease_id"], 900)
+    finally:
+        release.set()
+        thread.join(15)
+    assert "error" not in outcome, outcome.get("error")
+    assert outcome["result"]["ticket"]["status"] == "QA_READY"
+
+
+def test_a_ticket_that_moves_during_git_verification_is_refused(
+    service, actors, remote, monkeypatch
+) -> None:
+    _git(remote["clone"], "checkout", "-b", remote["branch"])
+    commit = _commit_in_agent_clone(
+        remote["clone"], "src/checkout/retry.py", "def retry():\n    ...\n", "Add retry"
+    )
+    _git(remote["clone"], "push", "origin", remote["branch"])
+
+    def bump_version() -> None:
+        with service.store.connection(immediate=True) as connection:
+            connection.execute(
+                "UPDATE tickets SET version = version + 1 WHERE ticket_id = ?",
+                (remote["ticket"]["ticket_id"],),
+            )
+
+    entered, release = _blocking_verification(service, monkeypatch, during=bump_version)
+    release.set()
+    with pytest.raises(ConflictError, match="stale"):
+        _submit(service, actors, remote, commit)

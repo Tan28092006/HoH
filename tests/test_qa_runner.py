@@ -78,6 +78,7 @@ def _candidate_waiting_for_qa(service, actors, seeded, tmp_path: Path, test_comm
         prepared["worktree"]["base_commit"],
         prepared["worktree"]["branch_ref"],
         ["Retry implementation is ready for QA."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     qa_claim = service.claim_qa(
         actors["qa"], ticket["ticket_id"], candidate["ticket"]["version"], 900

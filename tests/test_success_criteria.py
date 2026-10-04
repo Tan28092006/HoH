@@ -242,10 +242,12 @@ def test_criterion_8_the_backend_refuses_what_a_role_may_not_do(
             actors["developer"], ticket["ticket_id"], "lease", "cand", 1, "passed",
             [{"criterion": "c", "status": "verified", "observation": "o",
               "evidence": [{"type": "t", "observation": "o", "storage_ref": "evidence://x"}]}],
+              context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
         ),
         # QA cannot submit the artifact it is meant to judge.
         lambda: service.submit_candidate(
             actors["qa"], ticket["ticket_id"], "lease", 1, "a" * 40, "b" * 40, "branch", ["claim"],
+            context_snapshot_id=service.get_ticket_context(actors["qa"], ticket["ticket_id"])["context_snapshot_id"],
         ),
         # A Developer cannot move the protected branch.
         lambda: service.queue_merge_candidate(

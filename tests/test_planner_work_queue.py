@@ -51,6 +51,7 @@ def _qa_failed_ticket(service, actors, seeded):
         "b" * 40,
         "agent/dev-01/DEV-142",
         ["Ready for QA."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     qa_claim = service.claim_qa(
         actors["qa"], ticket["ticket_id"], candidate["ticket"]["version"], 900
@@ -63,6 +64,7 @@ def _qa_failed_ticket(service, actors, seeded):
         qa_claim["ticket"]["version"],
         "failed",
         [_failing_finding(ticket["acceptance_criteria"][0])],
+        context_snapshot_id=service.get_ticket_context(actors["qa"], ticket["ticket_id"])["context_snapshot_id"],
     )
 
 
@@ -105,6 +107,7 @@ def test_a_passing_verdict_creates_no_planner_job(service, actors, seeded) -> No
     candidate = service.submit_candidate(
         actors["developer"], ticket["ticket_id"], claim["lease"]["lease_id"],
         claim["ticket"]["version"], "a" * 40, "b" * 40, "agent/dev-01/DEV-142", ["Ready."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     qa_claim = service.claim_qa(
         actors["qa"], ticket["ticket_id"], candidate["ticket"]["version"], 900
@@ -133,6 +136,7 @@ def test_a_passing_verdict_creates_no_planner_job(service, actors, seeded) -> No
             }
             for index, criterion in enumerate(ticket["acceptance_criteria"], start=1)
         ],
+        context_snapshot_id=service.get_ticket_context(actors["qa"], ticket["ticket_id"])["context_snapshot_id"],
     )
 
     assert passed["planner_job"] is None

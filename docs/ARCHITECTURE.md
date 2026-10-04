@@ -81,8 +81,9 @@ helper you are about to change across `service/`.
   predicates to the updates.
 - Do not run Git, subprocesses or large file I/O inside a write transaction. The
   queued paths follow the pattern *check and mark RUNNING → external work with no
-  transaction → re-check and complete*. The synchronous `submit_candidate` path and
-  verdict evidence hashing still break this rule (see the review).
+  transaction → re-check and complete*. The synchronous `submit_candidate` path follows it
+  too: Git verification runs before a short re-validating write, and verdict
+  evidence and project-test reports are hashed or written before the lock.
 - Every state change records an `audit_events` row in the same transaction
   (`_event` in `validation.py`). Events are an audit trail, not an event-sourced
   log: current state cannot be rebuilt from them.
@@ -97,7 +98,7 @@ helper you are about to change across `service/`.
 | Role sees only its tools | Per-credential FastMCP in `mcp_server.py`; `require_role` in the service | `test_mcp.py`, `test_mcp_transport_auth.py` |
 | One live lease per ticket; lease is the fencing token | Partial unique index in `store.py`; `_claim`, `_require_active_lease` in `leases.py` | `test_postgres_concurrency.py`, `test_git_worktrees.py` |
 | No new claim, offer, submission or merge while a reconciliation is pending | `_require_repository_reconciled` in `planning.py`, called from leases, candidates, integration, worktrees; inline check for offers in `discovery.py`. `set_ticket_ready` does not call it | `test_team_quality_gates.py`, `test_repository_sync.py` |
-| Consequential writes name a fresh packet | `require_fresh_context` in `context.py`; required only by the MCP shim `_require_snapshot` | `test_team_quality_gates.py` |
+| Consequential writes name a fresh packet | `require_fresh_context` in `context.py`; `require_snapshot_id` in `service/_common.py`, called by `submit_candidate`, `queue_candidate_submission`, `submit_qa_verdict` and `queue_merge_candidate`, so REST and MCP both require it | `test_context_snapshots.py`, `test_team_quality_gates.py` |
 | Candidate is one ordinary commit on the frozen base | Candidate verification in `candidates.py` / `git_worktrees.py` | `test_candidate_submission.py` |
 | Merge only the current candidate after a fresh QA pass and isolated gate | `integration.py` queued merge and `merge_intents` reconciliation | `test_integration_async_gate.py`, `test_integration_release_policy.py` |
 | Retried writes do not repeat effects | `service/idempotency.py` (payload-bound key; completion and release retry contention and never mask a committed effect; a stale IN_PROGRESS key is reclaimed as `idempotency_unknown`) | `test_idempotency.py` |

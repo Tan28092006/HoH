@@ -9,6 +9,7 @@ _INFRASTRUCTURE_OUTCOMES = frozenset({
 })
 
 from hoh_control_plane.service._common import (
+    require_snapshot_id,
     CHECKSUM_ARTIFACT,
     CHECKSUM_CLAIMED,
     Actor,
@@ -106,6 +107,36 @@ class QaMixin:
         )
         command = profile["test_command"] if profile is not None else []
         return self.project_tests.environment_digest(command, None)
+
+    def _precomputed_evidence_checksums(
+        self, candidate_id: str, findings: list[Any]
+    ) -> dict[int, Any]:
+        """Checksum every evidence item outside the write transaction.
+
+        A failure is kept rather than raised, so the verdict reports errors in the
+        same order it always did, after the ticket and lease checks.
+        """
+        results: dict[int, Any] = {}
+        for finding_data in findings:
+            if not isinstance(finding_data, dict):
+                continue
+            evidence_items = finding_data.get("evidence") or []
+            if not isinstance(evidence_items, list):
+                continue
+            for item in evidence_items:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    storage_ref = self._canonical_storage_ref(
+                        str(item.get("storage_ref", "evidence://inline"))
+                    )
+                    results[id(item)] = (storage_ref, *self._verified_storage_checksum(
+                        storage_ref, candidate_id, item.get("storage_checksum"),
+                        str(item.get("observation", "")),
+                    ))
+                except Exception as error:  # re-raised in order by the caller
+                    results[id(item)] = error
+        return results
 
     def _verified_storage_checksum(
         self, storage_ref: str, candidate_id: str, supplied: object, observation: str
@@ -449,48 +480,61 @@ class QaMixin:
             actor, ticket_id, lease_id, queued["test_run"]["test_run_id"]
         )
 
+    def _require_project_test_current(
+        self, connection: Connection, job: dict[str, Any]
+    ) -> tuple[Actor, dict[str, Any]]:
+        actor = Actor(job["requested_by"], Role.QA, frozenset({job["project_id"]}))
+        ticket = self._ticket(connection, job["ticket_id"])
+        if ticket["status"] != TicketStatus.QA_IN_PROGRESS.value:
+            raise ConflictError("Ticket changed while project tests were running")
+        self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
+        candidate = self._one(
+            connection,
+            "SELECT * FROM candidates WHERE candidate_id = ? AND ticket_id = ?",
+            (job["candidate_id"], job["ticket_id"]),
+        )
+        if candidate["commit_sha"] != job["candidate_commit"]:
+            raise ConflictError("Candidate changed while project tests were running")
+        return actor, ticket
+
     def _complete_queued_project_test(
         self, test_run_id: str, execution: TestExecution
     ) -> dict[str, Any]:
         try:
+            # Read and check, write the report file with no transaction held, then
+            # re-check under the write lock before recording the run.
+            with self.store.connection() as connection:
+                job = self._qa_test_job(connection, test_run_id)
+                if job["status"] != "RUNNING":
+                    return job
+                self._require_project_test_current(connection, job)
+                profile = self._one(connection, "SELECT * FROM candidate_test_profiles WHERE candidate_id = ?",
+                                    (job["candidate_id"],))
+            manifest = {**execution.environment_manifest,
+                        "candidate_commit": job["candidate_commit"],
+                        "frozen_profile": {"configured_at": profile["configured_at"],
+                                           "command_digest": job["command_digest"],
+                                           "timeout_seconds": job["timeout_seconds"]}}
+            child = manifest.get("child", {})
+            if execution.environment_manifest.get("instrumentation") and (
+                child.get("candidate_commit") != job["candidate_commit"]
+                or child.get("final_commit") != job["candidate_commit"]
+            ) and execution.termination_reason == "passed":
+                execution = replace(execution, artifact_mismatch=True, provenance_status="mismatch",
+                                    termination_reason="artifact_mismatch")
+            execution = replace(execution, environment_manifest=manifest,
+                environment_digest=hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest())
+            storage_ref, report_path, checksum = self.project_tests.write_report(
+                candidate_id=job["candidate_id"],
+                test_run_id=test_run_id,
+                execution=execution,
+                candidate_commit=job["candidate_commit"],
+            )
             with self.store.connection(immediate=True) as connection:
                 job = self._qa_test_job(connection, test_run_id)
                 if job["status"] != "RUNNING":
                     return job
-                actor = Actor(job["requested_by"], Role.QA, frozenset({job["project_id"]}))
-                ticket = self._ticket(connection, job["ticket_id"])
-                if ticket["status"] != TicketStatus.QA_IN_PROGRESS.value:
-                    raise ConflictError("Ticket changed while project tests were running")
-                self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
-                candidate = self._one(
-                    connection,
-                    "SELECT * FROM candidates WHERE candidate_id = ? AND ticket_id = ?",
-                    (job["candidate_id"], job["ticket_id"]),
-                )
-                if candidate["commit_sha"] != job["candidate_commit"]:
-                    raise ConflictError("Candidate changed while project tests were running")
-                profile = self._one(connection, "SELECT * FROM candidate_test_profiles WHERE candidate_id = ?",
-                                    (job["candidate_id"],))
-                manifest = {**execution.environment_manifest,
-                            "candidate_commit": job["candidate_commit"],
-                            "frozen_profile": {"configured_at": profile["configured_at"],
-                                               "command_digest": job["command_digest"],
-                                               "timeout_seconds": job["timeout_seconds"]}}
-                child = manifest.get("child", {})
-                if execution.environment_manifest.get("instrumentation") and (
-                    child.get("candidate_commit") != job["candidate_commit"]
-                    or child.get("final_commit") != job["candidate_commit"]
-                ) and execution.termination_reason == "passed":
-                    execution = replace(execution, artifact_mismatch=True, provenance_status="mismatch",
-                                        termination_reason="artifact_mismatch")
-                execution = replace(execution, environment_manifest=manifest,
-                    environment_digest=hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest())
-                storage_ref, report_path, checksum = self.project_tests.write_report(
-                    candidate_id=job["candidate_id"],
-                    test_run_id=test_run_id,
-                    execution=execution,
-                    candidate_commit=job["candidate_commit"],
-                )
+                actor, ticket = self._require_project_test_current(connection, job)
                 timestamp = _iso()
                 connection.execute(
                     """
@@ -656,9 +700,13 @@ class QaMixin:
         context_snapshot_id: str | None = None,
     ) -> dict[str, Any]:
         require_role(actor, Role.QA)
+        context_snapshot_id = require_snapshot_id(context_snapshot_id, "qa.submit_verdict")
         if verdict not in {"passed", "failed"}:
             raise ValidationError("Verdict must be 'passed' or 'failed'")
         self._bounded_list(findings, "findings", 50, 1, required=True, strings_only=False)
+        # Hashing evidence artifacts reads files of any size, so it runs before the
+        # write lock is taken; the loop below consumes the results in order.
+        checksums = self._precomputed_evidence_checksums(candidate_id, findings)
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             self._expect_version(ticket, expected_version)
@@ -731,9 +779,14 @@ class QaMixin:
                     )
                     self._bounded_text(storage_ref, "evidence.storage_ref", 1000)
                     observation = str(item.get("observation", ""))
-                    checksum, checksum_source = self._verified_storage_checksum(
-                        storage_ref, candidate_id, item.get("storage_checksum"), observation
-                    )
+                    precomputed = checksums.get(id(item))
+                    if isinstance(precomputed, Exception):
+                        raise precomputed
+                    if precomputed is None or precomputed[0] != storage_ref:
+                        precomputed = (storage_ref, *self._verified_storage_checksum(
+                            storage_ref, candidate_id, item.get("storage_checksum"), observation
+                        ))
+                    _, checksum, checksum_source = precomputed
                     scenario_ref = self._recorded_scenario_ref(
                         item.get("scenario_ref"), criterion
                     )

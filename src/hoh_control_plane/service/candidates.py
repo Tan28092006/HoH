@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from hoh_control_plane.service._common import (
+    require_snapshot_id,
     Actor,
     Any,
     AuthorizationError,
@@ -38,6 +39,7 @@ class CandidateMixin:
     ) -> dict[str, Any]:
         """Durably acknowledge a candidate before detached Git validation begins."""
         require_role(actor, Role.DEVELOPER)
+        context_snapshot_id = require_snapshot_id(context_snapshot_id, "dev.submit_candidate")
         self._valid_commit(commit_sha, "commit_sha")
         self._valid_commit(base_commit, "base_commit")
         self._bounded_text(branch_ref, "branch_ref", 300)
@@ -259,6 +261,23 @@ class CandidateMixin:
             job["candidate"] = None
         return job
 
+    def _check_candidate_submittable(
+        self,
+        connection: Connection,
+        actor: Actor,
+        ticket_id: str,
+        lease_id: str,
+        expected_version: int,
+        context_snapshot_id: str,
+    ) -> None:
+        ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+        self._require_repository_reconciled(connection, project_id)
+        self._expect_version(ticket, expected_version)
+        self.require_fresh_context(connection, ticket_id, context_snapshot_id)
+        if ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:
+            raise ConflictError("Ticket is not in development")
+        self._require_active_lease(connection, actor, ticket_id, lease_id)
+
     def submit_candidate(
         self,
         actor: Actor,
@@ -272,49 +291,26 @@ class CandidateMixin:
         context_snapshot_id: str | None = None,
     ) -> dict[str, Any]:
         require_role(actor, Role.DEVELOPER)
+        context_snapshot_id = require_snapshot_id(context_snapshot_id, "dev.submit_candidate")
         self._valid_commit(commit_sha, "commit_sha")
         self._valid_commit(base_commit, "base_commit")
         self._bounded_text(branch_ref, "branch_ref", 300)
         self._bounded_list(developer_claims, "developer_claims", 50, 2000)
-        with self.store.connection(immediate=True) as connection:
+        # Read -> Git with no transaction held -> re-validate and write. Git
+        # verification can take seconds, and the immediate connection is the one
+        # global write lock, so it must never wrap a subprocess.
+        with self.store.connection() as connection:
+            self._check_candidate_submittable(
+                connection, actor, ticket_id, lease_id, expected_version, context_snapshot_id
+            )
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
-            self._require_repository_reconciled(connection, project_id)
-            self._expect_version(ticket, expected_version)
-            self.require_fresh_context(connection, ticket_id, context_snapshot_id)
-            if ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:
-                raise ConflictError("Ticket is not in development")
-            self._require_active_lease(connection, actor, ticket_id, lease_id)
             repository = _row(
                 connection.execute(
                     "SELECT * FROM project_repositories WHERE project_id = ?", (project_id,)
                 ).fetchone()
             )
-            changed_paths: list[str] = []
-            if repository is not None and not self._service_owns_the_workspace(repository):
-                # The Developer holds its own checkout, so there is no service-side
-                # tree to inspect and every fact comes from what the service fetched.
-                commit_sha, base_commit = self.git_worktrees.verify_pushed_candidate(
-                    repository_path=repository["repository_path"],
-                    candidate_commit=commit_sha,
-                    submitted_base_commit=base_commit,
-                    expected_iteration_parent=ticket.get("candidate_commit"),
-                )
-                changed_paths = self.git_worktrees.changed_paths(
-                    repository_path=repository["repository_path"],
-                    base_commit=base_commit,
-                    candidate_commit=commit_sha,
-                )
-                paths_outside_scope = [
-                    path
-                    for path in changed_paths
-                    if not self._path_is_in_any_scope(path, ticket["file_scope"])
-                ]
-                if paths_outside_scope:
-                    raise ValidationError(
-                        "Candidate changes paths outside ticket write scope: "
-                        + ", ".join(paths_outside_scope)
-                    )
-            elif repository is not None:
+            worktree: dict[str, Any] | None = None
+            if repository is not None and self._service_owns_the_workspace(repository):
                 worktree = _row(
                     connection.execute(
                         "SELECT * FROM worktrees WHERE ticket_id = ?", (ticket_id,)
@@ -328,6 +324,18 @@ class CandidateMixin:
                     raise AuthorizationError("Ticket worktree belongs to another Developer")
                 if branch_ref != worktree["branch_ref"]:
                     raise ValidationError("Submitted branch does not match the assigned worktree branch")
+        changed_paths: list[str] = []
+        if repository is not None:
+            if worktree is None:
+                # The Developer holds its own checkout, so there is no service-side
+                # tree to inspect and every fact comes from what the service fetched.
+                commit_sha, base_commit = self.git_worktrees.verify_pushed_candidate(
+                    repository_path=repository["repository_path"],
+                    candidate_commit=commit_sha,
+                    submitted_base_commit=base_commit,
+                    expected_iteration_parent=ticket.get("candidate_commit"),
+                )
+            else:
                 commit_sha, base_commit = self.git_worktrees.verify_candidate(
                     repository_path=repository["repository_path"],
                     worktree_path=worktree["worktree_path"],
@@ -337,21 +345,39 @@ class CandidateMixin:
                     submitted_base_commit=base_commit,
                     expected_iteration_parent=ticket.get("candidate_commit"),
                 )
-                changed_paths = self.git_worktrees.changed_paths(
-                    repository_path=repository["repository_path"],
-                    base_commit=base_commit,
-                    candidate_commit=commit_sha,
+            changed_paths = self.git_worktrees.changed_paths(
+                repository_path=repository["repository_path"],
+                base_commit=base_commit,
+                candidate_commit=commit_sha,
+            )
+            paths_outside_scope = [
+                path
+                for path in changed_paths
+                if not self._path_is_in_any_scope(path, ticket["file_scope"])
+            ]
+            if paths_outside_scope:
+                raise ValidationError(
+                    "Candidate changes paths outside ticket write scope: "
+                    + ", ".join(paths_outside_scope)
                 )
-                paths_outside_scope = [
-                    path
-                    for path in changed_paths
-                    if not self._path_is_in_any_scope(path, ticket["file_scope"])
-                ]
-                if paths_outside_scope:
-                    raise ValidationError(
-                        "Candidate changes paths outside ticket write scope: "
-                        + ", ".join(paths_outside_scope)
-                    )
+        with self.store.connection(immediate=True) as connection:
+            # Everything the Git result was judged against is re-checked: the
+            # version also pins file_scope and the prior candidate commit.
+            self._check_candidate_submittable(
+                connection, actor, ticket_id, lease_id, expected_version, context_snapshot_id
+            )
+            ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
+            if worktree is not None:
+                current = _row(
+                    connection.execute(
+                        "SELECT * FROM worktrees WHERE ticket_id = ?", (ticket_id,)
+                    ).fetchone()
+                )
+                if current is None or any(
+                    current[key] != worktree[key]
+                    for key in ("agent_id", "worktree_path", "branch_ref", "base_commit")
+                ):
+                    raise ConflictError("Ticket worktree changed while candidate validation ran")
                 connection.execute(
                     "UPDATE worktrees SET last_verified_at = ? WHERE ticket_id = ?",
                     (_iso(), ticket_id),

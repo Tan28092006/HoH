@@ -48,6 +48,7 @@ def _submit_candidate(
         base_commit="b" * 40,
         branch_ref="agent/dev-01/DEV-142",
         developer_claims=["Candidate is ready for independent QA"],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], "DEV-142")["context_snapshot_id"],
     )
 
 
@@ -331,6 +332,7 @@ def test_failed_qa_requeues_ticket_for_an_available_developer(
                 ],
             }
         ],
+        context_snapshot_id=service.get_ticket_context(actors["qa"], "DEV-142")["context_snapshot_id"],
     )
     # The rejection opens a Planner reconciliation atomically; rework is
     # offered only after Planner has assessed it.

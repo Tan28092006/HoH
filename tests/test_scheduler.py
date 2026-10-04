@@ -52,6 +52,7 @@ def test_scheduler_requeues_an_expired_qa_lease_to_qa_ready(
         "b" * 40,
         "hoh/project-1/DEV-142/dev-01",
         ["Candidate is ready for QA."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     qa = service.claim_qa(
         actors["qa"], ticket["ticket_id"], candidate["ticket"]["version"], 900

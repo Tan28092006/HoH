@@ -20,6 +20,7 @@ def _queue(service, actors, ticket, integration):
         ticket["ticket_id"],
         integration["lease"]["lease_id"],
         integration["ticket"]["version"],
+        context_snapshot_id=service.get_ticket_context(actors["integrator"], ticket["ticket_id"])["context_snapshot_id"],
     )
 
 

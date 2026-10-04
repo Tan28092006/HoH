@@ -5,6 +5,7 @@ from dataclasses import replace
 from hoh_control_plane.service.qa import _INFRASTRUCTURE_OUTCOMES
 from hoh_control_plane.service._common import (
     _audit_event_has_field,
+    require_snapshot_id,
     Actor,
     Any,
     AuthorizationError,
@@ -504,6 +505,7 @@ class IntegrationMixin:
     ) -> dict[str, Any]:
         """Durably acknowledge integration before the detached Git merge worker runs."""
         require_role(actor, Role.INTEGRATOR)
+        context_snapshot_id = require_snapshot_id(context_snapshot_id, "integrator.merge_candidate")
         # The standing release policy is judged before anything is queued, and the
         # Git half runs without a write lock held.
         snapshot = self._release_policy_snapshot(actor, ticket_id)

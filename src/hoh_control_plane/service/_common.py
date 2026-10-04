@@ -372,3 +372,17 @@ def _audit_event_has_field(
         if isinstance(payload, dict) and payload.get(field) == value:
             return True
     return False
+def require_snapshot_id(context_snapshot_id: Any, tool_name: str) -> str:
+    """A consequential write must name the packet it was decided from.
+
+    The freshness check only runs against a snapshot the caller supplies, so an
+    omitted snapshot silently skipped it. Submission, verdict and merge are the
+    three writes whose staleness costs a whole iteration, so the service refuses
+    them without one, whichever transport (MCP or REST) carried the request.
+    """
+    if not isinstance(context_snapshot_id, str) or not context_snapshot_id.strip():
+        raise ValidationError(
+            f"{tool_name} requires context_snapshot_id: call ticket.get_context "
+            "immediately before this write and pass the context_snapshot_id it returns"
+        )
+    return context_snapshot_id.strip()

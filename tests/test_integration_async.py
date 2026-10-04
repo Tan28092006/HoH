@@ -86,6 +86,7 @@ def _candidate_ready_for_integration(service, actors, seeded, tmp_path: Path):
         prepared["worktree"]["base_commit"],
         prepared["worktree"]["branch_ref"],
         ["Retry implementation is ready for QA."],
+        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
     )
     qa_claim = service.claim_qa(
         actors["qa"], ticket["ticket_id"], candidate["ticket"]["version"], 900
@@ -113,6 +114,7 @@ def _candidate_ready_for_integration(service, actors, seeded, tmp_path: Path):
             }
             for index, criterion in enumerate(ticket["acceptance_criteria"], start=1)
         ],
+        context_snapshot_id=service.get_ticket_context(actors["qa"], ticket["ticket_id"])["context_snapshot_id"],
     )
     record_regression_run(
         service, candidate["candidate"]["candidate_id"], ticket["ticket_id"]
@@ -142,6 +144,7 @@ def test_merge_candidate_queues_without_running_git(
     queued = service.queue_merge_candidate(
         actors["integrator"], ticket["ticket_id"],
         integration["lease"]["lease_id"], integration["ticket"]["version"],
+        context_snapshot_id=service.get_ticket_context(actors["integrator"], ticket["ticket_id"])["context_snapshot_id"],
     )
 
     assert queued["merge_job"]["status"] == "QUEUED"
@@ -158,6 +161,7 @@ def test_merge_worker_fast_forwards_then_poll_reports_completed(
     queued = service.queue_merge_candidate(
         actors["integrator"], ticket["ticket_id"],
         integration["lease"]["lease_id"], integration["ticket"]["version"],
+        context_snapshot_id=service.get_ticket_context(actors["integrator"], ticket["ticket_id"])["context_snapshot_id"],
     )
 
     completed = service.execute_queued_merge(queued["merge_job"]["merge_job_id"])
@@ -186,6 +190,7 @@ def test_successful_merge_reports_once_and_wakes_the_planner(
     queued = service.queue_merge_candidate(
         actors["integrator"], ticket["ticket_id"],
         integration["lease"]["lease_id"], integration["ticket"]["version"],
+        context_snapshot_id=service.get_ticket_context(actors["integrator"], ticket["ticket_id"])["context_snapshot_id"],
     )
 
     service.register_agent(actors["planner"], skills=["planning"], capacity=1)
@@ -244,6 +249,7 @@ def test_delivery_report_recovery_refuses_unfinished_or_unauthorized_merges(
     queued = service.queue_merge_candidate(
         actors["integrator"], ticket["ticket_id"],
         integration["lease"]["lease_id"], integration["ticket"]["version"],
+        context_snapshot_id=service.get_ticket_context(actors["integrator"], ticket["ticket_id"])["context_snapshot_id"],
     )["merge_job"]
 
     with pytest.raises(AuthorizationError):
@@ -276,6 +282,7 @@ def test_merge_worker_requeues_rework_when_mainline_drifts_after_queueing(
     queued = service.queue_merge_candidate(
         actors["integrator"], ticket["ticket_id"],
         integration["lease"]["lease_id"], integration["ticket"]["version"],
+        context_snapshot_id=service.get_ticket_context(actors["integrator"], ticket["ticket_id"])["context_snapshot_id"],
     )
     (repository / "mainline.txt").write_text("new mainline work\n", encoding="utf-8")
     _git(repository, "add", "mainline.txt")
@@ -302,6 +309,7 @@ def test_duplicate_merge_request_reuses_one_job_and_merges_once(
     arguments = (
         actors["integrator"], ticket["ticket_id"],
         integration["lease"]["lease_id"], integration["ticket"]["version"],
+        service.get_ticket_context(actors["integrator"], ticket["ticket_id"])["context_snapshot_id"],
     )
 
     first = service.queue_merge_candidate(*arguments)
@@ -333,6 +341,7 @@ def test_merge_worker_persists_git_failure_for_polling(
     queued = service.queue_merge_candidate(
         actors["integrator"], ticket["ticket_id"],
         integration["lease"]["lease_id"], integration["ticket"]["version"],
+        context_snapshot_id=service.get_ticket_context(actors["integrator"], ticket["ticket_id"])["context_snapshot_id"],
     )
     monkeypatch.setattr(
         service.git_worktrees,
@@ -368,6 +377,7 @@ def test_poll_before_worker_runs_renews_the_integrator_lease(
     queued = service.queue_merge_candidate(
         actors["integrator"], ticket["ticket_id"],
         integration["lease"]["lease_id"], integration["ticket"]["version"],
+        context_snapshot_id=service.get_ticket_context(actors["integrator"], ticket["ticket_id"])["context_snapshot_id"],
     )
 
     polled = service.get_merge_candidate(
@@ -423,6 +433,7 @@ def test_queue_merge_candidate_reports_whether_the_job_is_new(
     arguments = (
         actors["integrator"], ticket["ticket_id"],
         integration["lease"]["lease_id"], integration["ticket"]["version"],
+        service.get_ticket_context(actors["integrator"], ticket["ticket_id"])["context_snapshot_id"],
     )
 
     first = service.queue_merge_candidate(*arguments)
@@ -529,6 +540,7 @@ def test_a_second_worker_racing_the_same_job_never_runs_git_twice(
     queued = service.queue_merge_candidate(
         actors["integrator"], ticket["ticket_id"],
         integration["lease"]["lease_id"], integration["ticket"]["version"],
+        context_snapshot_id=service.get_ticket_context(actors["integrator"], ticket["ticket_id"])["context_snapshot_id"],
     )
     merge_job_id = queued["merge_job"]["merge_job_id"]
     git_calls: list[None] = []
@@ -564,6 +576,7 @@ def test_a_barrier_opened_during_the_merge_does_not_strand_a_landed_candidate(
     queued = service.queue_merge_candidate(
         actors["integrator"], ticket["ticket_id"],
         integration["lease"]["lease_id"], integration["ticket"]["version"],
+        context_snapshot_id=service.get_ticket_context(actors["integrator"], ticket["ticket_id"])["context_snapshot_id"],
     )
     real_fast_forward = service.git_worktrees.fast_forward_default_branch
 
@@ -621,6 +634,7 @@ def test_gate_reuses_a_passing_qa_run_of_the_same_commit_and_command(
     queued = service.queue_merge_candidate(
         actors["integrator"], ticket["ticket_id"],
         integration["lease"]["lease_id"], integration["ticket"]["version"],
+        context_snapshot_id=service.get_ticket_context(actors["integrator"], ticket["ticket_id"])["context_snapshot_id"],
     )
     executions: list[object] = []
     monkeypatch.setattr(service.project_tests, "execute", lambda *a, **k: executions.append(a))
@@ -648,6 +662,7 @@ def test_gate_still_runs_when_the_qa_run_used_another_timeout(
     queued = service.queue_merge_candidate(
         actors["integrator"], ticket["ticket_id"],
         integration["lease"]["lease_id"], integration["ticket"]["version"],
+        context_snapshot_id=service.get_ticket_context(actors["integrator"], ticket["ticket_id"])["context_snapshot_id"],
     )
 
     completed = service.execute_queued_merge(queued["merge_job"]["merge_job_id"])
@@ -672,6 +687,7 @@ def test_drift_before_the_gate_skips_the_suite(
     queued = service.queue_merge_candidate(
         actors["integrator"], ticket["ticket_id"],
         integration["lease"]["lease_id"], integration["ticket"]["version"],
+        context_snapshot_id=service.get_ticket_context(actors["integrator"], ticket["ticket_id"])["context_snapshot_id"],
     )
     (repository / "teammate.txt").write_text("pushed meanwhile\n", encoding="utf-8")
     _git(repository, "add", "teammate.txt")
@@ -720,6 +736,7 @@ def _merge(service, actors, seeded, tmp_path):
     queued = service.queue_merge_candidate(
         actors["integrator"], ticket["ticket_id"],
         integration["lease"]["lease_id"], integration["ticket"]["version"],
+        context_snapshot_id=service.get_ticket_context(actors["integrator"], ticket["ticket_id"])["context_snapshot_id"],
     )
     return service.execute_queued_merge(queued["merge_job"]["merge_job_id"])
 
