@@ -25,7 +25,7 @@ introduced it. The "Guards" column says what change should trigger that read.
 | [0.3.26](RELEASE_0.3.26.md) | One suite run per ticket (gate reuses QA run), server-resolved disjoint merges, wake-up re-arm, parallel tests | Merge gate, reconciliation auto-keep, QA run reuse |
 | [0.3.27](RELEASE_0.3.27.md) | Recovery and regression entries reach role packets; main green | Packet entry-type projection |
 | [0.3.28](RELEASE_0.3.28.md) | Correctness wave 1: no Git in the write lock, service-enforced snapshots, idempotency, exact evidence match, sync CAS, legacy merge removed, Planner job expiry | Candidate submission, idempotency, repository sync |
-| [0.3.29](RELEASE_0.3.29.md) | Draft: semantic records removed; generated client configs only (H9); one wait-protocol statement (H10) | Client setup docs, wait protocol wording |
+| [0.3.29](RELEASE_0.3.29.md) | Wave 2: MCP error details, resolvable refs, unchanged packets, compact delivery, dir scopes, experience expiry, cycle metrics, less ceremony | Client setup docs, wait protocol wording |
 
 Releases before 0.3.14 are described in
 [RUNTIME_OPERATIONS](../RUNTIME_OPERATIONS.md),

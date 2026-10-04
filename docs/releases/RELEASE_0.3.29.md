@@ -1,26 +1,51 @@
-# HoH 0.3.29 — less ceremony (draft)
+# HoH 0.3.29 — less ceremony, cheaper context
 
-Draft. Removes duplicated or dead instructions so automated development carries
-less to read and less to keep in sync. Addresses H9 and H10 from the
-[2026-10 architecture review](../reviews/2026-10-harness-architecture-review.md).
+Wave 2 of the [2026-10 architecture review](../reviews/2026-10-harness-architecture-review.md):
+fewer wasted tokens and round trips for agents, less to keep in sync.
 
-- **Semantic decision records removed.** The queued merge never wrote them and
-  the legacy writer went in 0.3.28. Deleted `semantic_record.py`,
-  `GitWorktreeManager.commit_semantic_record`, their tests and
-  `docs/SEMANTIC_LAYER.md`.
-- **H9 — hand-written client prompts and configs removed.** `deploy/codex`,
-  `deploy/claude-code` and `deploy/antigravity` registered only the role skill,
-  polled every minute, set a 60 s Codex tool timeout against a long wait and used
-  a stdio env role. Client configs now come only from `local_agent setup` and
-  `hoh-agent-kit`; ROLE_WAKEUPS, ANTIGRAVITY_SETUP, LOCAL_SETUP and AGENT_KIT
-  point there. The dead `local_agent._make_prompts_0_3_18_legacy` is gone.
-- **H10 — one statement of the wait protocol.** The `work.wait_for_event` tool
-  description is authoritative (it now also covers `poll_tool`, replay and
-  asking the user). The base skill, `session-start.md`, `wakeup.md`, the kit's
-  `START_HERE.md` and the generated setup prompt say one line that points at it.
-  A test fails if a skill restates the wait constants.
-- **Skill tool-name check.** `test_skill_assets` checks only backticked
-  `role.verb` tokens whose prefix is a real tool namespace, so file names and
-  field paths are no longer reported as missing tools.
+## Agent interface
 
-No schema or data changes.
+- **H3 — MCP errors keep their details.** Errors read
+  `[code] message {"details":...,"retry_hint":...}`; the JSON is omitted when
+  empty. Hints cover stale context, the reconciliation barrier and lease expiry.
+  MCP and REST details are tested for parity.
+- **H4 — every cited reference resolves for its role.** `context.resolve` now
+  answers `ctx:ticket:<id>`, `ctx:ticket:<id>[:vN]:<section>`,
+  `ctx:feature:<id>[:vN][:<section>]`. Execution roles may resolve history,
+  filtered to the entry types their packet carries.
+- **H5 — no re-sending unchanged packets.** `ticket.get_context` accepts
+  `known_snapshot_id` and answers `{unchanged: true}` when nothing moved. Claims
+  return `current_context_snapshot_id`, so a write can follow a claim without a
+  full packet read.
+- **H6 — budgets measured on what is sent.** MCP returns compact JSON text and
+  the token estimate uses that same text. `work.discover` returns only
+  `agent {id, role}` and `project {id, name}`; bootstrap already carries the rest.
+
+## Board hygiene
+
+- **H12 — directory scopes work (HOH-279).** `dir/` is stored as `dir/**`, and a
+  legacy `dir/` row matches as `dir/**`.
+- **H11 — experience expires.** Notes record the base commit, stop surfacing
+  after 30 days unseen, rank by recency, and Planner can `experience.retire` one.
+- **H1 — HoH measures its loop.** `planner.cycle_metrics` and
+  `GET /api/v1/projects/{id}/cycle-metrics` report per-ticket phase durations
+  (median, p90), QA runs and gate runs executed vs reused, from existing events.
+
+## Removed ceremony
+
+- **Semantic decision records removed** (`semantic_record.py`,
+  `commit_semantic_record`, `docs/SEMANTIC_LAYER.md`). The queued merge never
+  wrote them.
+- **H9 — hand-written client configs removed** (`deploy/codex`,
+  `deploy/claude-code`, `deploy/antigravity`). Configs come only from
+  `local_agent setup` and `hoh-agent-kit`.
+- **H10 — one statement of the wait protocol**, in the `work.wait_for_event`
+  tool description; skills and generated prompts point at it, and a test refuses
+  restated constants.
+
+Schema: four nullable columns on `experience_notes` (additive). No data changes.
+
+## Verification
+
+Full suite, six workers: 1033 passed, 30 skipped, 0 failed. Coverage gate and
+PostgreSQL paths not run.
