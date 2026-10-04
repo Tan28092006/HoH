@@ -2879,7 +2879,7 @@ class PlanningMixin:
                 INSERT INTO context_entries
                     (entry_id, project_id, feature_id, ticket_id, entry_type, content,
                      source_ref, artifact_commit, actor_id, actor_role, created_at)
-                VALUES (?, ?, ?, ?, 'planning_decision', ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, 'planner_decision', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _id(connection, "ctx"),

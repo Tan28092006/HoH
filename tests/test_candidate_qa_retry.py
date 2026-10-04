@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import keep_open_tickets
 
 from hoh_control_plane.domain import (
     Actor,
@@ -145,12 +146,14 @@ def test_recovery_reopens_a_blocked_ticket_for_an_independent_fresh_qa_verdict(
     decision = next(
         entry
         for entry in context["context_entries"]
-        if entry["entry_type"] == "planning_decision"
+        if entry["entry_type"] == "planner_decision"
         and entry["source_ref"] == finding_ids[0]
     )
     assert candidate["commit_sha"] in decision["content"]
     assert decision["artifact_commit"] == candidate["commit_sha"]
 
+    # The QA rejection opened a reconciliation barrier; Planner assesses it first.
+    keep_open_tickets(service, actors["planner"])
     # An independent QA agent claims the SAME candidate and can now pass it outright.
     qa_claim = service.claim_qa(
         actors["qa"], ticket["ticket_id"], recovered["ticket"]["version"], 900
@@ -350,6 +353,7 @@ def test_recovery_preserves_current_candidate_after_an_older_submission(
             'SELECT * FROM candidate_test_profiles WHERE candidate_id=?', (candidate['candidate_id'],)).fetchone())
     recovered = service.recover_candidate_for_qa(actors['planner'],ticket['ticket_id'],blocked['version'],finding_ids[0])
     assert recovered['candidate']['candidate_id'] == candidate['candidate_id']
+    keep_open_tickets(service, actors['planner'])
     claim = service.claim_qa(actors['qa'],ticket['ticket_id'],recovered['ticket']['version'],900)
     queued = service.queue_project_tests(actors['qa'],ticket['ticket_id'],claim['lease']['lease_id'])
     assert queued['test_run']['candidate_id'] == candidate['candidate_id']

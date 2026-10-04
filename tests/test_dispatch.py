@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from conftest import keep_open_tickets
 
 from conftest import FakeProber
 from hoh_control_plane.domain import Actor, ConflictError, Role, TicketStatus, ValidationError
@@ -331,6 +332,9 @@ def test_failed_qa_requeues_ticket_for_an_available_developer(
             }
         ],
     )
+    # The rejection opens a Planner reconciliation atomically; rework is
+    # offered only after Planner has assessed it.
+    keep_open_tickets(service, actors["planner"])
 
     service.register_agent(
         actors["developer_2"], skills=["hoh-developer"], capacity=1, machine_id="dev-b"
