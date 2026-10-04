@@ -11,6 +11,9 @@ go and read it, which is the part that prose in a document never solves.
 """
 from __future__ import annotations
 
+import math
+from datetime import datetime, timedelta, timezone
+
 from hoh_control_plane import scopes
 from hoh_control_plane.service._common import (
     Actor,
@@ -33,6 +36,36 @@ _MAX_EXPERIENCE_NOTES = 3
 
 _MAX_LESSON_CHARS = 2000
 _MAX_SURFACED_LESSON_CHARS = 400
+
+# A note not re-seen for this long stops surfacing: the code it describes has
+# probably moved on. Recording the same lesson again revives it.
+EXPERIENCE_EXPIRY_DAYS = 30
+# Ranking weight halves every this many days since a note was last seen, so an
+# old, often-seen note cannot crowd out a fresh one forever.
+_RECENCY_HALF_LIFE_DAYS = 7.0
+# Candidates read from the index before ranking in Python.
+_RANKING_POOL = 50
+
+
+def _parse_iso(value: str) -> datetime:
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
+def _expiry_cutoff(now: datetime | None = None) -> str:
+    moment = now or datetime.now(timezone.utc)
+    return _iso(moment - timedelta(days=EXPERIENCE_EXPIRY_DAYS))
+
+
+def _rank_score(note: dict[str, Any], now: datetime) -> float:
+    age_days = max(0.0, (now - _parse_iso(note["last_seen_at"])).total_seconds() / 86400)
+    weight = 1.0 + math.log(max(1, int(note["times_seen"] or 1)))
+    return weight * 0.5 ** (age_days / _RECENCY_HALF_LIFE_DAYS)
+
+
+def _ranked(notes: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    now = datetime.now(timezone.utc)
+    notes.sort(key=lambda note: (_rank_score(note, now), note["last_seen_at"]), reverse=True)
+    return notes[:limit]
 
 
 class ExperienceMixin:
@@ -58,6 +91,7 @@ class ExperienceMixin:
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             scope = self._experience_scope(file_scope, ticket)
+            source_commit = self._experience_source_commit(connection, project_id, ticket)
             existing = self._matching_note(connection, project_id, text, scope)
             if existing is not None:
                 # The same lesson learned again is not a second lesson. It is
@@ -66,10 +100,11 @@ class ExperienceMixin:
                 connection.execute(
                     """
                     UPDATE experience_notes
-                    SET times_seen = times_seen + 1, last_seen_at = ?
+                    SET times_seen = times_seen + 1, last_seen_at = ?,
+                        source_commit = COALESCE(?, source_commit)
                     WHERE note_id = ?
                     """,
-                    (_iso(), existing["note_id"]),
+                    (_iso(), source_commit, existing["note_id"]),
                 )
                 note_id = str(existing["note_id"])
             else:
@@ -79,8 +114,9 @@ class ExperienceMixin:
                     """
                     INSERT INTO experience_notes
                         (note_id, project_id, file_scope, lesson, learned_on_ticket,
-                         actor_id, actor_role, times_seen, created_at, last_seen_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                         actor_id, actor_role, times_seen, created_at, last_seen_at,
+                         source_commit)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
                     """,
                     (
                         note_id,
@@ -92,6 +128,7 @@ class ExperienceMixin:
                         actor.role.value,
                         now,
                         now,
+                        source_commit,
                     ),
                 )
                 # Indexed as it is written. A note missing from here is a note
@@ -118,6 +155,19 @@ class ExperienceMixin:
                 "SELECT * FROM experience_notes WHERE note_id = ?",
                 (note_id,),
             )
+
+    @staticmethod
+    def _experience_source_commit(
+        connection: Connection, project_id: str, ticket: dict[str, Any]
+    ) -> str | None:
+        """The ticket's base commit, else the mainline last observed for the project."""
+        if ticket.get("base_commit"):
+            return str(ticket["base_commit"])
+        row = connection.execute(
+            "SELECT observed_mainline_commit FROM project_repositories WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        return str(row[0]) if row is not None and row[0] else None
 
     def _experience_scope(
         self, file_scope: list[str] | None, ticket: dict[str, Any]
@@ -148,7 +198,8 @@ class ExperienceMixin:
     ) -> dict[str, Any] | None:
         """An identical lesson already filed somewhere this scope reaches."""
         rows = connection.execute(
-            "SELECT * FROM experience_notes WHERE project_id = ? AND lesson = ?",
+            "SELECT * FROM experience_notes WHERE project_id = ? AND lesson = ? "
+            "AND retired_at IS NULL",
             (project_id, lesson),
         ).fetchall()
         for row in rows:
@@ -177,18 +228,19 @@ class ExperienceMixin:
                 f"""
                 SELECT * FROM experience_notes
                 WHERE project_id = ?
+                  AND retired_at IS NULL
+                  AND last_seen_at >= ?
                   AND note_id IN (
                       SELECT note_id FROM experience_note_scopes WHERE {clause}
                   )
-                ORDER BY times_seen DESC, last_seen_at DESC
+                ORDER BY last_seen_at DESC
                 LIMIT ?
                 """,
-                (project_id, *parameters, _MAX_EXPERIENCE_NOTES),
+                (project_id, _expiry_cutoff(), *parameters, _RANKING_POOL),
             ).fetchall()
+        notes = [_row(row) for row in rows]
         relevant: list[dict[str, Any]] = []
-        for row in rows:
-            note = _row(row)
-            assert note is not None
+        for note in _ranked(notes, _MAX_EXPERIENCE_NOTES):
             relevant.append(
                 {
                     "note_ref": f"experience:{note['note_id']}",
@@ -196,6 +248,8 @@ class ExperienceMixin:
                     "scope": note["file_scope"],
                     "times_seen": note["times_seen"],
                     "learned_on_ticket": note["learned_on_ticket"],
+                    "source_commit": note.get("source_commit"),
+                    "last_seen_at": note["last_seen_at"],
                     "recorded_by": note["actor_role"],
                     "advisory": True,
                 }
@@ -224,9 +278,50 @@ class ExperienceMixin:
             "scope": note["file_scope"],
             "times_seen": note["times_seen"],
             "learned_on_ticket": note["learned_on_ticket"],
+            "source_commit": note.get("source_commit"),
+            "last_seen_at": note["last_seen_at"],
+            "retired_at": note.get("retired_at"),
             "recorded_by": note["actor_role"],
             "advisory": True,
         }
+
+    def retire_experience(
+        self, actor: Actor, note_ref: str, reason: str
+    ) -> dict[str, Any]:
+        """Stop a note from surfacing. Planner or Admin only; the row is kept."""
+        if actor.role not in {Role.PLANNER, Role.ADMIN}:
+            raise AuthorizationError("Only Planner or Admin may retire experience")
+        note_id = self._strip_ref(note_ref, "experience")
+        self._bounded_text(reason, "reason", 2000)
+        with self.store.connection(immediate=True) as connection:
+            note = self._one(
+                connection,
+                "SELECT * FROM experience_notes WHERE note_id = ?",
+                (note_id,),
+            )
+            require_project(actor, note["project_id"])
+            if note.get("retired_at"):
+                return note
+            connection.execute(
+                "UPDATE experience_notes SET retired_at = ?, retired_by = ?, retired_reason = ? "
+                "WHERE note_id = ?",
+                (_iso(), actor.agent_id, reason, note_id),
+            )
+            self._event(
+                connection,
+                actor,
+                note["project_id"],
+                "experience.retired",
+                "experience",
+                note_id,
+                0,
+                {"note_id": note_id, "reason": reason},
+            )
+            return self._one(
+                connection,
+                "SELECT * FROM experience_notes WHERE note_id = ?",
+                (note_id,),
+            )
 
     @staticmethod
     def _overlap_clause(roots: list[str]) -> tuple[str, list[Any]]:
@@ -265,9 +360,10 @@ class ExperienceMixin:
         with self.store.connection() as connection:
             rows = connection.execute(
                 """
-                SELECT * FROM experience_notes WHERE project_id = ?
-                ORDER BY times_seen DESC, last_seen_at DESC LIMIT ?
+                SELECT * FROM experience_notes
+                WHERE project_id = ? AND retired_at IS NULL AND last_seen_at >= ?
+                ORDER BY last_seen_at DESC LIMIT ?
                 """,
-                (project_id, limit),
+                (project_id, _expiry_cutoff(), max(limit, _RANKING_POOL)),
             ).fetchall()
-        return [_row(row) for row in rows]
+        return _ranked([_row(row) for row in rows], limit)

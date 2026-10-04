@@ -10,6 +10,7 @@ from hoh_control_plane.service._common import (
     _row,
     datetime,
     defaultdict,
+    json,
     require_project,
 )
 
@@ -300,3 +301,145 @@ class BoardMixin:
             project_id = self._project_for_feature(connection, feature_id)
         require_project(actor, project_id)
         return project_id
+
+    # Phase name -> (start marker, end marker). Markers are resolved per ticket
+    # by _cycle_markers from audit events that the workflow already writes.
+    _CYCLE_PHASES = (
+        ("ready_to_claim", "ready", "claimed"),
+        ("claim_to_submit", "claimed", "submitted"),
+        ("submit_to_verdict", "submitted", "verdict"),
+        ("verdict_to_merge", "verdict", "delivered"),
+        ("ready_to_merge", "ready", "delivered"),
+    )
+    _DELIVERY_EVENTS = ("integration.completed", "integration.landed_ungated")
+
+    def cycle_metrics(self, actor: Actor, project_id: str, limit: int = 20) -> dict[str, Any]:
+        """How long the loop takes, per delivered ticket and as median/p90.
+
+        Read-only: computed from audit_events, qa_test_runs and merge_jobs, so
+        measuring the loop adds nothing to it. Phases use the first READY, the
+        first Developer claim, the last candidate freeze, the last passing QA
+        verdict and the delivery event; a rework round therefore shows up as a
+        longer claim-to-submit phase. Seconds; None where a phase did not occur
+        (an ungated landing has no verdict).
+        """
+        require_project(actor, project_id)
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
+            raise ValidationError("limit must be between 1 and 200")
+        with self.store.connection() as connection:
+            delivered = connection.execute(
+                """
+                SELECT aggregate_id AS ticket_id, MAX(occurred_at) AS delivered_at
+                FROM audit_events
+                WHERE project_id = ? AND aggregate_type = 'ticket'
+                  AND event_type IN (?, ?)
+                GROUP BY aggregate_id
+                ORDER BY delivered_at DESC
+                LIMIT ?
+                """,
+                (project_id, *self._DELIVERY_EVENTS, limit),
+            ).fetchall()
+            tickets: list[dict[str, Any]] = []
+            for row in delivered:
+                ticket_id = row["ticket_id"]
+                events = connection.execute(
+                    """
+                    SELECT event_type, actor_role, payload, occurred_at FROM audit_events
+                    WHERE project_id = ? AND aggregate_id = ?
+                      AND event_type IN ('ticket.ready', 'ticket.claimed', 'candidate.frozen',
+                                         'ticket.verified', 'integration.completed',
+                                         'integration.landed_ungated')
+                    ORDER BY sequence ASC
+                    """,
+                    (project_id, ticket_id),
+                ).fetchall()
+                markers = self._cycle_markers([dict(event) for event in events])
+                qa_runs = connection.execute(
+                    "SELECT COUNT(*) FROM qa_test_runs WHERE ticket_id = ?", (ticket_id,)
+                ).fetchone()[0]
+                gate_events = connection.execute(
+                    """
+                    SELECT audit_events.payload FROM audit_events
+                    JOIN merge_jobs ON merge_jobs.merge_job_id = audit_events.aggregate_id
+                    WHERE audit_events.event_type = 'integration.gate_passed'
+                      AND merge_jobs.ticket_id = ?
+                    """,
+                    (ticket_id,),
+                ).fetchall()
+                gate_modes = [self._payload_field(event["payload"], "gate_mode") for event in gate_events]
+                reused = sum(1 for mode in gate_modes if mode and "reused" in str(mode))
+                phases = {
+                    name: self._seconds_between(markers.get(start), markers.get(end))
+                    for name, start, end in self._CYCLE_PHASES
+                }
+                tickets.append(
+                    {
+                        "ticket_id": ticket_id,
+                        "delivered_at": markers.get("delivered") or row["delivered_at"],
+                        "gated": markers.get("verdict") is not None,
+                        "phases_seconds": phases,
+                        "qa_test_runs": int(qa_runs),
+                        "gate_runs": {"executed": len(gate_modes) - reused, "reused": reused},
+                    }
+                )
+        summary = {
+            name: self._distribution(
+                [ticket["phases_seconds"][name] for ticket in tickets]
+            )
+            for name, _start, _end in self._CYCLE_PHASES
+        }
+        return {
+            "project_id": project_id,
+            "delivered_tickets": len(tickets),
+            "summary": summary,
+            "tickets": tickets,
+        }
+
+    @staticmethod
+    def _cycle_markers(events: list[dict[str, Any]]) -> dict[str, str]:
+        markers: dict[str, str] = {}
+        for event in events:
+            kind, at = event["event_type"], event["occurred_at"]
+            if kind == "ticket.ready":
+                markers.setdefault("ready", at)
+            elif kind == "ticket.claimed" and event["actor_role"] == Role.DEVELOPER.value:
+                markers.setdefault("claimed", at)
+            elif kind == "candidate.frozen":
+                markers["submitted"] = at
+            elif kind == "ticket.verified":
+                markers["verdict"] = at
+            elif kind in BoardMixin._DELIVERY_EVENTS:
+                markers["delivered"] = at
+        return markers
+
+    @staticmethod
+    def _payload_field(payload: Any, field: str) -> Any:
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError:
+                return None
+        return payload.get(field) if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _seconds_between(start: str | None, end: str | None) -> float | None:
+        if not start or not end:
+            return None
+        begin = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        finish = datetime.fromisoformat(end.replace("Z", "+00:00"))
+        return max(0.0, round((finish - begin).total_seconds(), 3))
+
+    @staticmethod
+    def _distribution(values: list[float | None]) -> dict[str, Any]:
+        present = sorted(value for value in values if value is not None)
+        if not present:
+            return {"count": 0, "median": None, "p90": None}
+
+        def percentile(fraction: float) -> float:
+            # Linear interpolation between closest ranks.
+            position = (len(present) - 1) * fraction
+            lower = int(position)
+            upper = min(lower + 1, len(present) - 1)
+            return round(present[lower] + (present[upper] - present[lower]) * (position - lower), 3)
+
+        return {"count": len(present), "median": percentile(0.5), "p90": percentile(0.9)}

@@ -520,11 +520,15 @@ class LeaseMixin:
         return any(LeaseMixin._path_matches_scope(path, scope) for scope in scopes)
 
     @staticmethod
+    def _directory_scope(scope: str) -> str:
+        return scopes.directory_scope(scope)
+
+    @staticmethod
     def _repository_relative_scope(scope: str) -> str:
         raw_scope = scope.replace("\\", "/").strip()
         if not raw_scope or raw_scope.startswith("/") or re.match(r"^[A-Za-z]:", raw_scope):
             raise ValidationError("file_scope entries must be repository-relative paths")
-        normalized = raw_scope.strip("/")
+        normalized = scopes.directory_scope(raw_scope).strip("/")
         if any(part in {".", ".."} for part in normalized.split("/")):
             raise ValidationError("file_scope entries must be repository-relative paths")
         if any(character in normalized for character in ("\x00", "\r", "\n")):
@@ -534,7 +538,8 @@ class LeaseMixin:
     @staticmethod
     def _path_matches_scope(path: str, scope: str) -> bool:
         normalized_path = path.replace("\\", "/").lstrip("/")
-        normalized_scope = scope.replace("\\", "/").strip("/")
+        # A legacy row may still hold "dir/"; read it as "dir/**" (HOH-279).
+        normalized_scope = scopes.directory_scope(scope).replace("\\", "/").strip("/")
         pattern = []
         index = 0
         while index < len(normalized_scope):

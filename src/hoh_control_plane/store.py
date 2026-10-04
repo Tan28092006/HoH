@@ -396,7 +396,11 @@ CREATE TABLE IF NOT EXISTS experience_notes (
     -- turns repetition into the signal that it is worth reading first.
     times_seen INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
-    last_seen_at TEXT NOT NULL
+    last_seen_at TEXT NOT NULL,
+    source_commit TEXT,
+    retired_at TEXT,
+    retired_by TEXT,
+    retired_reason TEXT
 );
 
 CREATE INDEX IF NOT EXISTS experience_notes_project
@@ -1073,6 +1077,12 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # digest. Rows written before the column was added were named by the digest
     # itself and keep NULL here; they remain valid freshness tokens.
     ("context_snapshots", "content_digest", "TEXT"),
+    # Experience provenance and retirement. Older notes keep NULL: no recorded
+    # commit, and not retired.
+    ("experience_notes", "source_commit", "TEXT"),
+    ("experience_notes", "retired_at", "TEXT"),
+    ("experience_notes", "retired_by", "TEXT"),
+    ("experience_notes", "retired_reason", "TEXT"),
 )
 
 # Indexes that cannot be declared in SCHEMA. The schema script runs before these

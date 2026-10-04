@@ -14,6 +14,18 @@ from __future__ import annotations
 _GLOB_CHARACTERS = "*?["
 
 
+def directory_scope(scope: str) -> str:
+    """Rewrite a directory entry such as "migrations/" to "migrations/**".
+
+    A trailing slash reads as "everything under this directory", but as a glob
+    it matches no file at all (HOH-279). Other entries are returned unchanged.
+    """
+    normalized = scope.replace("\\", "/").strip()
+    if len(normalized) > 1 and normalized.endswith("/"):
+        return normalized.rstrip("/") + "/**"
+    return scope
+
+
 def scope_root(scope: str) -> str:
     """The fixed leading path of a pattern, with the glob tail removed.
 
