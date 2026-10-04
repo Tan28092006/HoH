@@ -493,6 +493,7 @@ def test_integrator_returns_candidate_to_rework_when_main_has_drifted(
         ticket["ticket_id"],
         integration["lease"]["lease_id"],
         integration["ticket"]["version"],
+        context_snapshot_id=service.get_ticket_context(actors["integrator"], ticket["ticket_id"])["context_snapshot_id"],
     )
     # Mainline moves after the merge was accepted but before the worker runs.
     (repository / "mainline.txt").write_text("new mainline work\n", encoding="utf-8")

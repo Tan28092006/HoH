@@ -30,6 +30,11 @@ $env:PYTHONPATH = Join-Path $checkout "src"
 if (-not ($PytestArgs -match '^-n')) {
     $PytestArgs = @('-n', 'auto') + @($PytestArgs)
 }
+# Each full run creates hundreds of Git repositories. Keep them off the small
+# system drive and outside any repository (a test checks a non-Git directory).
+if (-not ($PytestArgs -match '^--basetemp')) {
+    $PytestArgs = @('--basetemp=D:\.hoh-pytest') + @($PytestArgs)
+}
 Push-Location $checkout
 try {
     & $python -m pytest @PytestArgs

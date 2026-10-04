@@ -45,7 +45,7 @@ def merge_through_queue(service, actor, ticket_id: str, lease_id: str, expected_
     """Queue then execute a merge; return the terminal job plus the current ticket."""
     if seed_release_evidence:
         seed_release_regression_run(service, ticket_id)
-    queued = service.queue_merge_candidate(actor, ticket_id, lease_id, expected_version)
+    queued = service.queue_merge_candidate(actor, ticket_id, lease_id, expected_version, context_snapshot_id=service.get_ticket_context(actor, ticket_id)["context_snapshot_id"])
     job = service.execute_queued_merge(queued["merge_job"]["merge_job_id"])
     with service.store.connection() as connection:
         ticket = service._ticket(connection, ticket_id)
