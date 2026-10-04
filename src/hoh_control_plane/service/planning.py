@@ -47,7 +47,7 @@ class PlanningMixin:
         self._bounded_text(default_branch, "default_branch", 200)
         timestamp = _iso()
         try:
-            with self.store.connection() as connection:
+            with self.store.connection(immediate=True) as connection:
                 connection.execute(
                     """
                     INSERT INTO projects
@@ -1337,7 +1337,7 @@ class PlanningMixin:
         self._priority(priority)
         timestamp = _iso()
         try:
-            with self.store.connection() as connection:
+            with self.store.connection(immediate=True) as connection:
                 if parent_feature_id:
                     parent = self._one(
                         connection,
@@ -1418,7 +1418,7 @@ class PlanningMixin:
         self._bounded_list(dependency_ids, "dependency_ids", 100, 100)
         timestamp = _iso()
         try:
-            with self.store.connection() as connection:
+            with self.store.connection(immediate=True) as connection:
                 project_id = self._project_for_feature(connection, feature_id)
                 require_project(actor, project_id)
                 status = TicketStatus.READY if ready else TicketStatus.BACKLOG

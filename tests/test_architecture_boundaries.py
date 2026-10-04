@@ -148,3 +148,30 @@ def test_service_mixins_import_only_the_shared_kernel() -> None:
                     and (module, imported) not in allowed:
                 violations.append((module, imported))
     assert not violations, violations
+
+
+def test_every_write_takes_the_write_lock() -> None:
+    # Guards are Python checks followed by unguarded UPDATEs; they hold only
+    # because every writer is serialized by connection(immediate=True). A write
+    # through a plain connection escapes the reconciliation boundary and, on
+    # PostgreSQL, can commit an audit sequence below one a cursor already read.
+    import re
+    violations = []
+    for path in sorted((SOURCE / "service").glob("*.py")) + [SOURCE / "event_wait.py"]:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            match = re.match(r"(\s*)with (self|service)\.store\.connection\(\) as \w+:", line)
+            if not match:
+                continue
+            indent = len(match.group(1))
+            cursor = index + 1
+            while cursor < len(lines) and (
+                not lines[cursor].strip()
+                or len(lines[cursor]) - len(lines[cursor].lstrip()) > indent
+            ):
+                if re.search(r"\b(INSERT|UPDATE|DELETE)\b", lines[cursor]) \
+                        or "self._event(" in lines[cursor]:
+                    violations.append(f"{_module_name(path)}:{index + 1}")
+                    break
+                cursor += 1
+    assert not violations, f"write inside a non-immediate connection: {violations}"
