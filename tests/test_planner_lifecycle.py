@@ -264,7 +264,7 @@ def test_retirement_refuses_active_phases_stale_versions_and_other_roles(
     )
     retirable = _planned_ticket(service, actors, "DEV-908")
 
-    with pytest.raises(ConflictError, match="backlog, ready or blocked"):
+    with pytest.raises(ConflictError, match="cannot be cancelled or superseded from its current lifecycle state"):
         service.cancel_ticket(
             actors["planner"], active["ticket_id"], claim["ticket"]["version"], "No."
         )

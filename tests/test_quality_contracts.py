@@ -68,7 +68,11 @@ def test_planner_contract_is_exact_and_reaches_every_role_context(
         assert packet["ticket"]["validation_contract"] == configured["ticket"][
             "validation_contract"
         ]
-        assert packet["verification_profile"]["quality_policy"] == "legacy"
+        # Since 0.3.18 only the roles that verify (QA, Planner) carry the profile.
+        if role == "qa":
+            assert packet["verification_profile"]["quality_policy"] == "legacy"
+        else:
+            assert packet["verification_profile"] is None
 
 
 def test_contract_rejects_missing_criteria_and_unavailable_capabilities(

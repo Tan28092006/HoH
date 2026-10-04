@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from conftest import keep_open_tickets
 
 from hoh_control_plane.domain import Actor, AuthorizationError, ConflictError, Role
 from hoh_control_plane.mcp_server import create_mcp_server
@@ -272,6 +273,9 @@ def test_planner_queue_does_not_disturb_the_developer_and_qa_queues(
 ) -> None:
     """Creating planning work must not change existing dispatch behavior."""
     failed = _qa_failed_ticket(service, actors, seeded)
+    # The rejection's own reconciliation barrier is resolved first; what is under
+    # test is that the planning queue adds no further disturbance.
+    keep_open_tickets(service, actors["planner"])
     service.register_agent(actors["developer_2"], skills=["hoh-developer"], capacity=1)
 
     inbox = service.get_agent_inbox(actors["developer_2"], "project-1")
