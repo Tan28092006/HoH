@@ -20,7 +20,7 @@ DOMAIN = {"domain", "scopes"}
 STORAGE = {"store", "postgres_store", "store_factory"}
 ADAPTERS = {
     "git_worktrees", "qa_runner", "managed_process", "resource_lock",
-    "resource_probe", "capability_probe", "pytest_probe", "semantic_record", "observability",
+    "resource_probe", "capability_probe", "pytest_probe", "observability",
 }
 ORCHESTRATION = {
     "event_wait", "supervisor", "scheduler", "agent_wakeup", "planner_wakeup",
