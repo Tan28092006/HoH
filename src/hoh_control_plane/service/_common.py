@@ -395,3 +395,55 @@ def require_snapshot_id(context_snapshot_id: Any, tool_name: str) -> str:
             "immediately before this write and pass the context_snapshot_id it returns"
         )
     return context_snapshot_id.strip()
+
+
+class ExecutionGate:
+    """The repository reconciliation barrier, read in one place.
+
+    While any reconciliation is PENDING for a project, no new offer, claim,
+    submission or merge starts. Every call site asks this class.
+    """
+
+    @staticmethod
+    def is_closed(connection: Connection, project_id: str) -> bool:
+        return connection.execute(
+            """
+            SELECT 1 FROM repository_reconciliations
+            WHERE project_id = ? AND status = 'PENDING' LIMIT 1
+            """,
+            (project_id,),
+        ).fetchone() is not None
+
+    @staticmethod
+    def state(
+        connection: Connection, project_id: str
+    ) -> dict[str, Any]:
+        rows = connection.execute(
+            """
+            SELECT reconciliation_id, observation_ref, observed_commits, created_at
+            FROM repository_reconciliations
+            WHERE project_id = ? AND status = 'PENDING'
+            ORDER BY created_at ASC
+            """,
+            (project_id,),
+        ).fetchall()
+        pending = []
+        for row in rows:
+            value = _row(row) or {}
+            commits = value.pop("observed_commits")
+            value["observed_commit_count"] = len(commits)
+            value["commit_refs"] = [item.get("commit") for item in commits[:20]]
+            value["opened_at"] = value.pop("created_at", None)
+            pending.append(value)
+        return {"repository_reconciliation_required": bool(pending), "pending": pending}
+
+    @classmethod
+    def require_open(
+        cls, connection: Connection, project_id: str
+    ) -> None:
+        state = cls.state(connection, project_id)
+        if state["repository_reconciliation_required"]:
+            raise ConflictError(
+                "Repository changed after the current plan was formed; Planner must reconcile every open ticket before execution continues",
+                {"reason": "repository_reconciliation_required", **state},
+            )

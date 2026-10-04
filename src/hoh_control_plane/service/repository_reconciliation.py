@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from hoh_control_plane.service._common import (
+    ExecutionGate,
     Actor,
     Any,
     ConflictError,
@@ -709,24 +710,7 @@ class RepositoryReconciliationMixin:
     def _repository_reconciliation_state(
         self, connection: Connection, project_id: str
     ) -> dict[str, Any]:
-        rows = connection.execute(
-            """
-            SELECT reconciliation_id, observation_ref, observed_commits, created_at
-            FROM repository_reconciliations
-            WHERE project_id = ? AND status = 'PENDING'
-            ORDER BY created_at ASC
-            """,
-            (project_id,),
-        ).fetchall()
-        pending = []
-        for row in rows:
-            value = _row(row) or {}
-            commits = value.pop("observed_commits")
-            value["observed_commit_count"] = len(commits)
-            value["commit_refs"] = [item.get("commit") for item in commits[:20]]
-            value["opened_at"] = value.pop("created_at", None)
-            pending.append(value)
-        return {"repository_reconciliation_required": bool(pending), "pending": pending}
+        return ExecutionGate.state(connection, project_id)
 
     @staticmethod
     def _with_barrier_age(state: dict[str, Any]) -> dict[str, Any]:
@@ -763,9 +747,4 @@ class RepositoryReconciliationMixin:
     def _require_repository_reconciled(
         self, connection: Connection, project_id: str
     ) -> None:
-        state = self._repository_reconciliation_state(connection, project_id)
-        if state["repository_reconciliation_required"]:
-            raise ConflictError(
-                "Repository changed after the current plan was formed; Planner must reconcile every open ticket before execution continues",
-                {"reason": "repository_reconciliation_required", **state},
-            )
+        ExecutionGate.require_open(connection, project_id)

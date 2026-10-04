@@ -6,6 +6,7 @@ from hoh_control_plane.agent_wakeup import (
     validate_endpoint,
 )
 from hoh_control_plane.service._common import (
+    ExecutionGate,
     Actor,
     Any,
     AuthorizationError,
@@ -1195,13 +1196,7 @@ class DiscoveryMixin:
     ) -> list[dict[str, Any]]:
         if queue is None or queue["status"] not in {"pending", "offered"}:
             return []
-        if connection.execute(
-            """
-            SELECT 1 FROM repository_reconciliations
-            WHERE project_id = ? AND status = 'PENDING' LIMIT 1
-            """,
-            (queue["project_id"],),
-        ).fetchone() is not None:
+        if ExecutionGate.is_closed(connection, queue["project_id"]):
             return []
         existing_offer_count = connection.execute(
             "SELECT COUNT(*) FROM work_offers WHERE queue_id = ? AND status = 'offered'",
