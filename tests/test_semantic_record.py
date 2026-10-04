@@ -1,20 +1,9 @@
 """What a merge leaves behind in the repository about why a change exists (HOH-248)."""
 from __future__ import annotations
 
-import subprocess
-from pathlib import Path
-
 import pytest
 
 from hoh_control_plane import semantic_record
-from hoh_control_plane.domain import Role
-
-
-def _git(path: Path, *arguments: str) -> str:
-    completed = subprocess.run(
-        ["git", "-C", str(path), *arguments], check=True, capture_output=True, text=True
-    )
-    return completed.stdout.strip()
 
 
 TICKET = {
@@ -131,72 +120,3 @@ def test_a_ticket_id_cannot_escape_the_record_directory() -> None:
     assert ".." not in path
     with pytest.raises(ValueError):
         semantic_record.record_path("../")
-
-
-# --- what a merge actually lands ----------------------------------------------
-
-
-def _merged(service, actors, seeded, tmp_path: Path, *, passing: bool = True):
-    """Drive a ticket all the way to a protected merge."""
-    from tests.test_integration_gate import (  # noqa: PLC0415
-        _FAILING_REGRESSION,
-        _PASSING_REGRESSION,
-        _gate_ready_candidate,
-    )
-
-    repository, ticket, candidate, integration = _gate_ready_candidate(
-        service, actors, seeded, tmp_path,
-        retry_body=_PASSING_REGRESSION if passing else _FAILING_REGRESSION,
-    )
-    merged = service.merge_candidate(
-        actors["integrator"],
-        ticket["ticket_id"],
-        integration["lease"]["lease_id"],
-        integration["ticket"]["version"],
-    )
-    return repository, ticket, candidate, merged
-
-
-def test_a_merge_lands_the_record_in_the_same_operation(
-    service, actors, seeded, tmp_path: Path
-) -> None:
-    repository, ticket, _candidate, merged = _merged(service, actors, seeded, tmp_path)
-
-    assert merged["merge_status"] == "merged"
-    assert merged["semantic_record_commit"], "the merge reports where the record landed"
-    written = Path(repository) / semantic_record.record_path(ticket["ticket_id"])
-    assert written.is_file()
-    assert ticket["objective"] in written.read_text(encoding="utf-8")
-
-
-def test_the_record_is_committed_on_the_default_branch(
-    service, actors, seeded, tmp_path: Path
-) -> None:
-    repository, ticket, candidate, merged = _merged(service, actors, seeded, tmp_path)
-
-    head = _git(Path(repository), "rev-parse", "main")
-    assert head == merged["semantic_record_commit"]
-    assert _git(Path(repository), "rev-parse", "main~1") == candidate["candidate"]["commit_sha"]
-    tracked = _git(Path(repository), "ls-tree", "--name-only", "-r", "main")
-    assert semantic_record.record_path(ticket["ticket_id"]) in tracked
-
-
-def test_an_unmerged_outcome_leaves_the_repository_undescribed(
-    service, actors, seeded, tmp_path: Path
-) -> None:
-    """The repository describes what landed, never what was attempted."""
-    repository, ticket, _candidate, outcome = _merged(
-        service, actors, seeded, tmp_path, passing=False
-    )
-
-    assert outcome["merge_status"] != "merged"
-    assert not (Path(repository) / semantic_record.record_path(ticket["ticket_id"])).exists()
-
-
-def test_the_first_record_is_accepted_in_a_repository_that_has_none(
-    service, actors, seeded, tmp_path: Path
-) -> None:
-    repository, ticket, _candidate, merged = _merged(service, actors, seeded, tmp_path)
-
-    assert merged["merge_status"] == "merged"
-    assert (Path(repository) / semantic_record.RECORD_DIRECTORY).is_dir()

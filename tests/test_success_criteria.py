@@ -248,7 +248,7 @@ def test_criterion_8_the_backend_refuses_what_a_role_may_not_do(
             actors["qa"], ticket["ticket_id"], "lease", 1, "a" * 40, "b" * 40, "branch", ["claim"],
         ),
         # A Developer cannot move the protected branch.
-        lambda: service.merge_candidate(
+        lambda: service.queue_merge_candidate(
             actors["developer"], ticket["ticket_id"], "lease", 1,
         ),
         # QA cannot author the work it will verify.

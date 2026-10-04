@@ -137,9 +137,9 @@ Recovery takes the same lock and leaves a live holder alone. After a crash:
 
 Lease sweeping holds an unsettled RUNNING merge for reconciliation before another
 worker can take its ticket. Recovery runs at supervisor startup and periodically.
-Legacy synchronous `merge_candidate` remains for compatibility; durable intent
-guarantees apply to the queued integration worker exposed by MCP. Do not use the
-legacy synchronous path for unattended production integration.
+All integration goes through the queued path (`queue_merge_candidate`, then
+`execute_queued_merge` under the repository lock with a durable merge intent).
+The legacy synchronous `merge_candidate` was removed.
 
 ## Remaining production work
 

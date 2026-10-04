@@ -82,8 +82,7 @@ trên Linux thật. Supervisor không quản lý các chat Developer chạy bên
 không có sandbox hay quota tài nguyên từng worker. Chưa tự cài OS watchdog,
 gửi cảnh báo, GC artifact hoặc tổ chức incident ownership.
 
-Reconciliation chỉ bảo đảm cho queued merge worker. Legacy synchronous merge
-chưa có durable intent. Merge còn mơ hồ giữ ticket của nó để operator xử lý;
+Mọi merge đi qua queued merge worker; đường merge đồng bộ cũ đã bị xóa. Merge còn mơ hồ giữ ticket của nó để operator xử lý;
 chưa tự quarantine mọi ticket khác trong repository. Error domain nằm trong
 job DB; stdout/stderr worker bất ngờ chưa được giữ thành log tập trung.
 

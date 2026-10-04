@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 import shutil
 import subprocess
+import sys
 from unittest.mock import patch
 from pathlib import Path
 
 import pytest
 from barrier_helpers import keep_open_tickets
+from merge_helpers import merge_through_queue, seed_release_regression_run
 
 from hoh_control_plane.domain import (
     Actor,
@@ -60,6 +62,8 @@ def test_git_command_timeout_becomes_a_domain_error(tmp_path: Path) -> None:
 def _candidate_ready_for_integration(service, actors, seeded, tmp_path: Path):
     repository = _repository(tmp_path)
     service.configure_repository(actors["planner"], "project-1", str(repository))
+    # The release policy requires a registered regression command.
+    service.configure_test_command(actors["planner"], "project-1", [sys.executable, "-c", "pass"], 60)
     ticket = seeded["ticket"]
     development = service.claim_ticket(
         actors["developer"], ticket["ticket_id"], ticket["version"], 900
@@ -446,7 +450,8 @@ def test_integrator_fast_forwards_a_verified_candidate_to_main(
         verified["ticket"]["version"],
         900,
     )
-    merged = service.merge_candidate(
+    merged = merge_through_queue(
+        service,
         actors["integrator"],
         ticket["ticket_id"],
         integration["lease"]["lease_id"],
@@ -454,9 +459,7 @@ def test_integrator_fast_forwards_a_verified_candidate_to_main(
     )
 
     assert merged["ticket"]["status"] == "DONE"
-    # The candidate is main's parent: the merge lands the code, then the record of
-    # what it was for, so both arrive or neither does.
-    assert _git(repository, "rev-parse", "main~1") == candidate["candidate"]["commit_sha"]
+    assert _git(repository, "rev-parse", "main") == candidate["candidate"]["commit_sha"]
     reports = service.discover_planner_jobs(actors["planner"], "project-1")
     assert len(reports) == 1
     assert reports[0]["job_type"] == "delivery_completed"
@@ -469,22 +472,26 @@ def test_integrator_returns_candidate_to_rework_when_main_has_drifted(
     repository, ticket, _candidate, verified = _candidate_ready_for_integration(
         service, actors, seeded, tmp_path
     )
-    (repository / "mainline.txt").write_text("new mainline work\n", encoding="utf-8")
-    _git(repository, "add", "mainline.txt")
-    _git(repository, "commit", "-m", "Advance mainline")
     integration = service.claim_integration(
         actors["integrator"],
         ticket["ticket_id"],
         verified["ticket"]["version"],
         900,
     )
-
-    rework = service.merge_candidate(
+    seed_release_regression_run(service, ticket["ticket_id"])
+    queued = service.queue_merge_candidate(
         actors["integrator"],
         ticket["ticket_id"],
         integration["lease"]["lease_id"],
         integration["ticket"]["version"],
     )
+    # Mainline moves after the merge was accepted but before the worker runs.
+    (repository / "mainline.txt").write_text("new mainline work\n", encoding="utf-8")
+    _git(repository, "add", "mainline.txt")
+    _git(repository, "commit", "-m", "Advance mainline")
+
+    rework = service.execute_queued_merge(queued["merge_job"]["merge_job_id"])
+    rework["ticket"] = service.get_ticket_context(actors["planner"], ticket["ticket_id"])["ticket"]
 
     assert rework["ticket"]["status"] == "REWORK"
     assert rework["merge_status"] == "base_drift"

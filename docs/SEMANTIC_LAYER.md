@@ -71,6 +71,10 @@ at:
 **Coordination stays in the database.** Leases, queues, jobs, presence,
 idempotency. It needs transactions and locking, and it is disposable.
 
+> Status: only the removed synchronous merge path wrote this record. The queued
+> merge worker does not write it yet; `semantic_record.py` and
+> `GitWorktreeManager.commit_semantic_record` remain for that port.
+
 **The semantic record is written into the repository at merge, by the
 Integrator.** Not the live transitions — the settled outcome. When a candidate
 fast-forwards the default branch, the same commit carries a record of what that
