@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from hoh_control_plane.service._common import (
+    _audit_event_has_field,
     _estimate_tokens,
     _CONTRACT_TOKEN_BUDGET,
     _CONTRACT_TEXT_CHARS,
@@ -2949,10 +2950,11 @@ class PlanningMixin:
                 raise ValidationError(
                     "Evidence reference does not belong to this candidate's project test runs"
                 )
-            recorded_infrastructure = connection.execute(
-                "SELECT 1 FROM audit_events WHERE aggregate_id = ? AND event_type = 'qa.infrastructure_blocked' AND payload LIKE ?",
-                (job["ticket_id"], '%' + evidence_reference + '%')).fetchone()
-            if recorded_infrastructure is None and (job["status"] != "FAILED" or "candidate_artifact_mismatch" not in (
+            recorded_infrastructure = _audit_event_has_field(
+                connection, job["ticket_id"], "qa.infrastructure_blocked",
+                "test_run_id", evidence_reference,
+            )
+            if not recorded_infrastructure and (job["status"] != "FAILED" or "candidate_artifact_mismatch" not in (
                 job["error_message"] or ""
             )):
                 raise ValidationError(

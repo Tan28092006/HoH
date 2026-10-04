@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from hoh_control_plane.service._common import (
+    _audit_event_has_field,
     Actor,
     Any,
     AuthorizationError,
@@ -469,12 +470,10 @@ class PlannerJobMixin:
                     raise ConflictError(
                         "Integrator recovery requires the ticket's current immutable candidate"
                     )
-                verified = connection.execute(
-                    "SELECT 1 FROM audit_events WHERE aggregate_id = ? "
-                    "AND event_type = 'ticket.verified' AND payload LIKE ?",
-                    (ticket["ticket_id"], f'%"{candidate["candidate_id"]}"%'),
-                ).fetchone()
-                if verified is None:
+                if not _audit_event_has_field(
+                    connection, ticket["ticket_id"], "ticket.verified",
+                    "candidate_id", candidate["candidate_id"],
+                ):
                     raise ConflictError(
                         "Integrator recovery requires QA verification for the current candidate"
                     )

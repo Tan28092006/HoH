@@ -5,6 +5,7 @@ from dataclasses import replace
 from hoh_control_plane import semantic_record
 from hoh_control_plane.service.qa import _INFRASTRUCTURE_OUTCOMES
 from hoh_control_plane.service._common import (
+    _audit_event_has_field,
     Actor,
     Any,
     AuthorizationError,
@@ -767,14 +768,9 @@ class IntegrationMixin:
                     (ticket_id,),
                 ).fetchall()
             ]
-            verified_event = connection.execute(
-                """
-                SELECT 1 FROM audit_events
-                WHERE aggregate_id = ? AND event_type = 'ticket.verified'
-                  AND payload LIKE ?
-                """,
-                (ticket_id, f'%"{candidate_id}"%'),
-            ).fetchone()
+            qa_verified = _audit_event_has_field(
+                connection, ticket_id, "ticket.verified", "candidate_id", candidate_id
+            )
         return {
             "ticket": ticket,
             "project": project,
@@ -786,7 +782,7 @@ class IntegrationMixin:
             "test_runs": test_runs,
             "profile": profile,
             "gates": gates,
-            "qa_verified": verified_event is not None,
+            "qa_verified": qa_verified,
         }
 
     def _require_release_evidence(self, snapshot: dict[str, Any]) -> None:

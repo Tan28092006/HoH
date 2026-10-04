@@ -347,3 +347,28 @@ def _row(row: Any | None) -> dict[str, Any] | None:
         if result[field] is not None and isinstance(result[field], str):
             result[field] = json.loads(result[field])
     return result
+
+
+def _audit_event_has_field(
+    connection: Any, aggregate_id: str, event_type: str, field: str, value: str
+) -> bool:
+    """True when an audit event's JSON payload has ``field`` exactly equal to ``value``.
+
+    Audit payloads are evidence for authorization decisions, so they are parsed
+    and compared field by field; a substring match would let ``x_1000`` match
+    ``x_10000`` or any unrelated text that happens to contain the reference.
+    """
+    rows = connection.execute(
+        "SELECT payload FROM audit_events WHERE aggregate_id = ? AND event_type = ?",
+        (aggregate_id, event_type),
+    ).fetchall()
+    for row in rows:
+        payload = row["payload"] if not isinstance(row, tuple) else row[0]
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError:
+                continue
+        if isinstance(payload, dict) and payload.get(field) == value:
+            return True
+    return False
