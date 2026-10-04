@@ -56,7 +56,9 @@ The service enforces these; [ARCHITECTURE.md](docs/ARCHITECTURE.md) says where.
   repository reconciliation. Until Planner classifies every ticket that was open
   (keep, revise, cancel, supersede, complete, rework) and resolves it, no new
   offer, claim, submission or merge starts; QA already running may finish its
-  evidence. QA rejection, integration regression or base drift, and a successful
+  evidence. The server resolves a merge's reconciliation itself, as `keep`, only
+  when the merged paths miss every open ticket's scope root, no open ticket
+  depends on it, and no docs/spec or root file changed. QA rejection, integration regression or base drift, and a successful
   merge open the next reconciliation atomically with their result.
 - Planner sync fetches every remote head with prune but never checks out, pulls,
   merges or rebases the shared checkout. An obsolete ticket is retired through

@@ -1409,6 +1409,13 @@ class IntegrationMixin:
                 relation="integrated",
                 observation_ref=f"merge_job:{merge_job_id}",
                 advance_mainline=True,
+                merged_ticket_id=job["ticket_id"],
+                changed_paths=[
+                    row["path"] for row in connection.execute(
+                        "SELECT path FROM candidate_changed_paths WHERE candidate_id = ?",
+                        (job["candidate_id"],),
+                    ).fetchall()
+                ],
             )
             connection.execute(
                 """UPDATE merge_jobs

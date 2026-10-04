@@ -672,3 +672,73 @@ def test_drift_before_the_gate_skips_the_suite(
         assert connection.execute(
             "SELECT 1 FROM audit_events WHERE event_type = 'integration.base_drift'"
         ).fetchone() is not None
+
+
+def _open_ticket(service, actors, ticket_id: str, file_scope: list[str], depends_on=None):
+    from hoh_control_plane.domain import Role
+    return service.create_ticket(
+        actors["planner"],
+        feature_id="payment-retry",
+        ticket_id=ticket_id,
+        title=f"Other work {ticket_id}",
+        objective="Unrelated work on the board",
+        required_role=Role.DEVELOPER,
+        acceptance_criteria=["It works"],
+        preservation_constraints=["Existing checkout remains valid"],
+        file_scope=file_scope,
+        dependency_ids=depends_on or [],
+    )
+
+
+def _latest_reconciliation(service):
+    with service.store.connection() as connection:
+        return connection.execute(
+            "SELECT status, resolved_by FROM repository_reconciliations ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+
+
+def _merge(service, actors, seeded, tmp_path):
+    repository, ticket, candidate, verified = _candidate_ready_for_integration(
+        service, actors, seeded, tmp_path
+    )
+    integration = _claimed_for_integration(service, actors, ticket, verified)
+    queued = service.queue_merge_candidate(
+        actors["integrator"], ticket["ticket_id"],
+        integration["lease"]["lease_id"], integration["ticket"]["version"],
+    )
+    return service.execute_queued_merge(queued["merge_job"]["merge_job_id"])
+
+
+def test_a_merge_outside_every_open_scope_resolves_its_own_reconciliation(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    # The merge touched only src/checkout; the other open ticket works in
+    # src/reporting and does not depend on it, so nothing it planned can change.
+    _open_ticket(service, actors, "DEV-200", ["src/reporting/**"])
+
+    completed = _merge(service, actors, seeded, tmp_path)
+
+    assert completed["status"] == "COMPLETED"
+    latest = _latest_reconciliation(service)
+    assert latest["status"] == "RESOLVED"
+    assert latest["resolved_by"] == "system:scope-disjoint"
+
+
+@pytest.mark.parametrize("scope,depends", [
+    (["src/checkout/"], False),      # legacy trailing slash still overlaps
+    (["src/**"], False),
+    (["src/reporting/**"], True),    # depends on the merged ticket
+    ([], False),                     # unknown scope
+])
+def test_a_merge_that_may_affect_open_work_waits_for_planner(
+    service, actors, seeded, tmp_path: Path, scope, depends
+) -> None:
+    _open_ticket(service, actors, "DEV-201", scope or ["placeholder/**"],
+                 depends_on=["DEV-142"] if depends else None)
+    if not scope:
+        with service.store.connection(immediate=True) as connection:
+            connection.execute("UPDATE tickets SET file_scope = '[]' WHERE ticket_id = 'DEV-201'")
+
+    _merge(service, actors, seeded, tmp_path)
+
+    assert _latest_reconciliation(service)["status"] == "PENDING"

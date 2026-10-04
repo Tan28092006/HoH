@@ -485,6 +485,8 @@ class PlanningMixin:
         observation_ref: str,
         branch: str | None = None,
         advance_mainline: bool = False,
+        merged_ticket_id: str | None = None,
+        changed_paths: list[str] | None = None,
     ) -> str:
         """Open the next Planner turn from a candidate or integration result.
 
@@ -536,6 +538,30 @@ class PlanningMixin:
                 timestamp,
             ),
         )
+        auto_reason = None
+        if merged_ticket_id is not None and changed_paths is not None:
+            auto_reason = self._merge_cannot_affect_open_work(
+                connection, list(ticket_versions), merged_ticket_id, changed_paths
+            )
+        if auto_reason is not None:
+            manifest = {
+                "summary": auto_reason,
+                "ticket_decisions": [
+                    {"ticket_id": ticket_id, "disposition": "keep", "reason": auto_reason,
+                     "decided_by": "system:scope-disjoint"}
+                    for ticket_id in sorted(ticket_versions)
+                ],
+                "new_ticket_ids": [],
+            }
+            connection.execute(
+                """
+                UPDATE repository_reconciliations
+                SET status = 'RESOLVED', resolved_by = 'system:scope-disjoint',
+                    resolved_at = ?, decision_manifest = ?
+                WHERE reconciliation_id = ?
+                """,
+                (timestamp, json.dumps(manifest, sort_keys=True), reconciliation_id),
+            )
         if advance_mainline:
             connection.execute(
                 """
@@ -545,23 +571,24 @@ class PlanningMixin:
                 """,
                 (commit, timestamp, project_id),
             )
-        connection.execute(
-            """
-            UPDATE work_offers SET status = 'cancelled', closed_at = ?
-            WHERE status = 'offered' AND queue_id IN (
-                SELECT queue_id FROM work_queue
-                WHERE project_id = ? AND status IN ('pending', 'offered')
+        if auto_reason is None:
+            connection.execute(
+                """
+                UPDATE work_offers SET status = 'cancelled', closed_at = ?
+                WHERE status = 'offered' AND queue_id IN (
+                    SELECT queue_id FROM work_queue
+                    WHERE project_id = ? AND status IN ('pending', 'offered')
+                )
+                """,
+                (timestamp, project_id),
             )
-            """,
-            (timestamp, project_id),
-        )
-        connection.execute(
-            """
-            UPDATE work_queue SET status = 'pending', updated_at = ?
-            WHERE project_id = ? AND status = 'offered'
-            """,
-            (timestamp, project_id),
-        )
+            connection.execute(
+                """
+                UPDATE work_queue SET status = 'pending', updated_at = ?
+                WHERE project_id = ? AND status = 'offered'
+                """,
+                (timestamp, project_id),
+            )
         next_version = int(project["version"]) + 1
         connection.execute(
             "UPDATE projects SET version = ?, updated_at = ? WHERE project_id = ?",
@@ -580,9 +607,64 @@ class PlanningMixin:
                 "observation_ref": observation_ref,
                 "commit": commit,
                 "relation": relation,
+                "auto_resolved": auto_reason is not None,
             },
         )
         return reconciliation_id
+
+    _SHARED_PATH_PREFIXES = ("docs/", "spec/", "specs/")
+
+    def _merge_cannot_affect_open_work(
+        self,
+        connection: Connection,
+        open_ticket_ids: list[str],
+        merged_ticket_id: str,
+        changed_paths: list[str],
+    ) -> str | None:
+        """Why a merged commit provably leaves every open ticket as planned, or None.
+
+        Every merge used to stop all execution until Planner restated "keep" for
+        each open ticket by hand. When the commit only touches files inside the
+        merged ticket's own territory, none of that work can have changed. The
+        test is deliberately conservative: an open ticket without a scope, one
+        whose scope root overlaps any changed path, one that depends on the merged
+        ticket, or a commit touching docs/spec or a repository-root file all leave
+        the decision to Planner.
+        """
+        paths = [path.replace("\\", "/").lstrip("/") for path in changed_paths]
+        if not paths:
+            return None
+        for path in paths:
+            if "/" not in path or path.lower().startswith(self._SHARED_PATH_PREFIXES):
+                return None
+        for ticket_id in open_ticket_ids:
+            row = connection.execute(
+                "SELECT file_scope FROM tickets WHERE ticket_id = ?", (ticket_id,)
+            ).fetchone()
+            ticket_scopes = json.loads(row["file_scope"]) if row and row["file_scope"] else []
+            if not ticket_scopes:
+                return None
+            # The lease collision rule: scope roots compared segment-wise, so a
+            # legacy "dir/" entry (HOH-279) still covers files under dir.
+            if any(
+                self._scope_roots_overlap(str(scope), path)
+                for scope in ticket_scopes
+                for path in paths
+            ):
+                return None
+            if connection.execute(
+                """
+                SELECT 1 FROM ticket_dependencies
+                WHERE ticket_id = ? AND depends_on_ticket_id = ?
+                """,
+                (ticket_id, merged_ticket_id),
+            ).fetchone() is not None:
+                return None
+        return (
+            f"Merged {merged_ticket_id} changed {len(paths)} path(s) outside every open "
+            "ticket's write scope and no open ticket depends on it; recorded as keep "
+            "by the server."
+        )
 
     def resolve_repository_reconciliation(
         self,
