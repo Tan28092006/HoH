@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+import time
+
 from hoh_control_plane.service._common import (
     Actor,
     Any,
@@ -21,6 +24,21 @@ from hoh_control_plane.service._common import (
     require_role,
     timedelta,
 )
+from hoh_control_plane.store import ContentionError
+
+_LOG = logging.getLogger(__name__)
+
+# An IN_PROGRESS reservation older than this belongs to a request whose process
+# died between running the command and recording completion (or release). No
+# consequential command runs this long inside one request, so the age is a safe
+# signal that nobody will ever finish the row.
+IDEMPOTENCY_STALE_SECONDS = 600
+_FINALIZE_ATTEMPTS = 5
+_FINALIZE_BASE_DELAY_SECONDS = 0.05
+
+
+def _parse(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 class IdempotencyMixin:
@@ -38,11 +56,28 @@ class IdempotencyMixin:
     ) -> Any:
         """Run one consequential command so an identical retry replays its result.
 
-        The reservation and the completion are separate short transactions because
-        ``run`` opens its own write transaction; nothing here may hold one while the
-        command executes. A command that fails releases its key rather than storing
-        the failure, so a retry is re-executed and a failed transaction can never be
-        replayed as a success.
+        Design (crash window). The reservation, the command and the completion are
+        three transactions: ``run`` opens its own write transactions and the
+        response is only known after they commit, so the completion cannot share
+        the command's transaction without threading a connection through every
+        service method. Instead the window between them is made safe:
+
+        * Completion and release each retry ContentionError on their own, and a
+          failure to record completion is logged, never raised: once ``run`` has
+          returned, its effect is committed and the caller always gets the result.
+          (Raising there would make the MCP contention retry report an error, or
+          worse re-run, for a command that already succeeded.)
+        * A reservation left IN_PROGRESS for longer than
+          ``IDEMPOTENCY_STALE_SECONDS`` (a crash, or an unrecorded completion) is
+          reclaimed by the next retry with ``idempotency_unknown``: the row is
+          removed and the caller is told to re-read state, because whether the
+          effect committed cannot be known here. A retry after that re-read runs
+          the command again; the domain's own guards (versions, leases, context
+          snapshots) reject a duplicate effect.
+
+        A command that fails releases its key rather than storing the failure, so
+        a retry is re-executed and a failed transaction can never be replayed as a
+        success.
         """
         if not idempotency_key:
             return run()
@@ -70,6 +105,7 @@ class IdempotencyMixin:
     ) -> Any | None:
         """Claim the key, or return the stored response when this is a true replay."""
         agent_id, project_id, operation, idempotency_key = scope
+        reclaimed_stale = False
         with self.store.connection(immediate=True) as connection:
             existing = _row(
                 connection.execute(
@@ -82,69 +118,100 @@ class IdempotencyMixin:
             )
             timestamp = _now()
             if existing is not None:
-                expired = (
-                    datetime.fromisoformat(existing["expires_at"].replace("Z", "+00:00"))
-                    <= timestamp
-                )
+                expired = _parse(existing["expires_at"]) <= timestamp
                 if not expired:
                     if existing["payload_digest"] != digest:
                         raise IdempotencyConflictError(
                             "Idempotency key was already used with a different request",
                             {"reason": "payload_mismatch", "operation": operation},
                         )
-                    if existing["status"] == "IN_PROGRESS":
+                    if existing["status"] != "IN_PROGRESS":
+                        return json.loads(existing["response"])
+                    age = timestamp - _parse(existing["created_at"])
+                    if age < timedelta(seconds=IDEMPOTENCY_STALE_SECONDS):
                         raise IdempotencyConflictError(
                             "A request with this idempotency key is still in progress",
                             {"reason": "in_progress", "operation": operation},
                         )
-                    return json.loads(existing["response"])
+                    reclaimed_stale = True
                 connection.execute(
                     "DELETE FROM idempotency_records WHERE record_id = ?",
                     (existing["record_id"],),
                 )
-            connection.execute(
-                """
-                INSERT INTO idempotency_records
-                    (record_id, idempotency_key, actor_id, actor_role, project_id, operation,
-                     payload_digest, status, created_at, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'IN_PROGRESS', ?, ?)
-                """,
-                (
-                    _id(connection, "idem"),
-                    idempotency_key,
-                    agent_id,
-                    actor.role.value,
-                    project_id,
-                    operation,
-                    digest,
-                    _iso(timestamp),
-                    _iso(timestamp + timedelta(seconds=IDEMPOTENCY_RETENTION_SECONDS)),
-                ),
+            if not reclaimed_stale:
+                connection.execute(
+                    """
+                    INSERT INTO idempotency_records
+                        (record_id, idempotency_key, actor_id, actor_role, project_id, operation,
+                         payload_digest, status, created_at, expires_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'IN_PROGRESS', ?, ?)
+                    """,
+                    (
+                        _id(connection, "idem"),
+                        idempotency_key,
+                        agent_id,
+                        actor.role.value,
+                        project_id,
+                        operation,
+                        digest,
+                        _iso(timestamp),
+                        _iso(timestamp + timedelta(seconds=IDEMPOTENCY_RETENTION_SECONDS)),
+                    ),
+                )
+        if reclaimed_stale:
+            # Raised after the commit so the stale row stays removed.
+            raise IdempotencyConflictError(
+                "An earlier request with this idempotency key never recorded its outcome; "
+                "its effect may or may not have been applied. Re-read the current state "
+                "before retrying.",
+                {"reason": "idempotency_unknown", "operation": operation},
             )
-            return None
+        return None
+
+    def _finalize_idempotency_record(self, statement: str, parameters: tuple[Any, ...]) -> bool:
+        """Run one completion/release write, retrying lock contention on its own.
+
+        Returns False instead of raising when every attempt fails: the caller's
+        command outcome must never be replaced by a bookkeeping error. The row then
+        stays IN_PROGRESS and is reclaimed as stale by a later retry.
+        """
+        delay = _FINALIZE_BASE_DELAY_SECONDS
+        for attempt in range(_FINALIZE_ATTEMPTS):
+            try:
+                with self.store.connection(immediate=True) as connection:
+                    connection.execute(statement, parameters)
+                return True
+            except ContentionError:
+                if attempt == _FINALIZE_ATTEMPTS - 1:
+                    break
+                time.sleep(delay)
+                delay *= 2
+            except Exception:  # noqa: BLE001 - see docstring
+                _LOG.exception("Could not finalize an idempotency record")
+                return False
+        _LOG.warning("Idempotency record left IN_PROGRESS after repeated lock contention")
+        return False
 
     def _complete_idempotency_record(self, scope: tuple[str, str, str, str], result: Any) -> None:
-        with self.store.connection(immediate=True) as connection:
-            connection.execute(
-                """
-                UPDATE idempotency_records
-                SET status = 'COMPLETED', response = ?, completed_at = ?
-                WHERE actor_id = ? AND project_id = ? AND operation = ? AND idempotency_key = ?
-                """,
-                (_serialize(result), _iso(), *scope),
-            )
+        self._finalize_idempotency_record(
+            """
+            UPDATE idempotency_records
+            SET status = 'COMPLETED', response = ?, completed_at = ?
+            WHERE actor_id = ? AND project_id = ? AND operation = ? AND idempotency_key = ?
+            """,
+            (_serialize(result), _iso(), *scope),
+        )
 
     def _release_idempotency_record(self, scope: tuple[str, str, str, str]) -> None:
         """Free a key whose command failed so the caller may retry a corrected request."""
-        with self.store.connection(immediate=True) as connection:
-            connection.execute(
-                """
-                DELETE FROM idempotency_records
-                WHERE actor_id = ? AND project_id = ? AND operation = ? AND idempotency_key = ?
-                  AND status = 'IN_PROGRESS'
-                """,
-                scope,
-            )
+        self._finalize_idempotency_record(
+            """
+            DELETE FROM idempotency_records
+            WHERE actor_id = ? AND project_id = ? AND operation = ? AND idempotency_key = ?
+              AND status = 'IN_PROGRESS'
+            """,
+            scope,
+        )
 
     def _project_for_payload(self, actor: Actor, payload: dict[str, Any]) -> str:
         """Bind a record to its project when the payload identifies one; '' otherwise."""
