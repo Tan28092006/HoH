@@ -15,6 +15,7 @@ from typing import Any, TypeVar
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import TextContent
 
 from hoh_control_plane.auth import (
     STDIO_TRANSPORT,
@@ -34,7 +35,7 @@ from hoh_control_plane.domain import (
     ValidationError,
 )
 from hoh_control_plane.service import ControlPlaneService
-from hoh_control_plane.service._common import require_snapshot_id
+from hoh_control_plane.service._common import delivered_json, require_snapshot_id
 from hoh_control_plane.store_factory import store_from_environment
 from hoh_control_plane.store import ContentionError
 
@@ -175,9 +176,27 @@ def _start_merge_worker(database_path: Path, merge_job_id: str) -> None:
     )
 
 
+class _CompactFastMCP(FastMCP):
+    """FastMCP whose text content is compact JSON instead of `indent=2`.
+
+    The structured content is unchanged. The text block is what most clients
+    put in front of the model, so it is the form the packet budget measures
+    (`delivered_json`); indentation alone cost about a third more tokens.
+    """
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        result = await super().call_tool(name, arguments)
+        if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict):
+            _content, structured = result
+            # A non-dict return value is wrapped as {"result": value} by FastMCP.
+            payload = structured["result"] if set(structured) == {"result"} else structured
+            return [TextContent(type="text", text=delivered_json(payload))], structured
+        return result
+
+
 def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_http: bool = False) -> FastMCP:
     """Create the smallest MCP tool surface permitted for one authenticated role."""
-    server = FastMCP(
+    server = _CompactFastMCP(
         "Harness Control Plane",
         stateless_http=stateless_http,
         transport_security=TransportSecuritySettings(
