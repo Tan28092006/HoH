@@ -113,28 +113,29 @@ _ROLE_CONTEXT_ENTRY_TYPES: dict[Role, frozenset[str]] = {
             "planner_decision", "design_decision", "risk", "developer_blocker",
             "known_failure", "write_scope_updated", "ticket_fields_updated",
             "worktree_handoff", "worktree_recovery", "integration_base_drift",
-            "bootstrap_integration", "note",
+            "integration_regression_failed", "bootstrap_integration", "note",
         }
     ),
     Role.QA: frozenset(
         {
             "planner_decision", "design_decision", "risk", "known_failure",
-            "ticket_fields_updated", "integration_base_drift", "note",
+            "ticket_fields_updated", "integration_base_drift",
+            "integration_regression_failed", "note",
         }
     ),
     Role.INTEGRATOR: frozenset(
         {
             "planner_decision", "design_decision", "risk", "known_failure",
-            "integration_base_drift", "integration_authorization",
-            "bootstrap_integration", "note",
+            "integration_base_drift", "integration_regression_failed",
+            "integration_authorization", "bootstrap_integration", "note",
         }
     ),
     Role.PLANNER: frozenset(
         {
             "planner_decision", "design_decision", "risk", "developer_blocker",
             "known_failure", "write_scope_updated", "ticket_fields_updated",
-            "worktree_recovery", "integration_base_drift", "integration_authorization",
-            "bootstrap_integration", "note",
+            "worktree_recovery", "integration_base_drift", "integration_regression_failed",
+            "integration_authorization", "bootstrap_integration", "note",
         }
     ),
 }

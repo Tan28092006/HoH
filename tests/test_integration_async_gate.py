@@ -58,7 +58,8 @@ def test_detached_merge_runs_isolated_gate_before_mutating_main(service,actors,s
         assert result['merge_status']=='merged'
     else:
         assert _git(repo,'rev-parse','main')==candidate['base_commit']
-        assert status==('REWORK' if outcome=='test_failure' else 'MERGE_READY')
+        # A non-regression gate failure is infrastructure: BLOCKED for Planner.
+        assert status==('REWORK' if outcome=='test_failure' else 'BLOCKED')
 
 
 def test_recovery_will_not_certify_external_movement_without_job_gate(service,actors,seeded,tmp_path,monkeypatch):

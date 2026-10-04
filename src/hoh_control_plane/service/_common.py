@@ -124,6 +124,7 @@ CONTEXT_ENTRY_TYPES = frozenset(
         "worktree_handoff",
         "worktree_recovery",
         "integration_base_drift",
+        "integration_regression_failed",
         "integration_authorization",
         "bootstrap_integration",
         # Written by a Planner.

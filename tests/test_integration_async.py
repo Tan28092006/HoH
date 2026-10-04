@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import hashlib
 import subprocess
 from pathlib import Path
 
 import pytest
+from conftest import keep_open_tickets
 
 from hoh_control_plane import mcp_server
 from hoh_control_plane.domain import AuthorizationError, ConflictError, ValidationError
@@ -174,7 +176,7 @@ def test_merge_worker_fast_forwards_then_poll_reports_completed(
 
 
 def test_successful_merge_reports_once_and_wakes_the_planner(
-    service, actors, seeded, tmp_path: Path
+    service, actors, seeded, tmp_path: Path, monkeypatch
 ) -> None:
     """A delivery is not complete until the planning loop receives its report."""
     _repository_path, ticket, candidate, verified = _candidate_ready_for_integration(
@@ -187,9 +189,15 @@ def test_successful_merge_reports_once_and_wakes_the_planner(
     )
 
     service.register_agent(actors["planner"], skills=["planning"], capacity=1)
-    wait_for_event = __import__(
+    event_wait = __import__(
         "hoh_control_plane.event_wait", fromlist=["wait_for_event"]
-    ).wait_for_event
+    )
+    wait_for_event = event_wait.wait_for_event
+    # Planner synchronises repository truth at bootstrap, before it waits; the
+    # first observation of this repository is its own barrier to resolve.
+    service.sync_repository(actors["planner"], "project-1")
+    keep_open_tickets(service, actors["planner"])
+    monkeypatch.setitem(event_wait._REPOSITORY_OBSERVED_AT, "project-1", time.monotonic())
 
     async def merge_while_planner_waits():
         waiting = asyncio.create_task(
@@ -340,7 +348,14 @@ def test_merge_worker_persists_git_failure_for_polling(
 
     assert failed["status"] == "FAILED"
     assert polled["merge_job"]["error_message"] == "Git operation timed out"
-    assert polled["ticket"]["status"] == "MERGE_READY"
+    # An infrastructure failure is a durable Planner job, not a silent retry:
+    # the ticket is BLOCKED until Planner resumes it (failure feedback loop).
+    assert polled["ticket"]["status"] == "BLOCKED"
+    with service.store.connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM planner_jobs WHERE ticket_id = ? AND status = 'READY'",
+            (ticket["ticket_id"],),
+        ).fetchone()[0] == 1
 
 
 def test_poll_before_worker_runs_renews_the_integrator_lease(

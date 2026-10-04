@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import keep_open_tickets
 
 from hoh_control_plane.domain import AuthorizationError
 
@@ -239,6 +240,8 @@ def test_gate_reruns_cleanly_after_an_earlier_integration_attempt(
         integration["ticket"]["version"],
     )
     assert first["merge_status"] == "regression_failed"
+    # A regression opens a Planner reconciliation atomically with its result.
+    keep_open_tickets(service, actors["planner"])
 
     development = service.claim_ticket(
         actors["developer"], ticket["ticket_id"], first["ticket"]["version"], 900
