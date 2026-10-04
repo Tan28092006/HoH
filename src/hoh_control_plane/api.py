@@ -562,6 +562,15 @@ def create_app(
         """Bounded operational measures for one project, aggregates only."""
         return {"data": WorkflowMetrics(store).project_metrics(actor, project_id)}
 
+    @app.get("/api/v1/projects/{project_id}/cycle-metrics")
+    def cycle_metrics(
+        project_id: str,
+        limit: int = Query(default=20, ge=1, le=200),
+        actor: Actor = Depends(actor_dependency),
+    ) -> dict[str, Any]:
+        """Per-ticket phase durations and median/p90 over recent deliveries."""
+        return {"data": service.cycle_metrics(actor, project_id, limit)}
+
     @app.get("/api/v1/projects/{project_id}/traces/{correlation_id}")
     def trace(
         project_id: str,

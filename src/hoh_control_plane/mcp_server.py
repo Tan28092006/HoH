@@ -634,6 +634,16 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
                 lambda: service.retire_experience(actor, **arguments),
             )
 
+        @server.tool(name="planner.cycle_metrics", structured_output=True)
+        def planner_cycle_metrics(project_id: str, limit: int = 20) -> dict[str, Any]:
+            """Phase durations (median, p90) over the last delivered tickets; read-only."""
+            arguments = {"project_id": project_id, "limit": limit}
+            return invoke(
+                "planner.cycle_metrics",
+                arguments,
+                lambda: service.cycle_metrics(actor, **arguments),
+            )
+
     if actor.role in {Role.DEVELOPER, Role.QA, Role.INTEGRATOR}:
 
         @server.tool(name="work.inbox", structured_output=True)
