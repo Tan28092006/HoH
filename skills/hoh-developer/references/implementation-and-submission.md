@@ -9,8 +9,9 @@ work; preserve them. Resume a recorded provision job if assignment is not ready.
 Establish a baseline when useful. Implement only the ticket outcome and write
 scope, using `validation_contract` to create reproducible public observations. Run
 focused changed-behavior and adjacent-regression checks; expand for shared
-contracts, migrations, concurrency or concrete failures. Independent end-to-end
-acceptance belongs to QA.
+contracts, migrations, concurrency or concrete failures. Do not run the full
+frozen project command: QA runs it once on the frozen candidate and merge reuses
+that run. Independent end-to-end acceptance belongs to QA.
 
 Before `dev.submit_candidate`, refresh `ticket.get_context`: a pre-claim snapshot
 is stale because claim advances ticket version. Confirm lease/worktree/base/SHA,

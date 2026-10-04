@@ -17,13 +17,15 @@ own equipment, or transfers evidence to another SHA.
    inspect discovery `capability_state` for each QA-ready candidate.
 3. Claim only when `claimable=true`, `planning_barrier` is clear, and the
    candidate ID/SHA match the current packet.
-4. Run the frozen project command through `qa.run_project_tests`; retain and
+4. Run the frozen project command through `qa.run_project_tests` once; retain and
    poll the returned `test_run_id` with `qa.get_project_test_run`. Verify source,
-   imports, environment and HEAD identify the frozen candidate.
+   imports, environment and HEAD identify the frozen candidate. A repeat call
+   returns the passing run (`reused=true`); pass `rerun=true` only for suspected flakiness.
 5. Execute every `validation_contract` scenario with claim → observe → assess.
    Attach the declared evidence types and record the result for every criterion.
 6. Submit a verdict only from evidence on this exact SHA, passing the
-   `context_snapshot_id` of a packet read after your claim (refused without one). PASS requires every
+   `context_snapshot_id` of a packet read after your claim (refused without one). The verdict
+   value is `passed` or `failed`. `passed` requires every
    mandatory contract/preservation condition; Developer claims are advisory.
    Keep the returned `evidence_bundle` as the durable iteration report.
 

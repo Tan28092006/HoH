@@ -1704,12 +1704,21 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             )
 
         @server.tool(name="qa.run_project_tests", structured_output=True)
-        def qa_run_project_tests(ticket_id: str, lease_id: str) -> dict[str, Any]:
-            """Queue the frozen candidate test in a detached worker and return its test_run_id."""
-            arguments = {"ticket_id": ticket_id, "lease_id": lease_id}
+        def qa_run_project_tests(
+            ticket_id: str, lease_id: str, rerun: bool = False
+        ) -> dict[str, Any]:
+            """Queue the frozen candidate test in a detached worker and return its test_run_id.
+
+            If this candidate already has a completed passing run of the same frozen
+            command, that run is returned with reused=true and nothing executes; poll
+            it as usual. Pass rerun=true only to investigate a suspected flaky result.
+            """
+            arguments = {"ticket_id": ticket_id, "lease_id": lease_id, "rerun": rerun}
 
             def queue_and_start() -> dict[str, Any]:
                 queued = service.queue_project_tests(actor, **arguments)
+                if queued.get("reused"):
+                    return queued
                 try:
                     _start_qa_test_worker(service.store.path, queued["test_run"]["test_run_id"])
                 except OSError as error:
@@ -1773,7 +1782,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             context_snapshot_id: str,
             idempotency_key: str | None = None,
         ) -> dict[str, Any]:
-            """Submit PASS or FAIL using evidence for every finding and acceptance criterion.
+            """Submit verdict "passed" or "failed" with evidence for every finding and acceptance criterion.
 
             context_snapshot_id must come from a ticket.get_context read made after
             the QA claim; a verdict decided from stale context is refused.

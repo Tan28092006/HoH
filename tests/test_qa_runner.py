@@ -567,3 +567,36 @@ def test_concurrent_queue_project_tests_calls_never_create_duplicate_active_jobs
             (ticket["ticket_id"],),
         ).fetchone()["n"]
     assert active_jobs == 1
+
+
+def test_a_second_run_on_the_same_candidate_reuses_the_passing_result(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    # The candidate is immutable, so running the same frozen command again only
+    # repeats a full suite. QA gets the passing run back unless it asks to rerun.
+    ticket, _candidate, qa_claim = _candidate_waiting_for_qa(
+        service, actors, seeded, tmp_path, [sys.executable, "-c", "print('passed')"]
+    )
+    lease_id = qa_claim["lease"]["lease_id"]
+    first = service.run_project_tests(actors["qa"], ticket["ticket_id"], lease_id)
+
+    again = service.queue_project_tests(actors["qa"], ticket["ticket_id"], lease_id)
+    forced = service.queue_project_tests(actors["qa"], ticket["ticket_id"], lease_id, rerun=True)
+
+    assert again["reused"] is True
+    assert again["test_run"]["test_run_id"] == first["test_run"]["test_run_id"]
+    assert "reused" not in forced
+    assert forced["test_run"]["test_run_id"] != first["test_run"]["test_run_id"]
+
+
+def test_a_failing_run_is_never_reused(service, actors, seeded, tmp_path: Path) -> None:
+    ticket, _candidate, qa_claim = _candidate_waiting_for_qa(
+        service, actors, seeded, tmp_path, [sys.executable, "-c", "raise SystemExit(7)"]
+    )
+    lease_id = qa_claim["lease"]["lease_id"]
+    first = service.run_project_tests(actors["qa"], ticket["ticket_id"], lease_id)
+
+    again = service.queue_project_tests(actors["qa"], ticket["ticket_id"], lease_id)
+
+    assert "reused" not in again
+    assert again["test_run"]["test_run_id"] != first["test_run"]["test_run_id"]

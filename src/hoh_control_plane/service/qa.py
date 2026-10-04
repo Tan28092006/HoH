@@ -202,9 +202,14 @@ class QaMixin:
             )
 
     def queue_project_tests(
-        self, actor: Actor, ticket_id: str, lease_id: str
+        self, actor: Actor, ticket_id: str, lease_id: str, rerun: bool = False
     ) -> dict[str, Any]:
-        """Persist a frozen QA test job and return before its command is executed."""
+        """Persist a frozen QA test job and return before its command is executed.
+
+        A candidate is immutable, so a completed passing run of the same frozen
+        command and timeout is returned (``reused``) instead of spending another
+        full suite. ``rerun=True`` forces a fresh run, e.g. to investigate flakiness.
+        """
         require_role(actor, Role.QA)
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
@@ -247,6 +252,26 @@ class QaMixin:
             timeout_seconds = test_profile["timeout_seconds"]
             if not isinstance(timeout_seconds, int) or not 5 <= timeout_seconds <= 1800:
                 raise ValidationError("Candidate test command timeout is invalid")
+            if not rerun:
+                passing = connection.execute(
+                    """
+                    SELECT j.test_run_id FROM qa_test_jobs j
+                    JOIN qa_test_runs r ON r.test_run_id = j.test_run_id
+                    WHERE j.candidate_id = ? AND j.status = 'COMPLETED'
+                      AND j.command_digest = ? AND j.timeout_seconds = ?
+                      AND r.exit_code = 0 AND r.timed_out = 0
+                    ORDER BY j.created_at DESC LIMIT 1
+                    """,
+                    (candidate["candidate_id"],
+                     hashlib.sha256("\0".join(command).encode()).hexdigest(),
+                     timeout_seconds),
+                ).fetchone()
+                if passing is not None:
+                    return {
+                        "ticket": self._ticket(connection, ticket_id),
+                        "test_run": self._qa_test_job(connection, passing["test_run_id"]),
+                        "reused": True,
+                    }
             candidate_commit = candidate["commit_sha"]
             # Queueing must return promptly. The detached worker re-verifies this
             # immutable path and commit before it executes the test command.
@@ -413,6 +438,10 @@ class QaMixin:
     ) -> dict[str, Any]:
         """Compatibility helper for direct callers; MCP callers must queue then poll."""
         queued = self.queue_project_tests(actor, ticket_id, lease_id)
+        if queued.get("reused"):
+            return self.get_project_test_run(
+                actor, ticket_id, lease_id, queued["test_run"]["test_run_id"]
+            )
         completed = self.execute_queued_project_test(queued["test_run"]["test_run_id"])
         if completed["status"] == "FAILED":
             raise ValidationError(completed["error_message"])
