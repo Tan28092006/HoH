@@ -534,3 +534,42 @@ def test_a_second_worker_racing_the_same_job_never_runs_git_twice(
     assert len(git_calls) == 1
     assert completed["status"] == "COMPLETED"
     assert _git(repository, "rev-parse", "main") == candidate["candidate"]["commit_sha"]
+
+
+def test_a_barrier_opened_during_the_merge_does_not_strand_a_landed_candidate(
+    service, actors, seeded, tmp_path: Path, monkeypatch
+) -> None:
+    # A teammate push observed while the gate runs opens a reconciliation.
+    # Git has already fast-forwarded by completion time, so the job must record
+    # the landing rather than stay RUNNING with the ticket at MERGE_READY.
+    repository, ticket, candidate, verified = _candidate_ready_for_integration(
+        service, actors, seeded, tmp_path
+    )
+    integration = _claimed_for_integration(service, actors, ticket, verified)
+    queued = service.queue_merge_candidate(
+        actors["integrator"], ticket["ticket_id"],
+        integration["lease"]["lease_id"], integration["ticket"]["version"],
+    )
+    real_fast_forward = service.git_worktrees.fast_forward_default_branch
+
+    def fast_forward_after_a_push(**kwargs):
+        result = real_fast_forward(**kwargs)
+        with service.store.connection(immediate=True) as connection:
+            service._open_commit_reconciliation(
+                connection, actors["planner"], "project-1", commit="b" * 40,
+                subject="teammate push", relation="fast_forward", observation_ref="test:push",
+            )
+        return result
+
+    monkeypatch.setattr(
+        service.git_worktrees, "fast_forward_default_branch", fast_forward_after_a_push
+    )
+
+    completed = service.execute_queued_merge(queued["merge_job"]["merge_job_id"])
+
+    assert completed["status"] == "COMPLETED"
+    assert _git(repository, "rev-parse", "main") == candidate["candidate"]["commit_sha"]
+    with service.store.connection() as connection:
+        assert connection.execute(
+            "SELECT status FROM tickets WHERE ticket_id = ?", (ticket["ticket_id"],)
+        ).fetchone()["status"] == "DONE"

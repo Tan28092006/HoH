@@ -258,3 +258,36 @@ def test_planner_receives_new_intervention_job(service, actors):
         assert result['event']['kind'] == 'planner_work'
         assert result['event']['planner_job_id'] == 'plan-event'
     asyncio.run(check())
+
+
+def test_barrier_rearms_a_wakeup_the_agent_already_acknowledged(service, actors):
+    # The delivery key is per queue item. A barrier cancels the offer the
+    # developer was told about; without re-arming, the reissued offer after
+    # Planner resolves never wakes anyone and the agent idles for hours.
+    from hoh_control_plane.event_wait import wait_for_event
+    register(service, actors['developer'])
+    release(service, actors)
+    planner = actors['planner']
+
+    async def scenario():
+        first = await wait_for_event(service, actors['developer'], 'project-1', timeout_seconds=1)
+        assert first['event']['kind'] == 'work_available'
+        with service.store.connection(immediate=True) as connection:
+            reconciliation_id = service._open_commit_reconciliation(
+                connection, planner, 'project-1', commit='a' * 40,
+                subject='teammate push', relation='fast_forward',
+                observation_ref='test:push')
+        blocked = await wait_for_event(service, actors['developer'], 'project-1',
+                                       timeout_seconds=.2, ack_event_id=first['event_id'])
+        assert blocked['event']['kind'] != 'work_available', blocked
+        pending = service.list_repository_reconciliations(planner, 'project-1')
+        decisions = [{'ticket_id': ticket_id, 'disposition': 'keep',
+                      'reason': 'unaffected by the push'}
+                     for ticket_id in pending['reconciliations'][0]['ticket_versions']]
+        service.resolve_repository_reconciliation(
+            planner, 'project-1', reconciliation_id, decisions, 'push does not touch DEV-142')
+        again = await wait_for_event(service, actors['developer'], 'project-1', timeout_seconds=2,
+                                     ack_event_id=blocked['event_id'])
+        assert again['status'] == 'event'
+        assert again['event']['ticket_ref'] == 'ticket:DEV-142'
+    asyncio.run(scenario())

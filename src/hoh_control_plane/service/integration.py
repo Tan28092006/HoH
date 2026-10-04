@@ -1237,7 +1237,11 @@ class IntegrationMixin:
                    WHERE ticket_id = ? AND status = 'PENDING'""",
                 (job["ticket_id"],),
             ).fetchone() is not None
-            if not (recovered and retirement_pending):
+            # Once main has moved, Git is the fact to record. A barrier that
+            # opened during the gate must not strand the job RUNNING with the
+            # candidate already on main; completion opens the next
+            # reconciliation, so Planner still assesses this commit.
+            if not merged and not (recovered and retirement_pending):
                 self._require_repository_reconciled(connection, job["project_id"])
             if ticket["status"] != TicketStatus.MERGE_READY.value:
                 raise ConflictError("Ticket changed while the merge worker ran")

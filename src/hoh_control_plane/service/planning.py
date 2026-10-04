@@ -718,6 +718,7 @@ class PlanningMixin:
                 """,
                 (actor.agent_id, timestamp, json.dumps(manifest, sort_keys=True), reconciliation_id),
             )
+            self._rearm_work_wakeups(connection, project_id)
             project = self._one(connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,))
             next_version = project["version"] + 1
             connection.execute(
@@ -796,6 +797,22 @@ class PlanningMixin:
         ]
         oldest = max((item["age_seconds"] for item in pending), default=0)
         return {**state, "pending": pending, "oldest_age_seconds": oldest}
+
+    def _rearm_work_wakeups(self, connection: Connection, project_id: str) -> None:
+        # A wake-up is delivered once per queue item. A barrier cancelled the
+        # offers agents were told about, and they acknowledged that work while
+        # blocked. Lifting the barrier forgets those deliveries so the reissued
+        # offers wake an agent again instead of leaving it idle for hours.
+        connection.execute(
+            """
+            DELETE FROM agent_event_deliveries
+            WHERE project_id = ? AND state <> 'pending' AND event_key IN (
+                SELECT 'queue:' || queue_id FROM work_queue
+                WHERE project_id = ? AND status IN ('pending', 'offered')
+            )
+            """,
+            (project_id, project_id),
+        )
 
     def _require_repository_reconciled(
         self, connection: Connection, project_id: str
