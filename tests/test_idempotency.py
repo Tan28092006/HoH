@@ -349,3 +349,112 @@ def test_rest_replays_one_project_for_a_repeated_idempotency_key(tmp_path: Path)
     # Without a key the duplicate reaches the domain and is rejected as a real conflict.
     assert without_key.status_code == 409
     assert without_key.json()["error"]["code"] == "state_conflict"
+
+
+class _SimulatedCrash(BaseException):
+    """Stands in for the process dying between the command and its completion."""
+
+
+def test_a_crash_before_completion_is_reclaimed_as_unknown_after_the_stale_age(
+    service, actors, seeded, monkeypatch
+) -> None:
+    from hoh_control_plane.service import idempotency
+
+    ticket = seeded["ticket"]
+    payload = _claim_payload(ticket)
+    developer = actors["developer"]
+
+    def crash(*_args, **_kwargs):
+        raise _SimulatedCrash()
+
+    monkeypatch.setattr(type(service), "_complete_idempotency_record", crash)
+    with pytest.raises(_SimulatedCrash):
+        service.run_idempotent(
+            developer,
+            operation="work.claim",
+            idempotency_key="crash-key",
+            payload=payload,
+            run=lambda: service.claim_ticket(developer, **payload),
+        )
+    monkeypatch.undo()
+    assert _count(service, "leases") == 1
+
+    def must_not_run():
+        pytest.fail("A retry must not re-run a command whose outcome is unknown")
+
+    # A fresh reservation is still treated as in flight.
+    with pytest.raises(IdempotencyConflictError) as fresh:
+        service.run_idempotent(
+            developer, operation="work.claim", idempotency_key="crash-key",
+            payload=payload, run=must_not_run,
+        )
+    assert fresh.value.details["reason"] == "in_progress"
+
+    old = "2000-01-01T00:00:00Z"
+    assert idempotency.IDEMPOTENCY_STALE_SECONDS < 10**9
+    with service.store.connection(immediate=True) as connection:
+        connection.execute(
+            "UPDATE idempotency_records SET created_at = ? WHERE idempotency_key = ?",
+            (old, "crash-key"),
+        )
+    with pytest.raises(IdempotencyConflictError) as unknown:
+        service.run_idempotent(
+            developer, operation="work.claim", idempotency_key="crash-key",
+            payload=payload, run=must_not_run,
+        )
+    assert unknown.value.details["reason"] == "idempotency_unknown"
+    assert _count(service, "idempotency_records") == 0
+    assert _count(service, "leases") == 1
+
+
+def test_contention_on_completion_never_hides_a_committed_effect(
+    service, actors, seeded, monkeypatch
+) -> None:
+    from hoh_control_plane.service import idempotency
+    from hoh_control_plane.store import ContentionError
+
+    monkeypatch.setattr(idempotency, "_FINALIZE_BASE_DELAY_SECONDS", 0)
+    ticket = seeded["ticket"]
+    payload = _claim_payload(ticket)
+    developer = actors["developer"]
+    real_connection = service.store.connection
+    calls = {"reserve": 0, "finalize": 0}
+
+    def flaky_connection(*args, **kwargs):
+        calls["reserve"] += 1
+        if calls["reserve"] in (3, 4):  # reserve=1, claim=2, then completion contends twice
+            calls["finalize"] += 1
+            raise ContentionError("busy")
+        return real_connection(*args, **kwargs)
+
+    commands = []
+
+    def command():
+        result = service.claim_ticket(developer, **payload)
+        commands.append(result)
+        monkeypatch.setattr(service.store, "connection", flaky_connection)
+        calls["reserve"] = 2
+        return result
+
+    result = service.run_idempotent(
+        developer, operation="work.claim", idempotency_key="contended-key",
+        payload=payload, run=command,
+    )
+    monkeypatch.setattr(service.store, "connection", real_connection)
+    assert calls["finalize"] == 2
+    assert result["ticket"]["status"] == "DEV_IN_PROGRESS"
+    replay = service.run_idempotent(
+        developer, operation="work.claim", idempotency_key="contended-key",
+        payload=payload, run=lambda: pytest.fail("The completed claim must replay"),
+    )
+    assert replay == result
+    assert len(commands) == 1
+
+    # Contention that never clears still returns the committed result.
+    monkeypatch.setattr(
+        service.store, "connection",
+        lambda *a, **k: (_ for _ in ()).throw(ContentionError("busy")),
+    )
+    assert service._complete_idempotency_record(
+        (developer.agent_id, "", "x", "y"), {"ok": True}
+    ) is None

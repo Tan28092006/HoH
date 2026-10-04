@@ -100,7 +100,7 @@ helper you are about to change across `service/`.
 | Consequential writes name a fresh packet | `require_fresh_context` in `context.py`; required only by the MCP shim `_require_snapshot` | `test_team_quality_gates.py` |
 | Candidate is one ordinary commit on the frozen base | Candidate verification in `candidates.py` / `git_worktrees.py` | `test_candidate_submission.py` |
 | Merge only the current candidate after a fresh QA pass and isolated gate | `integration.py` queued merge and `merge_intents` reconciliation | `test_integration_async_gate.py`, `test_integration_release_policy.py` |
-| Retried writes do not repeat effects | `service/idempotency.py` (payload-bound key, separate reserve and complete transactions) | `test_idempotency.py` |
+| Retried writes do not repeat effects | `service/idempotency.py` (payload-bound key; completion and release retry contention and never mask a committed effect; a stale IN_PROGRESS key is reclaimed as `idempotency_unknown`) | `test_idempotency.py` |
 | Validation contracts fit the packet | Size limits in `planning.py` | `test_team_quality_gates.py` |
 | Skill text names real tools and stays small | `tests/test_skill_assets.py` | — |
 

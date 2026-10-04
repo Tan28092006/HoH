@@ -190,6 +190,19 @@ async def _repository_pending(service, actor, project):
     })]
 
 
+def _expire_abandoned_planner_jobs(service):
+    """Requeue Planner jobs whose lease lapsed, so the wait below can offer them.
+
+    A read checks first: the write transaction is only taken when a lease has
+    actually expired, so an idle wait loop never contends for the write lock.
+    """
+    with service.store.connection() as db:
+        if db.execute('SELECT 1 FROM planner_job_leases WHERE expires_at <= ? LIMIT 1', (_iso(),)).fetchone() is None:
+            return
+    with service.store.connection(immediate=True) as db:
+        service._expire_planner_job_leases(db)
+
+
 def _pending(service, actor, project, kind=None, identifier=None):
     if kind is not None:
         job, poll_tool, _ = _job(service, actor, project, kind, identifier)
@@ -198,6 +211,8 @@ def _pending(service, actor, project, kind=None, identifier=None):
         return [(f'job:{kind}:{identifier}:{job["status"]}', {'kind': 'job_completed',
                  'job_kind': kind, 'job_id': identifier, 'status': job['status'],
                  'ticket_ref': 'ticket:' + job['ticket_id'], 'poll_tool': poll_tool})]
+    if actor.role == Role.PLANNER:
+        _expire_abandoned_planner_jobs(service)
     with service.store.connection() as db:
         reconciliations = [
             service._repository_reconciliation(row)

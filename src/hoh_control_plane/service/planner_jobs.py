@@ -940,8 +940,13 @@ class PlannerJobMixin:
             )
             return {"planner_job": self._planner_job(connection, planner_job_id)}
 
-    def _expire_planner_job_leases(self, connection: Connection) -> None:
-        """Return abandoned planning decisions to the ready queue."""
+    def _expire_planner_job_leases(self, connection: Connection) -> list[str]:
+        """Return abandoned planning decisions to the ready queue.
+
+        Called by the periodic lease sweep and by the Planner wait loop as well as
+        by discover/claim, so a job whose Planner chat died becomes READY (and
+        wakes a waiting Planner) without anyone having to discover it first.
+        """
         expired = connection.execute(
             "SELECT planner_job_id FROM planner_job_leases WHERE expires_at <= ?", (_iso(),)
         ).fetchall()
@@ -956,6 +961,7 @@ class PlannerJobMixin:
                 """,
                 (_iso(), row["planner_job_id"]),
             )
+        return [str(row["planner_job_id"]) for row in expired]
 
     def _planner_job(self, connection: Connection, planner_job_id: str) -> dict[str, Any]:
         job = self._one(
