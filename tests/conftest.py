@@ -123,4 +123,3 @@ class FakeProber:
         if capability in self.equipped:
             return ProbeOutcome(True, "exit_zero", "builtin:test", 5, "c" * 64)
         return ProbeOutcome(False, "no_preflight_defined", "none")
-
