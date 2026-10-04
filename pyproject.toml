@@ -20,6 +20,7 @@ dev = [
   "httpx>=0.28,<1",
   "pytest>=8.4,<9",
   "pytest-cov>=6.3,<7",
+  "pytest-xdist>=3.6,<4",
 ]
 # Only for a multi-host deployment. A local single-host install runs on SQLite
 # with no driver at all, which is why this is not a runtime dependency.

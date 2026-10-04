@@ -1,8 +1,3 @@
-[CmdletBinding()]
-param(
-    [Parameter(ValueFromRemainingArguments = $true)]
-    [string[]]$PytestArgs
-)
 
 # The one supported way to run this checkout's tests.
 #
@@ -27,7 +22,14 @@ if (-not $python) {
     throw "No .venv-hoh interpreter found. Run scripts\bootstrap-local.ps1 or set HOH_TEST_PYTHON."
 }
 
+$PytestArgs = @($args)
 $env:PYTHONPATH = Join-Path $checkout "src"
+# The suite is dominated by Git subprocesses and runs about four times faster
+# across workers (17.6 min serial vs 4.3 min with 10 workers on the dev host).
+# Pass -n 0 to run serially, or your own -n.
+if (-not ($PytestArgs -match '^-n')) {
+    $PytestArgs = @('-n', 'auto') + @($PytestArgs)
+}
 Push-Location $checkout
 try {
     & $python -m pytest @PytestArgs

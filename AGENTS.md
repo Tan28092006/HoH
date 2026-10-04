@@ -21,8 +21,9 @@ ticket state here; `tests/test_repo_docs.py` caps it at 900 words.
 
 - Tests: `powershell -File scripts/test.ps1 [pytest args]`. It pins `.venv-hoh`
   and puts this checkout's `src/` first; `tests/conftest.py` refuses to run
-  against any other source tree. Targeted runs may add `--no-cov`; the full suite
-  must clear the 80% coverage gate.
+  against any other source tree. It runs across workers (`-n auto`, about 4
+  minutes for the full suite; `-n 0` for serial). Targeted runs may add
+  `--no-cov`; the full suite must clear the 80% coverage gate.
 - `main` does not pass every test. Before blaming your change, compare failures
   with a run of unchanged `main`.
 - A local development instance: [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md).
