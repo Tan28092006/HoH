@@ -86,7 +86,7 @@ python -m hoh_control_plane.mcp_server
 Use the same command with role `planner`, `qa` or `integrator` for other agents. The backend, not the skill, enforces role permissions.
 
 The tool list is role-scoped: an agent only receives tools it is allowed to use.
-`identity.get_capabilities` returns the caller's list; `mcp_server.py` defines
+`identity.get_capabilities` returns the caller's list; `mcp/tools/` defines
 every tool and the role blocks that expose it.
 
 All roles receive `identity.get_capabilities`, `work.discover`, `feature.get_context`, `ticket.get_context`, `agent.register` and `agent.heartbeat`; only execution roles receive `work.inbox`. Every execution agent calls `agent.register` once per session and `work.inbox` whenever it becomes available. A hand-off remains pending with no QA/Dev online; when one or more eligible agents check in, each gets a short-lived offer. The first successful ticket lease wins atomically and closes the other offers. Each call is persisted with the calling agent, role, tool name, opaque target reference, timestamp and outcome. Free-text content, evidence observations, branch names, commit IDs, lease IDs and credentials are not copied to the activity log.

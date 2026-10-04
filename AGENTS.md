@@ -21,10 +21,10 @@ ticket state here; `tests/test_repo_docs.py` caps it at 900 words.
 
 - Tests: `powershell -File scripts/test.ps1 [pytest args]`. It pins `.venv-hoh`
   and puts this checkout's `src/` first; `tests/conftest.py` refuses to run
-  against any other source tree. It runs across workers (`-n auto`, about 4
+  against any other source tree. It runs across workers (`-n 6` by default, about 5
   minutes for the full suite; `-n 0` for serial). Targeted runs may add
   `--no-cov`; the full suite must clear the 80% coverage gate.
-- `main` is green (987 passed, 30 skipped on 2026-10-04). A failure after your
+- `main` is green (1053 passed, 30 skipped on 2026-10-04). A failure after your
   change is yours until a run of unchanged `main` shows otherwise.
 - A local development instance: [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md).
   Never start a component without the host environment: with no

@@ -10,9 +10,14 @@ Symbols are named rather than line numbers so the map does not rot with edits.
 One host process (`deploy/desktop/hoh_desktop.py --host` locally) serves:
 
 - **REST + dashboard** — `api.py` (FastAPI) and `static/`. The UI is read-only.
-- **MCP** — `mcp_server.py`. Over HTTP each bearer credential gets its own
-  FastMCP instance, so tools outside the caller's role are absent. Over stdio the
-  role comes from `HOH_AGENT_ROLE`.
+- **MCP** — the `mcp/` package; `mcp_server.py` is the `hoh-mcp` entry point.
+  `mcp/server.py` builds one FastMCP per actor from the role groups in
+  `mcp/tools/` (`common`, `planner`, `developer`, `qa`, `integrator`, each with
+  `register(server, service, actor, invoke)`); `mcp/invoke.py` is the audited,
+  idempotent, contention-retried call wrapper and error text; `mcp/workers.py`
+  spawns legacy-mode workers; `mcp/http_app.py` authenticates the bearer. Over
+  HTTP each bearer credential gets its own FastMCP instance, so tools outside the
+  caller's role are absent. Over stdio the role comes from `HOH_AGENT_ROLE`.
 - **Supervisor** — `supervisor.py` runs queued jobs in managed worker processes
   (`managed_worker.py`, `managed_process.py`) and recovers RUNNING jobs on start.
   `HOH_WORKER_MODE=supervised` selects it; the default `legacy` mode spawns
@@ -30,20 +35,20 @@ never above.
 
 | Layer | Modules | Notes |
 | --- | --- | --- |
-| Transports and client setup | `mcp_server`, `api`, `auth`, `__main__`; `agent_kit`, `local_agent`, `local_credentials`, `desktop_control`, `profile_migration`, `agent_assets/` | Translate requests to service calls; build client kits and prompts |
+| Transports and client setup | `mcp_server`, `mcp/`, `api`, `auth`, `__main__`; `agent_kit`, `local_agent`, `local_credentials`, `desktop_control`, `profile_migration`, `agent_assets/` | Translate requests to service calls; build client kits and prompts |
 | Orchestration | `event_wait`, `supervisor`, `scheduler`, `agent_wakeup`, `planner_wakeup`, `*_worker`, `seed`, `operations` | Long waits, wake-ups, worker processes |
 | Service | `service/` (`ControlPlaneService`) | All workflow rules, role checks and state transitions |
 | Adapters | `git_worktrees`, `qa_runner`, `managed_process`, `resource_lock`, `resource_probe`, `capability_probe`, `pytest_probe`, `observability` | Git, subprocesses, file locks, host probes, invocation logging |
-| Storage | `store`, `postgres_store`, `store_factory` | Schema, additive migrations, connections and transactions |
+| Storage | `store` (connection seam), `store_schema` (DDL), `store_migrations` (additive columns, indexes, SQLite rebuilds), `postgres_store`, `store_factory` | Schema, additive migrations, connections and transactions |
 | Domain | `domain`, `scopes` | Enums, `Actor`, error types, pure helpers |
 
 Known exceptions, listed in the boundary test: `store` sends the post-commit
-wake-up hint through `event_wait`; `service.planning` reads `barrier_age_seconds`
+wake-up hint through `event_wait`; `service.repository_reconciliation` reads `barrier_age_seconds`
 from `event_wait`; `service.discovery` uses the `agent_wakeup` vocabulary.
 
 ## The service
 
-`ControlPlaneService` (`service/__init__.py`) is one class assembled from 17
+`ControlPlaneService` (`service/__init__.py`) is one class assembled from 24
 mixins over a shared kernel, `service/_common.py`. Mixins import only `_common`,
 but they call each other through `self`. About 156 distinct cross-mixin method
 uses exist, and `validation` and `leases` act as a shared kernel for everything.
@@ -52,7 +57,14 @@ helper you are about to change across `service/`.
 
 | Mixin module | Owns |
 | --- | --- |
-| `planning.py` | Project setup, repository sync and the reconciliation barrier, project policy (test command, verification and capability profiles), ticket authoring, retirement, candidate recovery, requirements, Planner context. The largest module; see the review for a split. |
+| `project_setup.py` | Project creation and repository configuration |
+| `repository_reconciliation.py` | Repository sync, reconciliations and the barrier (state from `ExecutionGate` in `_common.py`) |
+| `project_policy.py` | Test command, verification and capability profiles, validation contracts, skill policy |
+| `ticket_authoring.py` | Features and tickets: create, ready, write scope, fields, split |
+| `ticket_retirement.py` | Stop, cancel, supersede and retire tickets through a pending reconciliation |
+| `candidate_recovery.py` | Requeue a candidate or return it to QA |
+| `requirements.py` | Requirement registration, links and coverage |
+| `planner_context.py` | Planner context entries |
 | `discovery.py` | `work.discover`, Planner rollup, capabilities, agent presence, inbox and offers |
 | `context.py` | Role-projected ticket and feature packets, compaction, snapshots, `context.resolve`, freshness checks |
 | `leases.py` | Claim, heartbeat, expiry sweep, write-scope matching |
@@ -88,21 +100,21 @@ helper you are about to change across `service/`.
   (`_event` in `validation.py`). Events are an audit trail, not an event-sourced
   log: current state cannot be rebuilt from them.
 - Schema changes are additive (`ADDITIVE_COLUMNS`, `MIGRATED_INDEXES` in
-  `store.py`) plus SQLite table rebuilds detected by schema text. There is no
+  `store_migrations.py`) plus SQLite table rebuilds detected by schema text. There is no
   schema version number.
 
 ## Where invariants are enforced
 
 | Invariant | Enforced in | Tests |
 | --- | --- | --- |
-| Role sees only its tools | Per-credential FastMCP in `mcp_server.py`; `require_role` in the service | `test_mcp.py`, `test_mcp_transport_auth.py` |
-| One live lease per ticket; lease is the fencing token | Partial unique index in `store.py`; `_claim`, `_require_active_lease` in `leases.py` | `test_postgres_concurrency.py`, `test_git_worktrees.py` |
-| No new claim, offer, submission or merge while a reconciliation is pending | `_require_repository_reconciled` in `planning.py`, called from leases, candidates, integration, worktrees; inline check for offers in `discovery.py`. `set_ticket_ready` does not call it | `test_team_quality_gates.py`, `test_repository_sync.py` |
+| Role sees only its tools | Per-credential FastMCP in `mcp/server.py` and `mcp/http_app.py`; `require_role` in the service | `test_mcp.py`, `test_mcp_transport_auth.py` |
+| One live lease per ticket; lease is the fencing token | Partial unique index in `store_schema.py`; `_claim`, `_require_active_lease` in `leases.py` | `test_postgres_concurrency.py`, `test_git_worktrees.py` |
+| No new claim, offer, submission or merge while a reconciliation is pending | `ExecutionGate` in `service/_common.py`: `require_open` (via `_require_repository_reconciled`) from leases, candidates, integration, worktrees, policy and authoring; `is_closed` for offers in `discovery.py`. `set_ticket_ready` does not call it | `test_team_quality_gates.py`, `test_repository_sync.py` |
 | Consequential writes name a fresh packet | `require_fresh_context` in `context.py`; `require_snapshot_id` in `service/_common.py`, called by `submit_candidate`, `queue_candidate_submission`, `submit_qa_verdict` and `queue_merge_candidate`, so REST and MCP both require it | `test_context_snapshots.py`, `test_team_quality_gates.py` |
 | Candidate is one ordinary commit on the frozen base | Candidate verification in `candidates.py` / `git_worktrees.py` | `test_candidate_submission.py` |
 | Merge only the current candidate after a fresh QA pass and isolated gate | `integration.py` queued merge and `merge_intents` reconciliation | `test_integration_async_gate.py`, `test_integration_release_policy.py` |
 | Retried writes do not repeat effects | `service/idempotency.py` (payload-bound key; completion and release retry contention and never mask a committed effect; a stale IN_PROGRESS key is reclaimed as `idempotency_unknown`) | `test_idempotency.py` |
-| Validation contracts fit the packet | Size limits in `planning.py` | `test_team_quality_gates.py` |
+| Validation contracts fit the packet | Size limits in `project_policy.py` | `test_team_quality_gates.py` |
 | Skill text names real tools and stays small | `tests/test_skill_assets.py` | — |
 
 ## Change routing
@@ -112,7 +124,7 @@ helper you are about to change across `service/`.
 | An MCP tool's name, arguments or semantics | Update the role skill card and reference that mention it, the prompts generated by `agent_kit.py` and `local_agent.py`, and the REST model in `api.py` if one exists; run `test_mcp*.py`, `test_contract_parity.py`, `test_skill_*.py` |
 | A ticket status or transition | `domain.py`, the guards in every mixin that checks that status, discovery filters, `docs/releases/` note |
 | Packet shape, budgets or references | `context.py`, `context.resolve`, the role skills; read `CONTEXT_DISTRIBUTION_REVIEW.md` and releases 0.3.18–0.3.21 |
-| The schema | `store.py` DDL and `ADDITIVE_COLUMNS`/`MIGRATED_INDEXES`; `postgres_store.py` translation; `test_store_migrations.py` against a copy of a legacy database |
+| The schema | `store_schema.py` DDL and `ADDITIVE_COLUMNS`/`MIGRATED_INDEXES` in `store_migrations.py`; `postgres_store.py` translation; `test_store_migrations.py` against a copy of a legacy database |
 | Wait, wake-up or event behavior | `event_wait.py`, `agent_wakeup.py`, `docs/GUI_EVENT_WAIT.md`, release 0.3.24 |
 | Worker lifecycle | `supervisor.py`, the job's mixin, `docs/RUNTIME_OPERATIONS.md` |
 | Anything a client installs | `skills/`, `agent_assets/`, `agent_kit.py`, `local_agent.py`; installed clients change only on upgrade |
