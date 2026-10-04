@@ -4,8 +4,14 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from conftest import keep_open_tickets
 
-from hoh_control_plane.domain import AuthorizationError, ContextStaleError, ValidationError
+from hoh_control_plane.domain import (
+    AuthorizationError,
+    ConflictError,
+    ContextStaleError,
+    ValidationError,
+)
 from hoh_control_plane.mcp_server import create_mcp_server
 
 
@@ -76,17 +82,25 @@ def test_sync_repository_fetches_and_classifies_remote_changes_without_pulling(
     assert {row["path"] for row in manifest["incoming_changes"]} == {
         "docs/requirements.md", "src/api.py"
     }
-    assert manifest["document_paths"] == ["docs/requirements.md"]
+    # Document paths include those changed on any fetched branch, not only main.
+    assert manifest["document_paths"] == ["docs/requirements.md", "shared.txt"]
     updates = {row["branch"]: row for row in manifest["branch_updates"]}
     assert updates["origin/main"]["change"] == "updated"
     assert updates["origin/shared-feature"]["change"] == "new"
     assert _git(repository, "rev-parse", "HEAD") == unchanged_head
-    with pytest.raises(ContextStaleError) as stale:
+    # The observed commit opens a barrier, which refuses a claim before its
+    # snapshot is even compared; the snapshot is stale on its own as well.
+    with pytest.raises(ConflictError, match="Planner must reconcile"):
         service.claim_ticket(
             actors["developer"], seeded["ticket"]["ticket_id"],
             seeded["ticket"]["version"], 900,
             context_snapshot_id=packet["context_snapshot_id"],
         )
+    with service.store.connection(immediate=True) as connection:
+        with pytest.raises(ContextStaleError) as stale:
+            service.require_fresh_context(
+                connection, seeded["ticket"]["ticket_id"], packet["context_snapshot_id"]
+            )
     assert "repository" in stale.value.details["stale"]
 
     _git(friend, "push", "origin", "--delete", "shared-feature")
@@ -101,6 +115,8 @@ def test_a_remote_update_to_the_ticket_branch_stales_only_its_snapshot(
     repository, remote = _tracked_repository(tmp_path)
     service.configure_repository(actors["planner"], "project-1", str(repository))
     service.sync_repository(actors["planner"], "project-1")
+    # The first observation is an iteration boundary Planner resolves first.
+    keep_open_tickets(service, actors["planner"])
     ticket = seeded["ticket"]
     claimed = service.claim_ticket(
         actors["developer"], ticket["ticket_id"], ticket["version"], 900
@@ -132,7 +148,9 @@ def test_a_remote_update_to_the_ticket_branch_stales_only_its_snapshot(
             service.require_fresh_context(
                 connection, ticket["ticket_id"], packet["context_snapshot_id"]
             )
-    assert stale.value.details["stale"] == ["repository"]
+    # The push is also an iteration boundary, so the barrier section is stale
+    # too; nothing about the ticket, feature or candidate is.
+    assert sorted(stale.value.details["stale"]) == ["planning_barrier", "repository"]
 
 
 def test_only_planner_can_sync_repository(service, actors, seeded, tmp_path: Path) -> None:
