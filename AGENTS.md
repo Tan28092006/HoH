@@ -52,8 +52,9 @@ ticket state here; `tests/test_repo_docs.py` caps it at 900 words.
 
 The service enforces these; [ARCHITECTURE.md](docs/ARCHITECTURE.md) says where.
 
-- Every observed commit on the default branch or a fetched remote branch opens a
-  repository reconciliation. Until Planner classifies every ticket that was open
+- Every observed commit on the default branch opens a repository
+  reconciliation, or extends the one pending sync observation; other branches
+  are recorded only. Until Planner classifies every ticket that was open
   (keep, revise, cancel, supersede, complete, rework) and resolves it, no new
   offer, claim, submission or merge starts; QA already running may finish its
   evidence. The server resolves a merge's reconciliation itself, as `keep`, only

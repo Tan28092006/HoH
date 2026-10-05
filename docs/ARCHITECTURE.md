@@ -203,8 +203,8 @@ The barrier protects the plan, not `main`: fast-forward-only merges of a
 candidate QA ran on its exact base already keep `main` correct. So the scope of
 a reconciliation follows what the result can have invalidated.
 
-- **Project-wide** (`scope = 'project'`): a commit observed by
-  `planner.sync_repository`, a successful merge (still auto-kept when
+- **Project-wide** (`scope = 'project'`): a commit on the default branch
+  observed by `planner.sync_repository` (wave 7A), a successful merge (still auto-kept when
   scope-disjoint), and base drift onto a `main` HoH had not observed. Each may
   change any ticket's plan, and outside work carries no ticket or contract to
   bound it.
@@ -292,6 +292,30 @@ deliberately not enforced: the server cannot see whether a chat delegated.
   result (not a wait on the agent's own job) carries `advice:
   start_new_session`. The server never refuses a claim over it, and a presence
   from before the column has no session and gets no advice.
+
+### Planner off the critical path (wave 7A)
+
+The owner judged the loop too rigid to be fast. Each rule below replaces a
+Planner turn that added no information with a deterministic server decision;
+every one is written with a `system:*` actor, so Planner can still reverse it
+with the ordinary tools.
+
+- **Only the default branch is an iteration boundary.** `_sync_repository_once`
+  opens a reconciliation for a change of the observed mainline, the upstream, or
+  a remote head of the default branch (`<remote>/<default_branch>` or the
+  tracking upstream). A push to any other remote branch updates
+  `observed_remote_refs` and is reported in `branch_updates`, but is not
+  captured as an observed commit and freezes nothing: it is not delivered
+  behavior, and before this every teammate push closed the whole project.
+- **One pending observation per project.** When a sync finds a change while a
+  sync-opened reconciliation (project-wide, `observation_ref` a `ctx:entry:`)
+  is still PENDING, it appends to that one instead of opening another: observed
+  commits are the union by SHA, tickets already captured keep the version first
+  observed, and newly open tickets join. The new observation still gets its own
+  context entry and `project.repository_observed` event (`extended: true`).
+  HOH-280 had a sweep and a Planner sync open two duplicates Planner resolved in
+  turn. Reconciliations opened by merges, drift or QA results are not merged
+  into it.
 
 ## Change routing
 

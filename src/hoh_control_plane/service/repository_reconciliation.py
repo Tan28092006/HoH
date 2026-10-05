@@ -101,6 +101,13 @@ class RepositoryReconciliationMixin:
         default_commits = {
             row["commit"] for row in manifest.get("incoming_commits", [])
         }
+
+        def is_default_branch(branch: str) -> bool:
+            # Only the default branch's remote head carries planning truth. A
+            # teammate's feature branch is not delivered behavior yet, so its
+            # pushes are recorded in the observed refs but never close work.
+            return branch == upstream_ref or branch.partition("/")[2] == project["default_branch"]
+
         for row in manifest.get("incoming_commits", []):
             observed_commits.append({**row, "branch": upstream_ref, "relation": "incoming"})
         for branch in sorted(set(previous_refs) | set(remote_refs)):
@@ -122,6 +129,8 @@ class RepositoryReconciliationMixin:
                 "commits": delta["commits"],
                 "changes": delta["changes"],
             })
+            if not is_default_branch(branch):
+                continue
             for row in delta["commits"]:
                 if branch == upstream_ref and row["commit"] in default_commits:
                     continue
@@ -187,7 +196,9 @@ class RepositoryReconciliationMixin:
                 current.get("observed_mainline_commit") != manifest["local_commit"]
                 or current.get("observed_upstream_commit") != manifest["upstream_commit"]
             )
-            changed = changed or bool(branch_updates)
+            changed = changed or any(
+                is_default_branch(update["branch"]) for update in branch_updates
+            )
             has_reconciliation_history = connection.execute(
                 "SELECT 1 FROM repository_reconciliations WHERE project_id = ? LIMIT 1",
                 (project_id,),
@@ -226,9 +237,26 @@ class RepositoryReconciliationMixin:
                     (next_version, timestamp, project_id),
                 )
                 entry_id = _id(connection, "ctx")
-                reconciliation_id = _id(connection, "recon")
+                # One pending observation per project: a later sync (Planner's
+                # or the scheduler sweep's) appends to it instead of opening a
+                # duplicate Planner must resolve in turn (HOH-280).
+                pending_observation = connection.execute(
+                    """
+                    SELECT * FROM repository_reconciliations
+                    WHERE project_id = ? AND status = 'PENDING'
+                      AND COALESCE(scope, 'project') = 'project'
+                      AND observation_ref LIKE 'ctx:entry:%'
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (project_id,),
+                ).fetchone()
+                reconciliation_id = (
+                    str(pending_observation["reconciliation_id"])
+                    if pending_observation is not None else _id(connection, "recon")
+                )
                 manifest["context_ref"] = f"ctx:entry:{entry_id}"
                 manifest["reconciliation_id"] = reconciliation_id
+                manifest["reconciliation_extended"] = pending_observation is not None
                 open_ticket_versions = {
                     str(row["ticket_id"]): {
                         "version": int(row["version"]),
@@ -262,22 +290,43 @@ class RepositoryReconciliationMixin:
                         timestamp,
                     ),
                 )
-                connection.execute(
-                    """
-                    INSERT INTO repository_reconciliations
-                        (reconciliation_id, project_id, observation_ref, observed_commits,
-                         ticket_versions, status, created_at)
-                    VALUES (?, ?, ?, ?, ?, 'PENDING', ?)
-                    """,
-                    (
-                        reconciliation_id,
-                        project_id,
-                        manifest["context_ref"],
-                        json.dumps(observed_commits, sort_keys=True),
-                        json.dumps(open_ticket_versions, sort_keys=True),
-                        timestamp,
-                    ),
-                )
+                if pending_observation is not None:
+                    existing = self._repository_reconciliation(pending_observation)
+                    merged_commits = self._union_observed_commits(
+                        existing["observed_commits"], observed_commits
+                    )
+                    # Never shrink or re-baseline what was captured: a ticket
+                    # keeps the version first observed, new open tickets join.
+                    merged_versions = {**open_ticket_versions, **existing["ticket_versions"]}
+                    connection.execute(
+                        """
+                        UPDATE repository_reconciliations
+                        SET observed_commits = ?, ticket_versions = ?
+                        WHERE reconciliation_id = ?
+                        """,
+                        (
+                            json.dumps(merged_commits, sort_keys=True),
+                            json.dumps(merged_versions, sort_keys=True),
+                            reconciliation_id,
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        INSERT INTO repository_reconciliations
+                            (reconciliation_id, project_id, observation_ref, observed_commits,
+                             ticket_versions, status, created_at)
+                        VALUES (?, ?, ?, ?, ?, 'PENDING', ?)
+                        """,
+                        (
+                            reconciliation_id,
+                            project_id,
+                            manifest["context_ref"],
+                            json.dumps(observed_commits, sort_keys=True),
+                            json.dumps(open_ticket_versions, sort_keys=True),
+                            timestamp,
+                        ),
+                    )
                 self._withdraw_offers(connection, project_id, timestamp)
                 self._event(
                     connection,
@@ -296,12 +345,34 @@ class RepositoryReconciliationMixin:
                         "branch_update_count": len(branch_updates),
                         "observed_commit_count": len(observed_commits),
                         "reconciliation_id": reconciliation_id,
+                        "extended": manifest["reconciliation_extended"],
                     },
                 )
             pending = self._repository_reconciliation_state(connection, project_id)
             manifest["reconciliation_required"] = bool(pending["pending"])
             manifest["pending_reconciliations"] = pending["pending"]
         return manifest
+
+    @staticmethod
+    def _union_observed_commits(
+        existing: list[dict[str, Any]], incoming: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Existing observed commits, then new ones; one row per SHA."""
+        by_sha: dict[str, dict[str, Any]] = {}
+        for item in [*existing, *incoming]:
+            sha = item["commit"]
+            if sha not in by_sha:
+                by_sha[sha] = {
+                    **item,
+                    "branches": list(item.get("branches") or []),
+                    "relations": list(item.get("relations") or []),
+                }
+                continue
+            for field in ("branches", "relations"):
+                for value in item.get(field) or []:
+                    if value not in by_sha[sha][field]:
+                        by_sha[sha][field].append(value)
+        return list(by_sha.values())
 
     def list_repository_reconciliations(
         self, actor: Actor, project_id: str, status: str = "PENDING", limit: int = 20

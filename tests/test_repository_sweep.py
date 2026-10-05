@@ -88,6 +88,26 @@ def test_the_sweep_opens_a_reconciliation_for_a_commit_no_planner_saw(
     assert sweep_once(store.path)["repositories"]["observed"] == []
 
 
+def test_a_sweep_then_a_planner_sync_leave_one_pending_reconciliation(
+    service, store, actors, seeded, tmp_path
+) -> None:
+    repository = _observed_baseline(service, actors, None, tmp_path)
+    first = _external_commit(repository, "first.txt")
+    _age_observation(service)
+    swept = sweep_once(store.path)["repositories"]["observed"]
+    second = _external_commit(repository, "second.txt")
+
+    synced = service.sync_repository(actors["planner"], "project-1")
+
+    pending = _pending_reconciliations(service, actors["planner"])
+    assert len(pending) == 1
+    assert synced["reconciliation_id"] == swept[0]["reconciliation_id"]
+    assert synced["reconciliation_extended"] is True
+    observed = [item["commit"] for item in pending[0]["observed_commits"]]
+    assert first in observed and second in observed
+    assert keep_open_tickets(service, actors["planner"]) == 1
+
+
 def test_a_waiting_planner_shares_the_sweeps_throttle(
     service, actors, seeded, tmp_path, monkeypatch
 ) -> None:
