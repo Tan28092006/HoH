@@ -37,6 +37,11 @@ from hoh_control_plane.service._common import (
 # existing record is the evidence, and asking again returns it unchanged.
 _PREFLIGHT_REF = "preflight:"
 _REVIEW_MARK = "capability_review:"
+# Wave 7A: the server approves what a host preflight proves; a configuration or
+# declaration change revokes that approval until the next preflight.
+HOST_PREFLIGHT_APPROVER = "system:host-preflight"
+APPROVAL_REVOKED = "system:approval-revoked"
+_SYSTEM = Actor(HOST_PREFLIGHT_APPROVER, Role.ADMIN, frozenset({"*"}))
 
 
 class CapabilityMixin:
@@ -155,8 +160,16 @@ class CapabilityMixin:
             else:
                 record = self._preflight(connection, existing["preflight_id"])
                 reused = True
+            # The probes just ran on the agent's own machine, so the record is
+            # current whether it is new or an identical earlier one.
+            approval = self._approve_from_preflight(connection, project_id, record)
             jobs = self._open_capability_review_jobs(connection, actor, project_id, record)
-        return {**self._preflight_summary(record), "reused": reused, "planner_jobs": jobs}
+        return {
+            **self._preflight_summary(record), "reused": reused,
+            "approved": approval["approved"],
+            "resolved_planner_jobs": approval["resolved_planner_jobs"],
+            "planner_jobs": jobs,
+        }
 
     def configure_capability_preflight(
         self,
@@ -210,6 +223,9 @@ class CapabilityMixin:
                 connection, actor, project_id, "project.capability_preflight_configured",
                 "project", project_id, project["version"],
                 {"capability": capability, "configured": bool(command), "reason": reason},
+            )
+            self._revoke_host_preflight_approvals(
+                connection, actor, project_id, "capability_preflight_configured"
             )
         return {"project_id": project_id, "capability": capability, "configured": bool(command)}
 
@@ -295,6 +311,103 @@ class CapabilityMixin:
             )
             resolved.append(row["planner_job_id"])
         return resolved
+
+    def _approve_from_preflight(
+        self, connection: Connection, project_id: str, record: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Approve declared ∩ proven for the preflight's agent on its own machine.
+
+        Planner's approval could only ever restate this set (``_proven_by_preflight``
+        refuses anything else), so the server records it in the same transaction
+        and the Planner step is left for overrides. Nothing is approved from a
+        record taken on another host, for another machine than the one the agent
+        is registered from now, or for a capability the agent did not declare.
+        """
+        presence = _row(connection.execute(
+            "SELECT * FROM agent_presence WHERE agent_id = ?", (record["agent_id"],)
+        ).fetchone())
+        unchanged = {"approved": None, "resolved_planner_jobs": []}
+        if presence is None or not record["host_matches_machine"]:
+            return unchanged
+        if record["machine_fingerprint"] != machine_fingerprint(presence.get("machine_id")):
+            return unchanged
+        project = self._one(
+            connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+        )
+        profile = set((project.get("verification_profile") or {}).get("capabilities") or [])
+        declared = set(presence.get("execution_capabilities") or [])
+        approved = sorted(declared & set(record["proven"]) & profile)
+        ref = _PREFLIGHT_REF + record["preflight_id"]
+        current = (
+            sorted(presence.get("approved_execution_capabilities") or []),
+            presence.get("capability_approved_machine_id"),
+            presence.get("capability_approved_by"),
+        )
+        if current != (approved, presence["machine_id"], HOST_PREFLIGHT_APPROVER):
+            timestamp = _iso()
+            connection.execute(
+                """UPDATE agent_presence
+                   SET approved_execution_capabilities = ?, capability_approval_refs = ?,
+                       capability_approved_machine_id = ?, capability_approved_by = ?,
+                       capability_approved_at = ?, updated_at = ?
+                   WHERE agent_id = ?""",
+                (
+                    json.dumps(approved), json.dumps([ref]), presence["machine_id"],
+                    HOST_PREFLIGHT_APPROVER, timestamp, timestamp, presence["agent_id"],
+                ),
+            )
+            self._event(
+                connection, _SYSTEM, project_id, "qa.capability_auto_approved",
+                "agent_presence", presence["agent_id"], 1,
+                {"capabilities": approved, "preflight_ref": ref,
+                 "decided_by": HOST_PREFLIGHT_APPROVER},
+            )
+        resolved = self._resolve_capability_review_jobs(
+            connection, _SYSTEM, project_id, presence["agent_id"], set(approved),
+            f"Capability approved by the server from host preflight {ref}.",
+        )
+        return {"approved": approved, "resolved_planner_jobs": resolved}
+
+    def _revoke_host_preflight_approvals(
+        self, connection: Connection, actor: Actor, project_id: str,
+        reason: str, agent_id: str | None = None,
+    ) -> list[str]:
+        """Withdraw server approvals the changed configuration no longer backs.
+
+        A project's preflight commands, test command or verification profile, or
+        an agent's declaration, are what a preflight proved against; after a
+        change the agent runs the preflight again. A Planner override is left as
+        Planner set it.
+        """
+        rows = connection.execute(
+            "SELECT agent_id, project_ids FROM agent_presence "
+            "WHERE role = ? AND capability_approved_by = ?"
+            + (" AND agent_id = ?" if agent_id is not None else ""),
+            (Role.QA.value, HOST_PREFLIGHT_APPROVER,
+             *((agent_id,) if agent_id is not None else ())),
+        ).fetchall()
+        revoked: list[str] = []
+        timestamp = _iso()
+        for row in rows:
+            project_ids = row["project_ids"]
+            if isinstance(project_ids, str):
+                project_ids = json.loads(project_ids)
+            if project_id not in set(project_ids or []):
+                continue
+            connection.execute(
+                """UPDATE agent_presence
+                   SET approved_execution_capabilities = '[]', capability_approval_refs = '[]',
+                       capability_approved_by = ?, capability_approved_at = ?, updated_at = ?
+                   WHERE agent_id = ?""",
+                (APPROVAL_REVOKED, timestamp, timestamp, row["agent_id"]),
+            )
+            self._event(
+                connection, actor, project_id, "qa.capability_approval_revoked",
+                "agent_presence", row["agent_id"], 1,
+                {"reason": reason, "decided_by": APPROVAL_REVOKED},
+            )
+            revoked.append(str(row["agent_id"]))
+        return revoked
 
     # --------------------------------------------------------- review jobs
 
@@ -401,8 +514,18 @@ class CapabilityMixin:
             if latest is None:
                 return None
             record = self._preflight(connection, latest["preflight_id"])
+            if (
+                presence.get("capability_approved_by") == APPROVAL_REVOKED
+                and record["created_at"] <= (presence.get("capability_approved_at") or "")
+            ):
+                # Taken before the configuration changed: the agent reruns it.
+                return None
+            approval = self._approve_from_preflight(connection, project_id, record)
             jobs = self._open_capability_review_jobs(connection, actor, project_id, record)
-        return {**self._preflight_summary(record), "planner_jobs": jobs}
+        return {
+            **self._preflight_summary(record), "approved": approval["approved"],
+            "planner_jobs": jobs,
+        }
 
     def latest_capability_preflight_refs(
         self, connection: Connection, project_id: str, agent_id: str,
@@ -440,6 +563,7 @@ class CapabilityMixin:
             "preflight_id": row["preflight_id"],
             "project_id": row["project_id"],
             "agent_id": row["agent_id"],
+            "machine_fingerprint": row["machine_fingerprint"],
             "host_matches_machine": bool(row["host_matches_machine"]),
             "requested": json.loads(row["requested_capabilities"]),
             "outcomes": outcomes,

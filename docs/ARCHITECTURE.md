@@ -203,8 +203,8 @@ The barrier protects the plan, not `main`: fast-forward-only merges of a
 candidate QA ran on its exact base already keep `main` correct. So the scope of
 a reconciliation follows what the result can have invalidated.
 
-- **Project-wide** (`scope = 'project'`): a commit observed by
-  `planner.sync_repository`, a successful merge (still auto-kept when
+- **Project-wide** (`scope = 'project'`): a commit on the default branch
+  observed by `planner.sync_repository` (wave 7A), a successful merge (still auto-kept when
   scope-disjoint), and base drift onto a `main` HoH had not observed. Each may
   change any ticket's plan, and outside work carries no ticket or contract to
   bound it.
@@ -292,6 +292,75 @@ deliberately not enforced: the server cannot see whether a chat delegated.
   result (not a wait on the agent's own job) carries `advice:
   start_new_session`. The server never refuses a claim over it, and a presence
   from before the column has no session and gets no advice.
+
+### Planner off the critical path (wave 7A)
+
+The owner judged the loop too rigid to be fast. Each rule below replaces a
+Planner turn that added no information with a deterministic server decision;
+every one is written with a `system:*` actor, so Planner can still reverse it
+with the ordinary tools.
+
+- **Only the default branch is an iteration boundary.** `_sync_repository_once`
+  opens a reconciliation for a change of the observed mainline, the upstream, or
+  a remote head of the default branch (`<remote>/<default_branch>` or the
+  tracking upstream). A push to any other remote branch updates
+  `observed_remote_refs` and is reported in `branch_updates`, but is not
+  captured as an observed commit and freezes nothing: it is not delivered
+  behavior, and before this every teammate push closed the whole project.
+- **One pending observation per project.** When a sync finds a change while a
+  sync-opened reconciliation (project-wide, `observation_ref` a `ctx:entry:`)
+  is still PENDING, it appends to that one instead of opening another: observed
+  commits are the union by SHA, tickets already captured keep the version first
+  observed, and newly open tickets join. The new observation still gets its own
+  context entry and `project.repository_observed` event (`extended: true`).
+  HOH-280 had a sweep and a Planner sync open two duplicates Planner resolved in
+  turn. Reconciliations opened by merges, drift or QA results are not merged
+  into it.
+
+- **The server approves QA capability from host preflight.**
+  `run_capability_preflight` (`service/capability.py`) sets the agent's approved
+  profile to declared ∩ proven ∩ verification profile, bound to its registered
+  machine, in the transaction that records the preflight
+  (`_approve_from_preflight`, event `qa.capability_auto_approved`,
+  `capability_approved_by = system:host-preflight`), and closes the review jobs
+  that approval clears. Planner could only ever approve that same set
+  (`_proven_by_preflight`, release 0.3.25), so its step added a wait and no
+  information. Nothing is approved from a record taken on another host. The
+  approval persists across sessions of that agent on that machine until its
+  declaration or machine changes (`register_agent`) or the project's preflight
+  commands, test command or capability profile change; then
+  `_revoke_host_preflight_approvals` clears it (`system:approval-revoked`) and
+  the inbox ignores preflights older than the revocation, so QA reruns one.
+  `planner.configure_agent_capability_profile` stays for overrides, which a
+  revocation leaves alone.
+
+- **A rejection resolves its own barrier.** `_open_commit_reconciliation`
+  takes `rework_ticket_id` and `resolved_by`. A QA rejection
+  (`submit_qa_verdict`, `system:qa-rejection`) and an integration gate
+  regression (`system:gate-regression`) pass the judged ticket, already REWORK
+  or BLOCKED, and the ticket-scoped reconciliation is resolved in the same
+  transaction: `rework` for that ticket, `keep` for its dependents, which their
+  dependency edge still holds. Offers are not withdrawn. It stays PENDING for
+  Planner when the rejection spent the rework budget (`MAX_QA_REJECTIONS`), for
+  drift, or when an older pending reconciliation captured one of the same
+  tickets (commit order). Planner kept having to restate exactly this.
+
+- **Environment failures are not QA rejections.** `qa_runner._execute_pytest`
+  classifies a run as infrastructure (`INFRASTRUCTURE_REASONS`, shared with
+  `service/qa.py`; the manifest's `classification` is `infrastructure_failure`)
+  on MemoryError, Windows commit exhaustion (0xC000012D) or a paging-file
+  message, pytest exit 2 without a collection error, 3 or 4, a collection
+  import error whose failing frame lies outside the worktree (`pytest_probe`
+  `foreign_import_errors`), or a provenance mismatch. Exit 2 with the
+  candidate's own collection errors stays `test_failure`. Memory, exit-code and
+  foreign-import failures are retried once by the runner with half the xdist
+  workers (`retry_of` in the manifest); what still fails parks the ticket for
+  infrastructure as before and never reaches `MAX_QA_REJECTIONS`. A failed
+  verdict whose evidence cites only infrastructure runs is refused
+  (`verdict_cites_only_infrastructure`). A frozen `-n auto` runs as
+  `min(CPUs, min(free commit, free physical) / 600 MB)` workers, at least one,
+  from `resource_probe`; the frozen command and digest are unchanged and the
+  manifest records `xdist_workers` requested and effective.
 
 ## Change routing
 

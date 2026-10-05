@@ -2,11 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-_INFRASTRUCTURE_OUTCOMES = frozenset({
-    "resource_unready", "resource_exhausted", "native_termination", "timeout", "cancelled",
-    "capture_failure", "output_truncated", "launch_failure", "incomplete_evidence",
-    "artifact_mismatch", "test_configuration_error",
-})
+from hoh_control_plane.qa_runner import INFRASTRUCTURE_REASONS as _INFRASTRUCTURE_OUTCOMES
 
 from hoh_control_plane import contracts
 
@@ -160,6 +156,45 @@ class QaMixin:
                 except Exception as error:  # re-raised in order by the caller
                     results[id(item)] = error
         return results
+
+    def _refuse_infrastructure_only_rejection(
+        self, candidate_id: str, checksums: dict[int, Any]
+    ) -> None:
+        """A rejection whose only evidence is an infrastructure test run is refused.
+
+        Such a run failed because of the host (memory, interrupted pytest, an
+        import from outside the worktree, provenance), not the candidate, so it
+        must never spend the rework budget. Reads report files: called before
+        the write lock.
+        """
+        cited = {value[0] for value in checksums.values() if isinstance(value, tuple)}
+        if not cited:
+            return
+        with self.store.connection() as connection:
+            rows = connection.execute(
+                f"SELECT test_run_id, storage_ref, report_path FROM qa_test_runs "
+                f"WHERE candidate_id = ? AND storage_ref IN ({','.join('?' for _ in cited)})",
+                (candidate_id, *sorted(cited)),
+            ).fetchall()
+        if len(rows) != len(cited):
+            return  # Other evidence is cited too: the verdict stands on it.
+        infrastructure = []
+        for row in rows:
+            try:
+                report = json.loads(Path(row["report_path"]).read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                return
+            if report.get("termination_reason") not in _INFRASTRUCTURE_OUTCOMES:
+                return
+            infrastructure.append((row["test_run_id"], report.get("termination_reason")))
+        raise ValidationError(
+            "This rejection cites only infrastructure test runs; they failed because of the "
+            "host, not the candidate. Do not submit failed: the runner retried once and parked "
+            "the ticket for infrastructure. Cite a run or scenario that observes the candidate.",
+            {"reason": "verdict_cites_only_infrastructure",
+             "test_runs": [{"test_run_id": run, "termination_reason": why}
+                           for run, why in infrastructure]},
+        )
 
     def _verified_storage_checksum(
         self, storage_ref: str, candidate_id: str, supplied: object, observation: str
@@ -750,6 +785,8 @@ class QaMixin:
         # Hashing evidence artifacts reads files of any size, so it runs before the
         # write lock is taken; the loop below consumes the results in order.
         checksums = self._precomputed_evidence_checksums(candidate_id, findings)
+        if verdict == "failed":
+            self._refuse_infrastructure_only_rejection(candidate_id, checksums)
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             self._expect_version(ticket, expected_version)
@@ -985,6 +1022,9 @@ class QaMixin:
                     observation_ref=f"context:{known_failure_entry_id}",
                     branch=candidate.get("branch_ref"),
                     frozen_ticket_ids=self._frozen_ticket_closure(connection, ticket_id),
+                    # The rework budget's last rejection stays with Planner.
+                    rework_ticket_id=None if budget_exhausted else ticket_id,
+                    resolved_by="system:qa-rejection",
                 )
             if verdict in {"passed", "failed"}:
                 self._queue_ticket(connection, actor, project_id, verdict_ticket)

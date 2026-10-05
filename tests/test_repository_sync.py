@@ -148,9 +148,85 @@ def test_a_remote_update_to_the_ticket_branch_stales_only_its_snapshot(
             service.require_fresh_context(
                 connection, ticket["ticket_id"], packet["context_snapshot_id"]
             )
-    # The push is also an iteration boundary, so the barrier section is stale
-    # too; nothing about the ticket, feature or candidate is.
-    assert sorted(stale.value.details["stale"]) == ["planning_barrier", "repository"]
+    # A push to a non-default branch is observed but is no iteration boundary
+    # (wave 7A): only the repository section is stale, and nothing is frozen.
+    assert sorted(stale.value.details["stale"]) == ["repository"]
+    assert manifest["changed"] is False
+    assert manifest["reconciliation_id"] is None
+
+
+def _pending(service, planner) -> list[dict]:
+    return service.list_repository_reconciliations(planner, "project-1")["reconciliations"]
+
+
+def _friend(tmp_path: Path, remote: Path, name: str) -> Path:
+    friend = tmp_path / name
+    subprocess.run(["git", "clone", str(remote), str(friend)], check=True, capture_output=True)
+    _git(friend, "config", "user.email", "friend@example.invalid")
+    _git(friend, "config", "user.name", "Friend")
+    _git(friend, "checkout", "main")
+    return friend
+
+
+def test_a_push_to_a_feature_branch_opens_no_reconciliation(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    repository, remote = _tracked_repository(tmp_path)
+    service.configure_repository(actors["planner"], "project-1", str(repository))
+    service.sync_repository(actors["planner"], "project-1")
+    keep_open_tickets(service, actors["planner"])
+    friend = _friend(tmp_path, remote, "feature-pusher")
+    _git(friend, "checkout", "-b", "feature/x")
+    (friend / "feature.txt").write_text("feature\n")
+    _git(friend, "add", "feature.txt")
+    _git(friend, "commit", "-m", "Feature work")
+    _git(friend, "push", "origin", "feature/x")
+
+    manifest = service.sync_repository(actors["planner"], "project-1")
+
+    assert [row["branch"] for row in manifest["branch_updates"]] == ["origin/feature/x"]
+    assert manifest["changed"] is False
+    assert manifest["reconciliation_id"] is None
+    assert _pending(service, actors["planner"]) == []
+    # The ref is recorded, so the same push is not reported again.
+    assert service.sync_repository(actors["planner"], "project-1")["branch_updates"] == []
+    ticket = seeded["ticket"]
+    service.claim_ticket(actors["developer"], ticket["ticket_id"], ticket["version"], 900)
+
+    # A commit on main still opens one.
+    _git(friend, "checkout", "main")
+    (friend / "main.txt").write_text("main\n")
+    _git(friend, "add", "main.txt")
+    _git(friend, "commit", "-m", "Main work")
+    _git(friend, "push", "origin", "main")
+    assert service.sync_repository(actors["planner"], "project-1")["reconciliation_id"]
+
+
+def test_two_observations_extend_one_pending_reconciliation(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    repository, remote = _tracked_repository(tmp_path)
+    service.configure_repository(actors["planner"], "project-1", str(repository))
+    service.sync_repository(actors["planner"], "project-1")
+    keep_open_tickets(service, actors["planner"])
+    friend = _friend(tmp_path, remote, "two-pushes")
+    commits = []
+    for name in ("one.txt", "two.txt"):
+        (friend / name).write_text(name)
+        _git(friend, "add", name)
+        _git(friend, "commit", "-m", f"Add {name}")
+        _git(friend, "push", "origin", "main")
+        commits.append(_git(friend, "rev-parse", "HEAD"))
+        manifest = service.sync_repository(actors["planner"], "project-1")
+        assert manifest["reconciliation_id"]
+
+    pending = _pending(service, actors["planner"])
+    assert len(pending) == 1
+    assert pending[0]["reconciliation_id"] == manifest["reconciliation_id"]
+    assert manifest["reconciliation_extended"] is True
+    observed = {item["commit"] for item in pending[0]["observed_commits"]}
+    assert set(commits) <= observed
+    assert keep_open_tickets(service, actors["planner"]) == 1
 
 
 def test_only_planner_can_sync_repository(service, actors, seeded, tmp_path: Path) -> None:

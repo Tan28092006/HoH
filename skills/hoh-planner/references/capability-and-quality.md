@@ -9,10 +9,11 @@ configure the verification profile with portable names such as
 The project profile is a catalog, not proof that a QA session can use it. QA
 declares only tools it verified on its stable `machine_id`, then calls
 `qa.run_capability_preflight`: the HoH host probes that machine, needing no
-lease, and records a `preflight:<id>`. Approval accepts only such records, for
-the same agent and machine, and only capabilities they prove; the server refuses
-self-report, other agents' or machines' records and unproven names. Revoke
-unavailable equipment through a smaller approval.
+lease, and records a `preflight:<id>`. The server then approves declared and
+proven capabilities for that agent and machine itself (`system:host-preflight`);
+a change to the declaration, preflight commands, test command or profile revokes
+it until the next preflight. `planner.configure_agent_capability_profile` stays
+for overrides and accepts only such records, for the same agent and machine.
 
 Built-in probes cover `source_inspection`, `git_worktree`, `dependency_manifest`,
 `build_execution`, `browser_interaction` and `screenshot`. For any other
@@ -22,7 +23,7 @@ that exits zero only when the equipment works on the host.
 A QA-ready candidate blocked on approval alone opens one Planner job whose
 summary names the owner and action:
 
-- `owner=planner action=capability_approval`: call
+- `owner=planner action=capability_approval` (rare since wave 7A): call
   `planner.configure_agent_capability_profile` with the proven capabilities and
   the cited `preflight:` ref. Approving closes the job.
 - `owner=infrastructure action=capability_preflight_gap`: the preflight cannot

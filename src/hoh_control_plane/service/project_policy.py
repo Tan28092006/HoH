@@ -80,6 +80,9 @@ class ProjectPolicyMixin:
                 next_version,
                 {"configured": True, "timeout_seconds": timeout_seconds},
             )
+            self._revoke_host_preflight_approvals(
+                connection, actor, project_id, "test_command_configured"
+            )
             profile = self._one(
                 connection,
                 "SELECT * FROM project_test_profiles WHERE project_id = ?",
@@ -168,6 +171,10 @@ class ProjectPolicyMixin:
                 "project", project_id, next_version,
                 {"quality_policy": quality_policy, "capabilities": normalized},
             )
+            if (project.get("verification_profile") or {}).get("capabilities") != normalized:
+                self._revoke_host_preflight_approvals(
+                    connection, actor, project_id, "verification_profile_configured"
+                )
             return self._one(
                 connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
             )
