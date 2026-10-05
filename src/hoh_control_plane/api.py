@@ -551,7 +551,7 @@ def create_app(
         limit: int = Query(default=20, ge=1, le=200),
         actor: Actor = Depends(actor_dependency),
     ) -> dict[str, Any]:
-        """Per-ticket phase durations and median/p90 over recent deliveries."""
+        """Wait and service phases per delivered ticket, barrier and queue times, as p50/p90."""
         return {"data": service.cycle_metrics(actor, project_id, limit)}
 
     @app.get("/api/v1/projects/{project_id}/traces/{correlation_id}")

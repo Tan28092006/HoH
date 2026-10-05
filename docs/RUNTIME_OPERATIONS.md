@@ -2,8 +2,13 @@
 
 ## Runner contract in 0.3.5
 
-The supervised host admits at most one QA or integration test worker at a time;
-Git preparation may use the remaining worker capacity. This bounds test-suite
+The supervised host admits at most one worker that runs a project suite at a
+time: a QA run, or a merge whose integration gate executes the suite. A merge
+whose gate reuses a passing QA run of the same commit and command only moves
+Git, so it is admitted in a separate merge lane and does not wait behind a QA
+suite; merges still run one at a time, and that worker is started with
+`--without-test-slot` so it leaves the job queued rather than run a suite. Git
+preparation may use the remaining worker capacity. This bounds test-suite
 overlap, not memory usage of unrelated applications. Before pytest launch the
 runner checks a small free-memory/commit admission floor and retains measured
 host headroom, child peak memory and queryable process/job limits. Allocation

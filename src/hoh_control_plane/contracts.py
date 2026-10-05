@@ -36,13 +36,22 @@ DIGEST_CHARS = 128
 MAX_DEVELOPER_CLAIMS = 50
 DEVELOPER_CLAIM_CHARS = 2_000
 
+# --- Worker usage (service.usage.report_usage)
+# How a ticket was worked: by a fresh subagent the dispatcher started for it, by
+# the waiting dispatcher chat itself, or in a new session started for it.
+MAX_REPORTED_TOKENS = 100_000_000
+
 Verdict = Literal["passed", "failed"]
 FindingStatus = Literal["verified", "failed", "insufficient_evidence", "flaky"]
 ValidationMethod = Literal["black_box", "white_box", "mixed"]
+WorkerKind = Literal["fresh_subagent", "dispatcher", "new_session"]
 
 VERDICTS: frozenset[str] = frozenset(get_args(Verdict))
 FINDING_STATUSES: frozenset[str] = frozenset(get_args(FindingStatus))
 VALIDATION_METHODS: frozenset[str] = frozenset(get_args(ValidationMethod))
+WORKER_KINDS: frozenset[str] = frozenset(get_args(WorkerKind))
+#: The kinds that keep one ticket's transcript out of the next ticket.
+FRESH_WORKER_KINDS: frozenset[str] = frozenset({"fresh_subagent", "new_session"})
 
 
 def _text(max_length: int, min_length: int = 0) -> object:
@@ -61,6 +70,7 @@ Digest = _text(DIGEST_CHARS, 1)
 FindingCriterion = _text(FINDING_CRITERION_CHARS, 1)
 Severity = _text(SEVERITY_CHARS, 1)
 DeveloperClaim = _text(DEVELOPER_CLAIM_CHARS, 1)
+TokenCount = Annotated[int, Field(ge=0, le=MAX_REPORTED_TOKENS)]
 
 
 class ContractModel(BaseModel):

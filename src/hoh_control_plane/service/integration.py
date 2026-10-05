@@ -528,7 +528,7 @@ class IntegrationMixin:
             self._require_mergeable_identity(snapshot)
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
-            self._require_repository_reconciled(connection, project_id)
+            self._require_repository_reconciled(connection, project_id, ticket_id)
             self._expect_version(ticket, expected_version)
             self.require_fresh_context(connection, ticket_id, context_snapshot_id)
             if ticket["status"] != TicketStatus.MERGE_READY.value:
@@ -622,11 +622,19 @@ class IntegrationMixin:
                 "merge_job": self._merge_job(connection, merge_job_id),
             }
 
-    def execute_queued_merge(self, merge_job_id: str) -> dict[str, Any]:
-        """Serialize the Git/DB boundary with recovery using an OS-owned lock."""
+    def execute_queued_merge(self, merge_job_id: str, *, run_suite: bool = True) -> dict[str, Any]:
+        """Serialize the Git/DB boundary with recovery using an OS-owned lock.
+
+        ``run_suite=False`` is how the supervisor runs a merge it admitted outside
+        the host's single test slot because its gate reuses a passing QA run. If
+        that does not hold, the job is left QUEUED and untouched, so the next
+        supervisor tick admits it through the test slot instead.
+        """
         with self.store.connection() as connection:
             job = self._merge_job(connection, merge_job_id)
         if job['status'] != 'QUEUED':
+            return job
+        if not run_suite and not self.merge_gate_reuses_qa_run(merge_job_id):
             return job
         repository, _, _ = self._merge_git_inputs(merge_job_id)
         if repository is None:
@@ -647,7 +655,7 @@ class IntegrationMixin:
             actor = Actor(job["requested_by"], Role.INTEGRATOR, frozenset({job["project_id"]}))
             ticket = self._ticket(connection, job["ticket_id"])
             try:
-                self._require_repository_reconciled(connection, job["project_id"])
+                self._require_repository_reconciled(connection, job["project_id"], job["ticket_id"])
                 if ticket["status"] != TicketStatus.MERGE_READY.value:
                     raise ConflictError(
                         "Ticket is no longer ready for integration before the merge worker started"
@@ -732,6 +740,30 @@ class IntegrationMixin:
             merge_job_id, job, actor, candidate, repository, project, gate_run["test_run_id"],
             gate_mode="executed")
 
+    def merge_gate_reuses_qa_run(self, merge_job_id: str) -> bool:
+        """Whether this merge's gate will reuse a QA run rather than run the suite.
+
+        Read-only; the supervisor asks before admitting the job, so a merge that
+        needs only Git does not wait behind a QA suite for the host's single test
+        slot. The answer can only turn from False to True: a candidate's test
+        profile is written once at submission and a completed passing QA run is
+        never rewritten. An unknown job answers False, the conservative lane.
+        """
+        with self.store.connection() as connection:
+            job = _row(connection.execute(
+                "SELECT candidate_id FROM merge_jobs WHERE merge_job_id = ?", (merge_job_id,)
+            ).fetchone())
+            profile = None if job is None else _row(connection.execute(
+                "SELECT test_command, timeout_seconds FROM candidate_test_profiles "
+                "WHERE candidate_id = ?",
+                (job["candidate_id"],),
+            ).fetchone())
+        if profile is None:
+            return False
+        return self._reusable_qa_run(
+            job["candidate_id"], profile["test_command"], profile["timeout_seconds"]
+        ) is not None
+
     def _reusable_qa_run(self, candidate_id: str, command: list[str], timeout_seconds: int) -> str | None:
         """A passing QA run of the frozen command on this exact candidate commit.
 
@@ -764,7 +796,7 @@ class IntegrationMixin:
                 raise ConflictError("Candidate changed while the integration gate ran")
             with self.store.connection(immediate=True) as connection:
                 current_ticket = self._ticket(connection, job["ticket_id"])
-                self._require_repository_reconciled(connection, job["project_id"])
+                self._require_repository_reconciled(connection, job["project_id"], job["ticket_id"])
                 self._expect_version(current_ticket, job["expected_version"])
                 self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
                 self._event(connection, actor, job["project_id"], "integration.gate_passed", "merge_job",
@@ -903,7 +935,7 @@ class IntegrationMixin:
             # candidate already on main; completion opens the next
             # reconciliation, so Planner still assesses this commit.
             if not merged and not (recovered and retirement_pending):
-                self._require_repository_reconciled(connection, job["project_id"])
+                self._require_repository_reconciled(connection, job["project_id"], job["ticket_id"])
             if ticket["status"] != TicketStatus.MERGE_READY.value:
                 raise ConflictError("Ticket changed while the merge worker ran")
             self._expect_version(ticket, job["expected_version"])
@@ -949,6 +981,20 @@ class IntegrationMixin:
                     {"candidate_id": job["candidate_id"], "mainline_commit": mainline_commit},
                 )
                 rework_ticket = self._ticket(connection, job["ticket_id"])
+                # A gate regression leaves main untouched. Drift means main moved,
+                # but when HoH had already observed main at this commit (a merge
+                # or a sync recorded it) that movement opened its own
+                # reconciliation; this ticket only needs a rebase. Either way only
+                # the ticket and its dependents freeze. Drift onto a commit HoH
+                # never observed is outside work arriving, and closes the project.
+                observed_mainline = connection.execute(
+                    "SELECT observed_mainline_commit FROM project_repositories WHERE project_id = ?",
+                    (job["project_id"],),
+                ).fetchone()
+                ticket_scoped = bool(regression_failure) or (
+                    observed_mainline is not None
+                    and observed_mainline["observed_mainline_commit"] == mainline_commit
+                )
                 self._open_commit_reconciliation(
                     connection,
                     actor,
@@ -962,6 +1008,10 @@ class IntegrationMixin:
                     relation=("integration_gate_failed" if regression_failure else "integration_base_drift"),
                     observation_ref=f"merge_job:{merge_job_id}",
                     advance_mainline=not bool(regression_failure),
+                    frozen_ticket_ids=(
+                        self._frozen_ticket_closure(connection, job["ticket_id"])
+                        if ticket_scoped else None
+                    ),
                 )
                 self._queue_ticket(connection, actor, job["project_id"], rework_ticket)
                 # A drifted candidate is a planning problem as much as a rework

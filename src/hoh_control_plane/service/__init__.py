@@ -85,6 +85,7 @@ from hoh_control_plane.service.qa import QaMixin
 from hoh_control_plane.service.candidates import CandidateMixin
 from hoh_control_plane.service.developer import DeveloperMixin
 from hoh_control_plane.service.board import BoardMixin
+from hoh_control_plane.service.usage import UsageMixin
 from hoh_control_plane.service.idempotency import IdempotencyMixin
 from hoh_control_plane.service.planner_jobs import PlannerJobMixin
 from hoh_control_plane.service.leases import LeaseMixin
@@ -113,6 +114,7 @@ class ControlPlaneService(
     CandidateMixin,
     DeveloperMixin,
     BoardMixin,
+    UsageMixin,
     IdempotencyMixin,
     PlannerJobMixin,
     LeaseMixin,

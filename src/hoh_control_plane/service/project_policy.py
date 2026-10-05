@@ -352,7 +352,7 @@ class ProjectPolicyMixin:
         self._bounded_text(reason, "reason", 2000)
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
-            self._require_repository_reconciled(connection, project_id)
+            self._require_repository_reconciled(connection, project_id, ticket_id)
             self._expect_version(ticket, expected_version)
             if TicketStatus(ticket["status"]) not in {
                 TicketStatus.BACKLOG, TicketStatus.READY, TicketStatus.BLOCKED,

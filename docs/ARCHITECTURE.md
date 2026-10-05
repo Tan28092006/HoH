@@ -82,7 +82,8 @@ helper you are about to change across `service/`.
 | `spec.py` | Spec digest |
 | `session.py` | `session.bootstrap` |
 | `developer.py` | Progress and blockers |
-| `board.py` | Board, event lists and digests for the UI |
+| `board.py` | Board, event lists and digests for the UI; `cycle_metrics` |
+| `usage.py` | `work.report_usage` and the dispatcher session soft cap |
 | `idempotency.py` | Idempotency key reservation and replay |
 | `validation.py` | Version checks, audit `_event`, bounded-text validators |
 
@@ -177,7 +178,7 @@ helper you are about to change across `service/`.
 | --- | --- | --- |
 | Role sees only its tools | Per-credential FastMCP in `mcp/server.py` and `mcp/http_app.py`; `require_role` in the service | `test_mcp.py`, `test_mcp_transport_auth.py` |
 | One live lease per ticket; lease is the fencing token | Partial unique index in `store_schema.py`; `_claim`, `_require_active_lease` in `leases.py` | `test_postgres_concurrency.py`, `test_git_worktrees.py` |
-| No new claim, offer, submission or merge while a reconciliation is pending | `ExecutionGate` in `service/_common.py`: `require_open` (via `_require_repository_reconciled`) from leases, candidates, integration, worktrees, policy and authoring; `is_closed` for offers in `discovery.py`. `set_ticket_ready` does not call it | `test_team_quality_gates.py`, `test_repository_sync.py` |
+| No new claim, offer, submission or merge while a project-wide reconciliation is pending, or for a ticket a pending ticket-scoped one froze | `ExecutionGate` in `service/_common.py`: `require_open(connection, project_id, ticket_id)` (via `_require_repository_reconciled`) from leases, candidates, integration, worktrees, policy and authoring; `is_closed(..., ticket_id)` for offers in `discovery.py`. The frozen set (`_frozen_ticket_closure` in `repository_reconciliation.py`) is stored on the reconciliation row. `set_ticket_ready` does not call it | `test_team_quality_gates.py`, `test_repository_sync.py`, `test_scoped_barrier.py` |
 | Consequential writes name a fresh packet | `require_fresh_context` in `context.py`; `require_snapshot_id` in `service/_common.py`, called by `submit_candidate`, `queue_candidate_submission`, `submit_qa_verdict` and `queue_merge_candidate`, so REST and MCP both require it | `test_context_snapshots.py`, `test_team_quality_gates.py` |
 | Candidate is one ordinary commit on the frozen base | Candidate verification in `candidates.py` / `git_worktrees.py` | `test_candidate_submission.py` |
 | Merge only the current candidate after a fresh QA pass and isolated gate | `integration.py` queued merge and `merge_intents` reconciliation | `test_integration_async_gate.py`, `test_integration_release_policy.py` |
@@ -190,6 +191,107 @@ helper you are about to change across `service/`.
 | Agents read 12-character SHAs; the store keeps full ones; a commit input is resolved before comparison | `agent_facing` in `_common.py` (packets in `context.py`, results in `mcp/invoke.py`); `_full_commit` in `validation.py` | `test_short_shas.py` |
 | A claim hands the dispatcher a self-contained brief; QA sees Developer claims only by reference; packets name each author | `_worker_brief` in `leases.py`; `_compact_artifacts` and `_SECTION_SOURCES` in `context.py` | `test_worker_brief.py`, `test_context_provenance.py` |
 | Skill text names real tools and stays small | `tests/test_skill_assets.py` | — |
+
+## Design decisions
+
+Owner-approved choices, with the reason, so a later change can tell a rule from
+an accident. The release note that shipped each one has the history.
+
+### Scope-partitioned barrier (wave 6D)
+
+The barrier protects the plan, not `main`: fast-forward-only merges of a
+candidate QA ran on its exact base already keep `main` correct. So the scope of
+a reconciliation follows what the result can have invalidated.
+
+- **Project-wide** (`scope = 'project'`): a commit observed by
+  `planner.sync_repository`, a successful merge (still auto-kept when
+  scope-disjoint), and base drift onto a `main` HoH had not observed. Each may
+  change any ticket's plan, and outside work carries no ticket or contract to
+  bound it.
+- **Ticket-scoped** (`scope = 'tickets'`): a QA rejection, an integration gate
+  regression, and base drift onto a `main` HoH had already observed. None moves
+  `main` (the drift's movement was a merge or a sync that opened, and Planner
+  resolved or auto-kept, its own reconciliation), so the frozen set is the
+  judged ticket plus every open ticket depending on it, transitively. Only those
+  tickets are captured, have their offers withdrawn and are refused by the gate;
+  every other ticket keeps flowing. The judged ticket is REWORK or BLOCKED as
+  before; status alone could not freeze it, because a Developer may claim
+  REWORK, and dependents keep their status rather than round-tripping through
+  BLOCKED.
+- One gate, not two: `ExecutionGate` takes an optional `ticket_id`. A ticket is
+  closed while any pending project-wide reconciliation exists or any pending
+  ticket-scoped one names it, so a second reconciliation never shrinks the
+  first's freeze. A call about no particular ticket sees only the project-wide
+  gate. A packet's `planning_barrier` lists only what applies to its ticket, so a
+  rejection elsewhere does not stale it. Execution roles are not woken by a
+  ticket-scoped barrier; Planner is, with `scope` and `frozen_ticket_ids`.
+- Planner resolves both kinds with `planner.resolve_repository_reconciliation`.
+  Commit order is kept where reconciliations meet: a project-wide one waits for
+  every older one, and two ticket-scoped ones wait only when they captured a
+  common ticket.
+- **Merges run in shadow mode.** A merge that auto-keep cannot resolve still
+  closes the whole project. Beside it, `_shadow_merge_partition` stores in
+  `shadow_partition` what a scope rule would have frozen: tickets whose scope
+  root overlaps a merged path, unscoped tickets, and tickets depending on the
+  merged one, transitively; docs/spec, root-file or unknown paths freeze
+  everything. When Planner resolves it, `shadow_agreed` records whether every
+  ticket Planner did not `keep` fell inside that set, and the outcome is added
+  beside the prediction, never into Planner's manifest. `planner.cycle_metrics`
+  reports agreement as `barrier_shadow`. Nothing admits work from the
+  prediction; acting on it waits for the owner to judge the agreement record.
+
+### A merge lane beside the test slot (wave 6E)
+
+The supervisor runs one project suite at a time because more overran host
+memory (release 0.3.30). That slot is held by what runs a suite, not by job
+kind: a QA job, or a merge whose gate executes the suite. A merge whose gate
+reuses a passing QA run (`gate_mode: reused_qa_run`) needs only Git, so
+`Supervisor._lane` admits it to a separate merge lane and it no longer waits up
+to 2,100 s behind a QA suite. Merges stay one at a time; the repository lock
+serializes them anyway. The lane is decided before admission from
+`merge_gate_reuses_qa_run`, whose inputs are frozen (a candidate's test profile
+is written once; a completed passing QA run is never rewritten), so the answer
+can only turn from no to yes. The worker is still started with
+`--without-test-slot` and `execute_queued_merge(run_suite=False)` leaves the job
+QUEUED, untouched, if it would have to run the suite, so a misjudged lane can
+never put a second suite on the host.
+
+### Latency is measured, not argued (wave 6F)
+
+`cycle_metrics` (`board.py`; `planner.cycle_metrics`; REST `cycle-metrics`)
+stays a read-only projection of rows the workflow already writes, and reports
+every distribution as `count`, `p50`, `p90`. Each delivered ticket's lead time
+is split into waits for the next role (ready to Developer claim, freeze to QA
+claim, verdict to Integrator claim) and that role's service (claim to freeze,
+QA claim to verdict, Integrator claim to merge). Markers come from the
+delivered candidate: a new freeze or QA claim resets the later markers, so a
+rework round is Developer service time. Project figures read the most recent
+500 rows: `barrier_open_seconds` (created to resolved, by scope, excluding
+server auto-keeps, plus pending age), `job_queue_seconds` (QA and merge jobs
+queued to started, merges also by gate mode) and suite runs per landed ticket
+(`qa_test_runs` rows: QA runs and executed gates).
+
+### Dispatcher discipline is measured and bounded (wave 6G)
+
+The fresh-worker-per-ticket rule was prose. It is now measured and nudged, but
+deliberately not enforced: the server cannot see whether a chat delegated.
+
+- **Report.** One small tool, `work.report_usage(ticket_id, worker, tokens_in?,
+  tokens_out?)`, for execution roles, rather than optional fields on three
+  writes whose payloads are bound by idempotency keys and contracts.
+  `worker` is `fresh_subagent`, `new_session` or `dispatcher`
+  (`contracts.WorkerKind`); token counts are optional because not every client
+  shows them. Only an agent with a claim event on the ticket may report, and
+  rows go to `ticket_usage_reports`. A rework round reports again.
+- **Measure.** `cycle_metrics.worker_usage` gives, over the delivered tickets,
+  the share whose every reported round used a fresh worker and tokens per
+  ticket (in, out, total) as p50/p90; each ticket row carries its `usage`.
+- **Bound.** `agent.register`, which a chat calls once when it starts, stamps
+  `agent_presence.session_started_at`. When that session has claimed
+  `DISPATCHER_TICKET_LIMIT` (5) distinct tickets, an idle `work.wait_for_event`
+  result (not a wait on the agent's own job) carries `advice:
+  start_new_session`. The server never refuses a claim over it, and a presence
+  from before the column has no session and gets no advice.
 
 ## Change routing
 

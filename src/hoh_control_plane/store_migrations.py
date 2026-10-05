@@ -40,7 +40,10 @@ class SchemaVersionError(SchemaMigrationError):
 # Bump it whenever a release changes the schema, so an older binary started on
 # the upgraded file refuses rather than guessing.
 #   1 -- first recorded version (after 0.3.30): schema_meta, tickets.status CHECK.
-#   2 -- idempotency_records.correlation_id.
+#   2 -- idempotency_records.correlation_id; ticket-scoped reconciliations and
+#        the merge shadow partition (repository_reconciliations.scope,
+#        frozen_ticket_ids, shadow_*), agent_presence.session_started_at and
+#        ticket_usage_reports.
 SCHEMA_VERSION = 2
 
 
@@ -164,6 +167,17 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("experience_notes", "retired_at", "TEXT"),
     ("experience_notes", "retired_by", "TEXT"),
     ("experience_notes", "retired_reason", "TEXT"),
+    # Every reconciliation before these columns closed the whole project, so
+    # 'project' states what was true of each existing row. No row had a frozen
+    # set, a shadow prediction or an agreement to record.
+    ("repository_reconciliations", "scope", "TEXT NOT NULL DEFAULT 'project'"),
+    ("repository_reconciliations", "frozen_ticket_ids", "TEXT"),
+    ("repository_reconciliations", "shadow_partition", "TEXT"),
+    ("repository_reconciliations", "shadow_agreed", "INTEGER"),
+    # When the current agent session registered. NULL for a presence recorded
+    # before the column: its session start is unknown, so no ticket count and
+    # no restart advice is derived from it.
+    ("agent_presence", "session_started_at", "TEXT"),
 )
 
 

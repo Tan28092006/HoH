@@ -73,6 +73,7 @@ CAPABILITY_TOOLS: dict[str, str] = {
     "verdict:submit": "qa.submit_verdict",
     "candidate:integrate": "integrator.merge_candidate",
     "merge:record": "integrator.record_external_landing",
+    "usage:report": "work.report_usage",
 }
 
 
@@ -572,9 +573,13 @@ class DiscoveryMixin:
                 "worktree:prepare",
                 "progress:append",
                 "candidate:submit",
+                "usage:report",
             ],
-            Role.QA: ["work:inbox", "ticket:claim:qa", "tests:execute", "evidence:write", "verdict:submit"],
-            Role.INTEGRATOR: ["work:inbox", "candidate:integrate", "merge:record"],
+            Role.QA: [
+                "work:inbox", "ticket:claim:qa", "tests:execute", "evidence:write",
+                "verdict:submit", "usage:report",
+            ],
+            Role.INTEGRATOR: ["work:inbox", "candidate:integrate", "merge:record", "usage:report"],
             Role.ADMIN: ["*"],
         }
         return common + role_capabilities[actor.role]
@@ -661,8 +666,9 @@ class DiscoveryMixin:
                     (agent_id, role, project_ids, skills, execution_capabilities,
                      capacity, machine_id,
                      last_seen_at, expires_at, created_at, updated_at,
-                     skill_manifest, protocol_version, skill_compatibility, endpoint)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     skill_manifest, protocol_version, skill_compatibility, endpoint,
+                     session_started_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_id) DO UPDATE SET
                     project_ids = excluded.project_ids,
                     skills = excluded.skills,
@@ -675,7 +681,8 @@ class DiscoveryMixin:
                     skill_manifest = excluded.skill_manifest,
                     protocol_version = excluded.protocol_version,
                     skill_compatibility = excluded.skill_compatibility,
-                    endpoint = excluded.endpoint
+                    endpoint = excluded.endpoint,
+                    session_started_at = excluded.session_started_at
                 """,
                 (
                     actor.agent_id,
@@ -693,6 +700,9 @@ class DiscoveryMixin:
                     protocol_version,
                     json.dumps(compatibility),
                     validated_endpoint,
+                    # A chat registers once when it starts (control-plane skill),
+                    # so this marks the session the dispatcher ticket count uses.
+                    _iso(timestamp),
                 ),
             )
             registered = self._presence(connection, actor.agent_id)
@@ -1245,7 +1255,7 @@ class DiscoveryMixin:
     ) -> list[dict[str, Any]]:
         if queue is None or queue["status"] not in {"pending", "offered"}:
             return []
-        if ExecutionGate.is_closed(connection, queue["project_id"]):
+        if ExecutionGate.is_closed(connection, queue["project_id"], queue["ticket_id"]):
             return []
         existing_offer_count = connection.execute(
             "SELECT COUNT(*) FROM work_offers WHERE queue_id = ? AND status = 'offered'",

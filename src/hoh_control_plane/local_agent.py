@@ -212,7 +212,8 @@ def make_prompts(root, project, instance='primary'):
         " This chat is a thin dispatcher: after each claim, pass the claim's "
         '`worker_brief` verbatim to a fresh subagent (Claude Code Agent/Task tool, '
         'Codex `spawn_agent`) and keep only its structured result, never its '
-        'transcript. Without subagents, start a new session per ticket.'
+        'transcript. Without subagents, start a new session per ticket. Report each '
+        'ticket with `work.report_usage`; on `advice: start_new_session` start a new chat.'
     )
     prompts = {}
     for role in ROLES:

@@ -7,6 +7,7 @@ from collections.abc import Callable
 from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
+from hoh_control_plane import contracts
 from hoh_control_plane.observability import correlation_scope
 from hoh_control_plane.domain import Actor, DomainError, Role
 from hoh_control_plane.service import ControlPlaneService
@@ -203,6 +204,34 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
                 "work.report_failure",
                 arguments,
                 lambda: service.report_execution_failure(actor, **arguments),
+                idempotency_key,
+            )
+
+        @server.tool(name="work.report_usage", structured_output=True)
+        def work_report_usage(
+            ticket_id: str,
+            worker: contracts.WorkerKind,
+            tokens_in: contracts.TokenCount | None = None,
+            tokens_out: contracts.TokenCount | None = None,
+            idempotency_key: str | None = None,
+        ) -> dict[str, Any]:
+            """Record how you worked a ticket you claimed, once its worker returns.
+
+            worker is fresh_subagent (you passed the worker_brief to a new
+            subagent), new_session (a session started for this ticket) or
+            dispatcher (this waiting chat did the work itself). Give the worker's
+            token counts when your client shows them. Advisory metrics only.
+            """
+            arguments = {
+                "ticket_id": ticket_id,
+                "worker": worker,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+            }
+            return invoke(
+                "work.report_usage",
+                arguments,
+                lambda: service.report_usage(actor, **arguments),
                 idempotency_key,
             )
 

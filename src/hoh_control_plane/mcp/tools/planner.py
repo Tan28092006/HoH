@@ -45,7 +45,9 @@ def register_lesson_audit(server: FastMCP, service: ControlPlaneService, actor: 
 
         @server.tool(name="planner.cycle_metrics", structured_output=True)
         def planner_cycle_metrics(project_id: str, limit: int = 20) -> dict[str, Any]:
-            """Phase durations (median, p90) over the last delivered tickets; read-only."""
+            """Read-only loop metrics as p50/p90: wait vs service per phase of the last
+            delivered tickets, barrier-open time, QA/merge job queue age, suite runs
+            per landed ticket and the merge barrier shadow agreement."""
             arguments = {"project_id": project_id, "limit": limit}
             return invoke(
                 "planner.cycle_metrics",

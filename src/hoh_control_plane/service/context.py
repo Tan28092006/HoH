@@ -305,7 +305,9 @@ class ContextMixin:
                     "SELECT * FROM project_repositories WHERE project_id = ?", (project_id,)
                 ).fetchone()
             )
-            planning_barrier = self._repository_reconciliation_state(connection, project_id)
+            planning_barrier = self._repository_reconciliation_state(
+                connection, project_id, ticket_id
+            )
             retirement = _row(connection.execute(
                 """
                 SELECT * FROM ticket_retirement_requests
@@ -845,7 +847,7 @@ class ContextMixin:
         current_reconciliation_refs = [
             item["observation_ref"]
             for item in self._repository_reconciliation_state(
-                connection, recorded["project_id"]
+                connection, recorded["project_id"], ticket_id
             )["pending"]
         ]
         if observed.get("repository_reconciliation_refs", []) != current_reconciliation_refs:

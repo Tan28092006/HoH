@@ -27,6 +27,7 @@ JOBS = {
     'merge': ('merge_jobs', 'merge_job_id', 'execute_queued_merge', 'fail_queued_merge'),
 }
 ADMIN = Actor('hoh-supervisor', Role.ADMIN, frozenset({'*'}))
+TEST_LANE, MERGE_LANE, GIT_LANE = 'test', 'merge', 'git'
 
 
 def now():
@@ -72,6 +73,9 @@ class Supervisor:
         self.worker_timeout = worker_timeout
         self.runner_id = socket.gethostname() + ':' + hashlib.sha256(str(service.store.artifact_root.resolve()).encode()).hexdigest()[:16]
         self.active = {}
+        # The lane each active job was admitted to: 'test' for a job that runs a
+        # project suite, 'merge' for a merge that only moves Git, 'git' otherwise.
+        self.lanes = {}
         self.stopping = threading.Event()
         self.pool = None
         self.lock = exclusive_file_lock(service.store.artifact_root / 'supervisor.lock')
@@ -104,6 +108,25 @@ class Supervisor:
         with self.service.store.connection() as db:
             row = db.execute(f'SELECT * FROM {table} WHERE {key} = ?', (identifier,)).fetchone()
         return None if row is None else dict(row)
+
+    def _lane(self, kind, identifier):
+        """Which admission lane a queued job needs.
+
+        Only a QA run and a merge whose gate must execute the suite hold the
+        memory-heavy test slot. Whether a merge reuses a QA run is decided from
+        frozen inputs (the candidate's test profile and a completed passing run),
+        so the answer cannot turn false between admission and execution; the
+        worker still re-checks and leaves the job queued if it would.
+        """
+        if kind == 'qa':
+            return TEST_LANE
+        if kind == 'merge':
+            try:
+                reuses = self.service.merge_gate_reuses_qa_run(identifier)
+            except Exception:
+                reuses = False  # Unknown or unreadable: take the conservative lane.
+            return MERGE_LANE if reuses else TEST_LANE
+        return GIT_LANE
 
     def _pending(self):
         # Constants define all SQL identifiers. Limit each source before sorting.
@@ -179,9 +202,13 @@ class Supervisor:
                 db.execute('UPDATE worker_executions SET heartbeat_at = ? WHERE execution_id = ?', (now(), execution_id))
             return lease is None or datetime.fromisoformat(lease['expires_at'].replace('Z', '+00:00')) <= datetime.now(UTC)
         outcome = 'worker error'
+        arguments = [sys.executable, '-m', 'hoh_control_plane.managed_worker',
+                     '--database', database, '--kind', kind, '--job-id', identifier]
+        if self.lanes.get((kind, identifier)) == MERGE_LANE:
+            # Admitted without the test slot: the worker must not run a suite.
+            arguments.append('--without-test-slot')
         try:
-            result = run_managed([sys.executable, '-m', 'hoh_control_plane.managed_worker',
-                '--database', database, '--kind', kind, '--job-id', identifier],
+            result = run_managed(arguments,
                 cwd=self.service.store.artifact_root, env=environment, timeout=self.worker_timeout, cancel=revoked)
             outcome = 'cancelled' if result.cancelled else 'timeout' if result.timed_out else f'exit {result.returncode}'
         finally:
@@ -203,6 +230,7 @@ class Supervisor:
                 if future.exception() is not None:
                     print(json.dumps({'event': 'worker_error', 'kind': key[0], 'job_id': key[1], 'error_type': type(future.exception()).__name__}), flush=True)
                 del self.active[key]
+                self.lanes.pop(key, None)
         if time.monotonic() - self.last_recovery > 5:
             self.recover()
             self.last_recovery = time.monotonic()
@@ -217,17 +245,25 @@ class Supervisor:
             for key in self._pending():
                 if len(self.active) >= self.max_workers:
                     break
-                # QA and protected merge both execute project suites. One host
-                # runs one such memory-heavy job at a time; Git provisioning and
-                # submission can still use spare worker capacity.
-                if key[0] in {'qa', 'merge'} and any(k[0] in {'qa', 'merge'} for k in self.active):
+                if key in self.active:
                     continue
-                if key not in self.active:
-                    future = self._submit(*key)
-                    if future is None:
-                        break
-                    self.active[key] = future
-                    started += 1
+                lane = self._lane(*key)
+                # One host runs one project suite at a time (the test slot): a QA
+                # run, or a merge whose gate executes the suite. A merge that
+                # reuses a passing QA run only moves Git, so it takes the merge
+                # lane and never waits behind a QA suite; merges still run one
+                # at a time. Provisioning and submission use spare capacity.
+                if lane == TEST_LANE and TEST_LANE in self.lanes.values():
+                    continue
+                if key[0] == 'merge' and any(k[0] == 'merge' for k in self.active):
+                    continue
+                self.lanes[key] = lane
+                future = self._submit(*key)
+                if future is None:
+                    self.lanes.pop(key, None)
+                    break
+                self.active[key] = future
+                started += 1
         return {'started': started, 'active': len(self.active)}
 
     def run_until_idle(self, timeout=60):

@@ -232,6 +232,12 @@ def _pending(service, actor, project, kind=None, identifier=None):
                 (project,),
             ).fetchall()
         ]
+        if actor.role != Role.PLANNER:
+            # A ticket-scoped reconciliation freezes only its tickets, whose
+            # offers it withdrew; an execution role keeps waiting for other work.
+            reconciliations = [
+                item for item in reconciliations if item['scope'] == 'project'
+            ]
         if reconciliations:
             first = reconciliations[0]
             age = barrier_age_seconds(first['created_at'])
@@ -253,6 +259,7 @@ def _pending(service, actor, project, kind=None, identifier=None):
                 'age_seconds': age,
                 'escalation_level': level,
                 'pending_count': len(reconciliations),
+                'scope': first['scope'],
                 'next_action': (
                     'resolve the observation, audit every previously-open ticket, apply '
                     'lifecycle changes, then call planner.resolve_repository_reconciliation'
@@ -261,6 +268,8 @@ def _pending(service, actor, project, kind=None, identifier=None):
                     'until Planner resolves the repository reconciliation'
                 ),
             }
+            if first['scope'] != 'project':
+                payload['frozen_ticket_ids'] = (first.get('frozen_ticket_ids') or [])[:20]
             if level:
                 payload['escalation'] = 'barrier_stale'
                 payload['next_action'] = (
@@ -403,6 +412,18 @@ def _pending(service, actor, project, kind=None, identifier=None):
     })]
 
 
+def _with_dispatcher_advice(service, actor, result, job_kind):
+    """Tell a dispatcher chat that has claimed too many tickets to restart.
+
+    Only an idle wait carries it: a wait on the agent's own job is mid-ticket.
+    Advisory; the server never refuses work because of it.
+    """
+    if job_kind or result.get('status') == 'superseded':
+        return result
+    advice = service.dispatcher_advice(actor)
+    return {**result, **advice} if advice else result
+
+
 def _reserve(db, actor, project, key):
     current = db.execute('SELECT r.agent_id,r.expires_at,w.expires_at AS connection_expiry FROM agent_event_reservations r LEFT JOIN agent_event_waiters w ON w.agent_id=r.agent_id WHERE r.project_id=? AND r.event_key=?', (project, key)).fetchone()
     if current and current['agent_id'] != actor.agent_id and current['expires_at'] > _iso() and (current['connection_expiry'] or '') > _iso():
@@ -512,12 +533,13 @@ async def wait_for_event(service, actor, project_id, *, timeout_seconds=43200,
             result = _deliver(service, actor, project_id, candidates, wait_id)
             if result:
                 state = 'superseded' if result['status'] == 'superseded' else 'notified'
-                return result
+                return _with_dispatcher_advice(service, actor, result, job_kind)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 state = 'timed_out'
-                return {'status': 'timeout', 'event_id': None, 'event': None,
-                        'next_action': SILENT_RESUME}
+                return _with_dispatcher_advice(service, actor, {
+                    'status': 'timeout', 'event_id': None, 'event': None,
+                    'next_action': SILENT_RESUME}, job_kind)
             try:
                 packet = await asyncio.wait_for(asyncio.get_running_loop().sock_recv(receiver, 128), min(remaining, RECOVERY_SECONDS))
                 if packet != wait_id.encode('ascii'):

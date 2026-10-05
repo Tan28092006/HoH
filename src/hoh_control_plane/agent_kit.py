@@ -67,7 +67,8 @@ host; the client needs no HoH Python package or database access for HTTP MCP.
    For Developer, QA and Integrator the session is a dispatcher: after each
    claim, pass the claim's `worker_brief` verbatim to a fresh subagent (Claude
    Code Agent/Task tool, Codex `spawn_agent`) and keep only its structured
-   result. Without subagents, start a new session per ticket.
+   result. Without subagents, start a new session per ticket. Report each
+   ticket with `work.report_usage`; on `advice: start_new_session` start anew.
 
 The authenticated role must match `{role}`. Each concurrently running worker
 needs a distinct identity. Reuse an identity to resume only after its previous
