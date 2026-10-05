@@ -1,3 +1,3 @@
 """Multi-agent engineering control plane."""
 
-__version__ = "0.3.29"
+__version__ = "0.3.30"
