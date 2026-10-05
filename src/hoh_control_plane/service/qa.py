@@ -972,6 +972,9 @@ class QaMixin:
             verdict_ticket = self._ticket(connection, ticket_id)
             reconciliation_id = None
             if verdict == "failed":
+                # A rejection leaves main where it was, so no other ticket's plan
+                # can be wrong because of it: freeze this ticket and the work
+                # built on it, and let every other ticket keep flowing.
                 reconciliation_id = self._open_commit_reconciliation(
                     connection,
                     actor,
@@ -981,6 +984,7 @@ class QaMixin:
                     relation="qa_failed",
                     observation_ref=f"context:{known_failure_entry_id}",
                     branch=candidate.get("branch_ref"),
+                    frozen_ticket_ids=self._frozen_ticket_closure(connection, ticket_id),
                 )
             if verdict in {"passed", "failed"}:
                 self._queue_ticket(connection, actor, project_id, verdict_ticket)

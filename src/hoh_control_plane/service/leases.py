@@ -48,7 +48,7 @@ class LeaseMixin:
             renewed = self._lease(connection, lease_id)
             project_id = self._project_for_ticket(connection, lease["ticket_id"])
             renewed["planning_barrier"] = self._repository_reconciliation_state(
-                connection, project_id
+                connection, project_id, lease["ticket_id"]
             )
             return renewed
 
@@ -268,7 +268,7 @@ class LeaseMixin:
         with self.store.connection(immediate=True) as connection:
             self._expire_lease(connection, ticket_id)
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
-            self._require_repository_reconciled(connection, project_id)
+            self._require_repository_reconciled(connection, project_id, ticket_id)
             self._expect_version(ticket, expected_version)
             self.require_fresh_context(connection, ticket_id, context_snapshot_id)
             self._require_skill_compatible(connection, actor, project_id)

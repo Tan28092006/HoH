@@ -73,6 +73,8 @@ JSON_FIELDS = {
     "decision_manifest",
     "accepted_protocol_versions",
     "accepted_skill_versions",
+    "frozen_ticket_ids",
+    "shadow_partition",
 }
 COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
 
@@ -438,30 +440,67 @@ def require_snapshot_id(context_snapshot_id: Any, tool_name: str) -> str:
     return context_snapshot_id.strip()
 
 
+#: A reconciliation that closes the whole project, and one that closes only its
+#: frozen tickets.
+PROJECT_SCOPE = "project"
+TICKETS_SCOPE = "tickets"
+
+
 class ExecutionGate:
     """The repository reconciliation barrier, read in one place.
 
-    While any reconciliation is PENDING for a project, no new offer, claim,
-    submission or merge starts. Every call site asks this class.
+    A PENDING reconciliation of scope ``project`` (an observed commit, a merge,
+    or drift onto a commit HoH had not observed) stops every new offer, claim,
+    submission and merge in the project. One of scope ``tickets`` comes from a
+    result that left ``main`` where it was -- a QA rejection, a gate regression,
+    or drift onto a main HoH had already observed -- and stops them only for its
+    frozen tickets: that ticket and every open ticket depending on it,
+    transitively. A ticket stays frozen while any pending reconciliation names
+    it, so a second one never shrinks what the first froze. Every call site asks
+    this class and passes the ticket it acts on; a call about no particular
+    ticket sees only the project-wide gate.
     """
 
     @staticmethod
-    def is_closed(connection: Connection, project_id: str) -> bool:
-        return connection.execute(
+    def _frozen(row: Any) -> list[str]:
+        value = row["frozen_ticket_ids"]
+        if isinstance(value, str):
+            value = json.loads(value)
+        return list(value or [])
+
+    @classmethod
+    def is_closed(
+        cls, connection: Connection, project_id: str, ticket_id: str | None = None
+    ) -> bool:
+        for row in connection.execute(
             """
-            SELECT 1 FROM repository_reconciliations
-            WHERE project_id = ? AND status = 'PENDING' LIMIT 1
+            SELECT scope, frozen_ticket_ids FROM repository_reconciliations
+            WHERE project_id = ? AND status = 'PENDING'
             """,
             (project_id,),
-        ).fetchone() is not None
+        ).fetchall():
+            if (row["scope"] or PROJECT_SCOPE) == PROJECT_SCOPE:
+                return True
+            if ticket_id is not None and ticket_id in cls._frozen(row):
+                return True
+        return False
 
     @staticmethod
     def state(
-        connection: Connection, project_id: str
+        connection: Connection, project_id: str, ticket_id: str | None = None
     ) -> dict[str, Any]:
+        """What is pending, and whether execution is closed.
+
+        Without a ticket: every pending reconciliation (Planner must resolve them
+        all), ``repository_reconciliation_required`` only when one is
+        project-wide, and the union of frozen tickets. With a ticket: only what
+        applies to it, so a rejection elsewhere neither appears in nor stales
+        this ticket's packet, and the flag says whether this ticket is closed.
+        """
         rows = connection.execute(
             """
-            SELECT reconciliation_id, observation_ref, observed_commits, created_at
+            SELECT reconciliation_id, observation_ref, observed_commits, created_at,
+                   scope, frozen_ticket_ids
             FROM repository_reconciliations
             WHERE project_id = ? AND status = 'PENDING'
             ORDER BY created_at ASC
@@ -475,17 +514,45 @@ class ExecutionGate:
             value["observed_commit_count"] = len(commits)
             value["commit_refs"] = [item.get("commit") for item in commits[:20]]
             value["opened_at"] = value.pop("created_at", None)
+            value["scope"] = value.get("scope") or PROJECT_SCOPE
+            frozen = value.pop("frozen_ticket_ids", None) or []
+            if value["scope"] == TICKETS_SCOPE:
+                value["frozen_ticket_ids"] = frozen
             pending.append(value)
-        return {"repository_reconciliation_required": bool(pending), "pending": pending}
+        if ticket_id is not None:
+            applicable = [
+                item for item in pending
+                if item["scope"] == PROJECT_SCOPE
+                or ticket_id in item.get("frozen_ticket_ids", [])
+            ]
+            return {
+                "repository_reconciliation_required": bool(applicable),
+                "pending": applicable,
+            }
+        return {
+            "repository_reconciliation_required": any(
+                item["scope"] == PROJECT_SCOPE for item in pending
+            ),
+            "pending": pending,
+            "frozen_ticket_ids": sorted({
+                frozen for item in pending for frozen in item.get("frozen_ticket_ids", [])
+            }),
+        }
 
     @classmethod
     def require_open(
-        cls, connection: Connection, project_id: str
+        cls, connection: Connection, project_id: str, ticket_id: str | None = None
     ) -> None:
-        state = cls.state(connection, project_id)
+        state = cls.state(connection, project_id, ticket_id)
         if state["repository_reconciliation_required"]:
+            project_wide = any(
+                item["scope"] == PROJECT_SCOPE for item in state["pending"]
+            )
             raise ConflictError(
-                "Repository changed after the current plan was formed; Planner must reconcile every open ticket before execution continues",
+                "Repository changed after the current plan was formed; Planner must reconcile every open ticket before execution continues"
+                if project_wide else
+                f"{ticket_id} is frozen until Planner resolves the reconciliation that "
+                "named it; other tickets keep flowing",
                 {"reason": "repository_reconciliation_required", **state},
             )
 

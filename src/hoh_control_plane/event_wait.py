@@ -225,6 +225,12 @@ def _pending(service, actor, project, kind=None, identifier=None):
                 (project,),
             ).fetchall()
         ]
+        if actor.role != Role.PLANNER:
+            # A ticket-scoped reconciliation freezes only its tickets, whose
+            # offers it withdrew; an execution role keeps waiting for other work.
+            reconciliations = [
+                item for item in reconciliations if item['scope'] == 'project'
+            ]
         if reconciliations:
             first = reconciliations[0]
             age = barrier_age_seconds(first['created_at'])
@@ -246,6 +252,7 @@ def _pending(service, actor, project, kind=None, identifier=None):
                 'age_seconds': age,
                 'escalation_level': level,
                 'pending_count': len(reconciliations),
+                'scope': first['scope'],
                 'next_action': (
                     'resolve the observation, audit every previously-open ticket, apply '
                     'lifecycle changes, then call planner.resolve_repository_reconciliation'
@@ -254,6 +261,8 @@ def _pending(service, actor, project, kind=None, identifier=None):
                     'until Planner resolves the repository reconciliation'
                 ),
             }
+            if first['scope'] != 'project':
+                payload['frozen_ticket_ids'] = (first.get('frozen_ticket_ids') or [])[:20]
             if level:
                 payload['escalation'] = 'barrier_stale'
                 payload['next_action'] = (

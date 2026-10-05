@@ -124,10 +124,12 @@ class SessionMixin:
                 result["next_action"] = "resume_assignment"
             elif actor.role == Role.PLANNER:
                 result["next_action"] = "resume_planner_job" if result["planner_assignments"] else "register_then_discover"
-            if result["planning_barrier"]["repository_reconciliation_required"]:
-                result["next_action"] = (
-                    "reconcile_repository_before_any_wait_or_release"
-                    if actor.role == Role.PLANNER
-                    else "preserve_assignment_until_planner_reconciles_repository"
-                )
+            barrier = result["planning_barrier"]
+            # Planner owes a decision on every pending reconciliation, including
+            # a ticket-scoped one; an execution role stops only for one that
+            # closes the project (a frozen ticket is refused at its own claim).
+            if actor.role == Role.PLANNER and barrier["pending"]:
+                result["next_action"] = "reconcile_repository_before_any_wait_or_release"
+            elif actor.role != Role.PLANNER and barrier["repository_reconciliation_required"]:
+                result["next_action"] = "preserve_assignment_until_planner_reconciles_repository"
             return result

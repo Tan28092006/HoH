@@ -9,8 +9,11 @@ integration branch. A remote commit or production note is provenance, not QA
 evidence.
 
 For every observation, use `planner.list_repository_reconciliations`, resolve
-the typed observation and audit every ticket in `ticket_versions`. Give each one
-evidenced disposition:
+the typed observation and audit every ticket in `ticket_versions`. A
+`scope: tickets` reconciliation (QA rejection, gate regression, drift onto an
+already-observed main) captures only `frozen_ticket_ids`, the judged ticket and
+its dependents; the rest of the board keeps executing meanwhile. Give each
+captured ticket one evidenced disposition:
 
 - `keep`: the changed artifact cannot affect requirement, scope, dependency,
   candidate or contract; write why.

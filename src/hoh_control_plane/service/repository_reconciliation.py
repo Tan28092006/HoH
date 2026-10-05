@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from hoh_control_plane.service._common import (
+    PROJECT_SCOPE,
+    TICKETS_SCOPE,
     ExecutionGate,
     Actor,
     Any,
@@ -276,23 +278,7 @@ class RepositoryReconciliationMixin:
                         timestamp,
                     ),
                 )
-                connection.execute(
-                    """
-                    UPDATE work_offers SET status = 'cancelled', closed_at = ?
-                    WHERE status = 'offered' AND queue_id IN (
-                        SELECT queue_id FROM work_queue
-                        WHERE project_id = ? AND status IN ('pending', 'offered')
-                    )
-                    """,
-                    (timestamp, project_id),
-                )
-                connection.execute(
-                    """
-                    UPDATE work_queue SET status = 'pending', updated_at = ?
-                    WHERE project_id = ? AND status = 'offered'
-                    """,
-                    (timestamp, project_id),
-                )
+                self._withdraw_offers(connection, project_id, timestamp)
                 self._event(
                     connection,
                     actor,
@@ -352,12 +338,17 @@ class RepositoryReconciliationMixin:
         advance_mainline: bool = False,
         merged_ticket_id: str | None = None,
         changed_paths: list[str] | None = None,
+        frozen_ticket_ids: list[str] | None = None,
     ) -> str:
         """Open the next Planner turn from a candidate or integration result.
 
         Repository polling covers teammate branches. This path closes the race
         after an internal QA or merge result: the same transaction that records
         the result also closes execution until Planner has assessed it.
+
+        With ``frozen_ticket_ids`` the result left ``main`` unchanged, so only
+        those tickets are captured and closed (scope ``tickets``); every other
+        ticket keeps its offers and claims. Without it the whole project closes.
         """
         project = self._one(
             connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
@@ -386,13 +377,20 @@ class RepositoryReconciliationMixin:
                 (project_id,),
             ).fetchall()
         }
+        scope = PROJECT_SCOPE
+        if frozen_ticket_ids is not None:
+            scope = TICKETS_SCOPE
+            frozen_ticket_ids = sorted(set(frozen_ticket_ids) & set(ticket_versions))
+            ticket_versions = {
+                ticket_id: ticket_versions[ticket_id] for ticket_id in frozen_ticket_ids
+            }
         reconciliation_id = _id(connection, "recon")
         connection.execute(
             """
             INSERT INTO repository_reconciliations
                 (reconciliation_id, project_id, observation_ref, observed_commits,
-                 ticket_versions, status, created_at)
-            VALUES (?, ?, ?, ?, ?, 'PENDING', ?)
+                 ticket_versions, status, created_at, scope, frozen_ticket_ids)
+            VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)
             """,
             (
                 reconciliation_id,
@@ -401,6 +399,8 @@ class RepositoryReconciliationMixin:
                 json.dumps(observed_commits, sort_keys=True),
                 json.dumps(ticket_versions, sort_keys=True),
                 timestamp,
+                scope,
+                None if frozen_ticket_ids is None else json.dumps(frozen_ticket_ids),
             ),
         )
         auto_reason = None
@@ -427,6 +427,19 @@ class RepositoryReconciliationMixin:
                 """,
                 (timestamp, json.dumps(manifest, sort_keys=True), reconciliation_id),
             )
+        elif merged_ticket_id is not None and changed_paths is not None:
+            # Shadow mode: record what the scope rule would have frozen, while
+            # the barrier stays project-wide. Nothing reads this to admit work.
+            connection.execute(
+                "UPDATE repository_reconciliations SET shadow_partition = ? "
+                "WHERE reconciliation_id = ?",
+                (
+                    json.dumps(self._shadow_merge_partition(
+                        connection, list(ticket_versions), merged_ticket_id, changed_paths
+                    ), sort_keys=True),
+                    reconciliation_id,
+                ),
+            )
         if advance_mainline:
             connection.execute(
                 """
@@ -437,23 +450,7 @@ class RepositoryReconciliationMixin:
                 (commit, timestamp, project_id),
             )
         if auto_reason is None:
-            connection.execute(
-                """
-                UPDATE work_offers SET status = 'cancelled', closed_at = ?
-                WHERE status = 'offered' AND queue_id IN (
-                    SELECT queue_id FROM work_queue
-                    WHERE project_id = ? AND status IN ('pending', 'offered')
-                )
-                """,
-                (timestamp, project_id),
-            )
-            connection.execute(
-                """
-                UPDATE work_queue SET status = 'pending', updated_at = ?
-                WHERE project_id = ? AND status = 'offered'
-                """,
-                (timestamp, project_id),
-            )
+            self._withdraw_offers(connection, project_id, timestamp, frozen_ticket_ids)
         next_version = int(project["version"]) + 1
         connection.execute(
             "UPDATE projects SET version = ?, updated_at = ? WHERE project_id = ?",
@@ -473,11 +470,166 @@ class RepositoryReconciliationMixin:
                 "commit": commit,
                 "relation": relation,
                 "auto_resolved": auto_reason is not None,
+                "scope": scope,
+                **(
+                    {"frozen_ticket_ids": frozen_ticket_ids}
+                    if frozen_ticket_ids is not None else {}
+                ),
             },
         )
         return reconciliation_id
 
+    @staticmethod
+    def _withdraw_offers(
+        connection: Connection,
+        project_id: str,
+        timestamp: str,
+        ticket_ids: list[str] | None = None,
+    ) -> None:
+        """Cancel live offers so no agent claims from a plan Planner must review.
+
+        A project-wide reconciliation withdraws every offer in the project; a
+        ticket-scoped one only the frozen tickets' offers.
+        """
+        if ticket_ids is not None and not ticket_ids:
+            return
+        ticket_filter, ticket_values = "", ()
+        if ticket_ids is not None:
+            ticket_filter = f" AND ticket_id IN ({','.join('?' for _ in ticket_ids)})"
+            ticket_values = tuple(ticket_ids)
+        connection.execute(
+            f"""
+            UPDATE work_offers SET status = 'cancelled', closed_at = ?
+            WHERE status = 'offered' AND queue_id IN (
+                SELECT queue_id FROM work_queue
+                WHERE project_id = ? AND status IN ('pending', 'offered'){ticket_filter}
+            )
+            """,
+            (timestamp, project_id, *ticket_values),
+        )
+        connection.execute(
+            f"""
+            UPDATE work_queue SET status = 'pending', updated_at = ?
+            WHERE project_id = ? AND status = 'offered'{ticket_filter}
+            """,
+            (timestamp, project_id, *ticket_values),
+        )
+
+    @staticmethod
+    def _frozen_ticket_closure(connection: Connection, ticket_id: str) -> list[str]:
+        """The ticket and every open ticket that depends on it, transitively.
+
+        A result that did not move ``main`` can invalidate only the plan of the
+        ticket it judged and of work built on that ticket. The walk follows
+        dependency edges through tickets of any status, so a DONE link in the
+        middle of a chain does not hide what lies beyond it; only open tickets
+        are returned, because a terminal one has nothing left to freeze.
+        """
+        seen = {ticket_id}
+        queue = [ticket_id]
+        while queue:
+            current = queue.pop()
+            for row in connection.execute(
+                "SELECT ticket_id FROM ticket_dependencies WHERE depends_on_ticket_id = ?",
+                (current,),
+            ).fetchall():
+                dependent = str(row["ticket_id"])
+                if dependent not in seen:
+                    seen.add(dependent)
+                    queue.append(dependent)
+        placeholders = ",".join("?" for _ in seen)
+        return [
+            str(row["ticket_id"])
+            for row in connection.execute(
+                f"""
+                SELECT ticket_id FROM tickets
+                WHERE ticket_id IN ({placeholders})
+                  AND status NOT IN ('DONE', 'CANCELLED', 'SUPERSEDED')
+                ORDER BY ticket_id
+                """,
+                tuple(sorted(seen)),
+            ).fetchall()
+        ]
+
     _SHARED_PATH_PREFIXES = ("docs/", "spec/", "specs/")
+
+    #: Names the rule a shadow partition was computed with, so agreement figures
+    #: from a later, different rule are never pooled with these.
+    SHADOW_RULE = "scope-closure-v1"
+
+    def _shadow_merge_partition(
+        self,
+        connection: Connection,
+        open_ticket_ids: list[str],
+        merged_ticket_id: str,
+        changed_paths: list[str],
+    ) -> dict[str, Any]:
+        """The tickets a scope-partitioned barrier would freeze after this merge.
+
+        Conservative by construction: a ticket is frozen when its scope root
+        overlaps a merged path, when it has no scope, or when it depends on the
+        merged ticket directly or transitively. A commit touching docs/spec or a
+        repository-root file, or one whose paths are unknown, freezes everything
+        (``project_wide``), since those reach every ticket's plan.
+        """
+        paths = [path.replace("\\", "/").lstrip("/") for path in changed_paths]
+        ordered = sorted(open_ticket_ids)
+        shared = sorted(
+            path for path in paths
+            if "/" not in path or path.lower().startswith(self._SHARED_PATH_PREFIXES)
+        )
+        if not paths or shared:
+            return {
+                "rule": self.SHADOW_RULE,
+                "project_wide": True,
+                "reason": "shared_paths_changed" if shared else "changed_paths_unknown",
+                "frozen_ticket_ids": ordered,
+                "flowing_ticket_ids": [],
+                "changed_path_count": len(paths),
+            }
+        dependents = set(self._frozen_ticket_closure(connection, merged_ticket_id))
+        frozen = []
+        for ticket_id in ordered:
+            row = connection.execute(
+                "SELECT file_scope FROM tickets WHERE ticket_id = ?", (ticket_id,)
+            ).fetchone()
+            ticket_scopes = json.loads(row["file_scope"]) if row and row["file_scope"] else []
+            if (
+                not ticket_scopes
+                or ticket_id in dependents
+                or any(
+                    self._scope_roots_overlap(str(scope), path)
+                    for scope in ticket_scopes
+                    for path in paths
+                )
+            ):
+                frozen.append(ticket_id)
+        return {
+            "rule": self.SHADOW_RULE,
+            "project_wide": False,
+            "reason": "scope_overlap_or_dependency",
+            "frozen_ticket_ids": frozen,
+            "flowing_ticket_ids": [ticket_id for ticket_id in ordered if ticket_id not in frozen],
+            "changed_path_count": len(paths),
+        }
+
+    @staticmethod
+    def _shadow_outcome(
+        partition: dict[str, Any], decisions: dict[str, dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Did every ticket Planner changed fall inside the predicted freeze?
+
+        A ticket Planner did not ``keep`` (revise, cancel, supersede, complete or
+        rework) outside the prediction is a false negative: the partition would
+        have let stale work keep running.
+        """
+        predicted = set(partition.get("frozen_ticket_ids") or [])
+        changed = sorted(
+            ticket_id for ticket_id, item in decisions.items()
+            if item["disposition"] != "keep"
+        )
+        missed = [ticket_id for ticket_id in changed if ticket_id not in predicted]
+        return {"agreed": not missed, "changed_ticket_ids": changed, "missed_ticket_ids": missed}
 
     def _merge_cannot_affect_open_work(
         self,
@@ -569,18 +721,11 @@ class RepositoryReconciliationMixin:
                 raise ValidationError("Repository reconciliation belongs to another project")
             if reconciliation["status"] != "PENDING":
                 return {"reconciliation": reconciliation, **self._repository_reconciliation_state(connection, project_id)}
-            older = connection.execute(
-                """
-                SELECT reconciliation_id FROM repository_reconciliations
-                WHERE project_id = ? AND status = 'PENDING' AND created_at < ?
-                ORDER BY created_at ASC LIMIT 1
-                """,
-                (project_id, reconciliation["created_at"]),
-            ).fetchone()
+            older = self._older_overlapping_reconciliation(connection, reconciliation)
             if older is not None:
                 raise ConflictError(
                     "Resolve repository observations in commit order",
-                    {"reason": "older_reconciliation_pending", "reconciliation_id": older["reconciliation_id"]},
+                    {"reason": "older_reconciliation_pending", "reconciliation_id": older},
                 )
             decisions: dict[str, dict[str, Any]] = {}
             for item in ticket_decisions:
@@ -665,7 +810,26 @@ class RepositoryReconciliationMixin:
                 """,
                 (actor.agent_id, timestamp, json.dumps(manifest, sort_keys=True), reconciliation_id),
             )
-            self._rearm_work_wakeups(connection, project_id)
+            shadow = reconciliation.get("shadow_partition")
+            shadow_outcome = None
+            if shadow:
+                # Scored beside Planner's manifest, never in it: the prediction
+                # stays as it was made and the outcome is added next to it.
+                shadow_outcome = self._shadow_outcome(shadow, decisions)
+                connection.execute(
+                    "UPDATE repository_reconciliations SET shadow_partition = ?, shadow_agreed = ? "
+                    "WHERE reconciliation_id = ?",
+                    (
+                        json.dumps({**shadow, "outcome": shadow_outcome}, sort_keys=True),
+                        int(shadow_outcome["agreed"]),
+                        reconciliation_id,
+                    ),
+                )
+            self._rearm_work_wakeups(
+                connection, project_id,
+                reconciliation["frozen_ticket_ids"]
+                if reconciliation.get("scope") == TICKETS_SCOPE else None,
+            )
             project = self._one(connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,))
             next_version = project["version"] + 1
             connection.execute(
@@ -688,7 +852,16 @@ class RepositoryReconciliationMixin:
             self._event(
                 connection, actor, project_id, "project.repository_reconciled", "project",
                 project_id, next_version,
-                {"reconciliation_id": reconciliation_id, "decision_ref": f"ctx:entry:{entry_id}"},
+                {
+                    "reconciliation_id": reconciliation_id,
+                    "decision_ref": f"ctx:entry:{entry_id}",
+                    "scope": reconciliation["scope"],
+                    **(
+                        {"shadow_agreed": shadow_outcome["agreed"],
+                         "shadow_missed_ticket_ids": shadow_outcome["missed_ticket_ids"]}
+                        if shadow_outcome is not None else {}
+                    ),
+                },
             )
             state = self._repository_reconciliation_state(connection, project_id)
             resolved = self._repository_reconciliation(
@@ -699,18 +872,48 @@ class RepositoryReconciliationMixin:
             )
             return {"reconciliation": resolved, **state}
 
+    def _older_overlapping_reconciliation(
+        self, connection: Connection, reconciliation: dict[str, Any]
+    ) -> str | None:
+        """An older pending reconciliation this one must wait for, if any.
+
+        Observations are resolved in commit order wherever they meet: a
+        project-wide one waits for every older one and is waited for by every
+        newer one; two ticket-scoped ones wait for each other only when they
+        captured a common ticket, so unrelated rejections are decided apart.
+        """
+        scope = reconciliation.get("scope") or PROJECT_SCOPE
+        captured = set(reconciliation["ticket_versions"])
+        for row in connection.execute(
+            """
+            SELECT * FROM repository_reconciliations
+            WHERE project_id = ? AND status = 'PENDING' AND created_at < ?
+            ORDER BY created_at ASC
+            """,
+            (reconciliation["project_id"], reconciliation["created_at"]),
+        ).fetchall():
+            older = self._repository_reconciliation(row)
+            if (
+                scope == PROJECT_SCOPE
+                or (older.get("scope") or PROJECT_SCOPE) == PROJECT_SCOPE
+                or captured & set(older["ticket_versions"])
+            ):
+                return str(older["reconciliation_id"])
+        return None
+
     @staticmethod
     def _repository_reconciliation(row: Any) -> dict[str, Any]:
         value = _row(row) or {}
         for field in ("observed_commits", "ticket_versions", "decision_manifest"):
             if isinstance(value.get(field), str):
                 value[field] = json.loads(value[field])
+        value["scope"] = value.get("scope") or PROJECT_SCOPE
         return value
 
     def _repository_reconciliation_state(
-        self, connection: Connection, project_id: str
+        self, connection: Connection, project_id: str, ticket_id: str | None = None
     ) -> dict[str, Any]:
-        return ExecutionGate.state(connection, project_id)
+        return ExecutionGate.state(connection, project_id, ticket_id)
 
     @staticmethod
     def _with_barrier_age(state: dict[str, Any]) -> dict[str, Any]:
@@ -728,23 +931,33 @@ class RepositoryReconciliationMixin:
         oldest = max((item["age_seconds"] for item in pending), default=0)
         return {**state, "pending": pending, "oldest_age_seconds": oldest}
 
-    def _rearm_work_wakeups(self, connection: Connection, project_id: str) -> None:
+    def _rearm_work_wakeups(
+        self, connection: Connection, project_id: str, ticket_ids: list[str] | None = None
+    ) -> None:
         # A wake-up is delivered once per queue item. A barrier cancelled the
         # offers agents were told about, and they acknowledged that work while
         # blocked. Lifting the barrier forgets those deliveries so the reissued
-        # offers wake an agent again instead of leaving it idle for hours.
+        # offers wake an agent again instead of leaving it idle for hours. A
+        # ticket-scoped barrier withdrew only its frozen tickets' offers, so only
+        # those are re-armed; other agents were never interrupted.
+        if ticket_ids is not None and not ticket_ids:
+            return
+        ticket_filter, ticket_values = "", ()
+        if ticket_ids is not None:
+            ticket_filter = f" AND ticket_id IN ({','.join('?' for _ in ticket_ids)})"
+            ticket_values = tuple(ticket_ids)
         connection.execute(
-            """
+            f"""
             DELETE FROM agent_event_deliveries
             WHERE project_id = ? AND state <> 'pending' AND event_key IN (
                 SELECT 'queue:' || queue_id FROM work_queue
-                WHERE project_id = ? AND status IN ('pending', 'offered')
+                WHERE project_id = ? AND status IN ('pending', 'offered'){ticket_filter}
             )
             """,
-            (project_id, project_id),
+            (project_id, project_id, *ticket_values),
         )
 
     def _require_repository_reconciled(
-        self, connection: Connection, project_id: str
+        self, connection: Connection, project_id: str, ticket_id: str | None = None
     ) -> None:
-        ExecutionGate.require_open(connection, project_id)
+        ExecutionGate.require_open(connection, project_id, ticket_id)

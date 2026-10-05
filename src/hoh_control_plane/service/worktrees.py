@@ -97,7 +97,7 @@ class WorktreeMixin:
         """Authorize the request and read what the Git inspection needs."""
         with self.store.connection() as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
-            self._require_repository_reconciled(connection, project_id)
+            self._require_repository_reconciled(connection, project_id, ticket_id)
             self._expect_version(ticket, expected_version)
             if ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:
                 raise ConflictError("Worktrees can only be prepared for active development work")
@@ -224,7 +224,7 @@ class WorktreeMixin:
         )
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
-            self._require_repository_reconciled(connection, project_id)
+            self._require_repository_reconciled(connection, project_id, ticket_id)
             self._expect_version(ticket, expected_version)
             if ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:
                 raise ConflictError("Worktrees can only be prepared for active development work")
@@ -576,7 +576,7 @@ class WorktreeMixin:
             )
             ticket = self._ticket(connection, provision["ticket_id"])
             try:
-                self._require_repository_reconciled(connection, provision["project_id"])
+                self._require_repository_reconciled(connection, provision["project_id"], provision["ticket_id"])
             except DomainError as error:
                 preflight_error = str(error)
             if preflight_error is None and ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:

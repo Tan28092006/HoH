@@ -48,7 +48,7 @@ class CandidateMixin:
         self._bounded_list(developer_claims, "developer_claims", contracts.MAX_DEVELOPER_CLAIMS, contracts.DEVELOPER_CLAIM_CHARS)
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
-            self._require_repository_reconciled(connection, project_id)
+            self._require_repository_reconciled(connection, project_id, ticket_id)
             self._expect_version(ticket, expected_version)
             self.require_fresh_context(connection, ticket_id, context_snapshot_id)
             if ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:
@@ -141,7 +141,7 @@ class CandidateMixin:
             actor = Actor(job["requested_by"], Role.DEVELOPER, frozenset({job["project_id"]}))
             ticket = self._ticket(connection, job["ticket_id"])
             try:
-                self._require_repository_reconciled(connection, job["project_id"])
+                self._require_repository_reconciled(connection, job["project_id"], job["ticket_id"])
                 if ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:
                     raise ConflictError("Ticket is no longer in active development before candidate validation")
                 self._expect_version(ticket, job["expected_version"])
@@ -208,7 +208,7 @@ class CandidateMixin:
                 return job
             actor = Actor(job["requested_by"], Role.DEVELOPER, frozenset({job["project_id"]}))
             ticket = self._ticket(connection, job["ticket_id"])
-            self._require_repository_reconciled(connection, job["project_id"])
+            self._require_repository_reconciled(connection, job["project_id"], job["ticket_id"])
             if ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:
                 raise ConflictError("Ticket changed while candidate validation ran")
             self._expect_version(ticket, job["expected_version"])
@@ -276,7 +276,7 @@ class CandidateMixin:
         context_snapshot_id: str,
     ) -> None:
         ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
-        self._require_repository_reconciled(connection, project_id)
+        self._require_repository_reconciled(connection, project_id, ticket_id)
         self._expect_version(ticket, expected_version)
         self.require_fresh_context(connection, ticket_id, context_snapshot_id)
         if ticket["status"] != TicketStatus.DEV_IN_PROGRESS.value:

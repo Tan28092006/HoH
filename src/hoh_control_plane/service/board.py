@@ -382,6 +382,7 @@ class BoardMixin:
                         "gate_runs": {"executed": len(gate_modes) - reused, "reused": reused},
                     }
                 )
+            shadow = self._barrier_shadow_summary(connection, project_id)
         summary = {
             name: self._distribution(
                 [ticket["phases_seconds"][name] for ticket in tickets]
@@ -392,7 +393,59 @@ class BoardMixin:
             "project_id": project_id,
             "delivered_tickets": len(tickets),
             "summary": summary,
+            "barrier_shadow": shadow,
             "tickets": tickets,
+        }
+
+    # The most recent reconciliations a project-level figure reads, so the
+    # metric's cost stays bounded however long a project lives.
+    _RECONCILIATION_WINDOW = 500
+
+    def _barrier_shadow_summary(self, connection: Any, project_id: str) -> dict[str, Any]:
+        """How often a scope-partitioned merge barrier would have agreed with Planner.
+
+        Shadow mode only (wave 6D): each merge Planner had to review recorded the
+        tickets the scope rule would have frozen. A disagreement is a ticket
+        Planner revised, cancelled, superseded, completed or reworked outside
+        that set. ``partitioned`` counts the reviews where the rule would have
+        kept some tickets flowing rather than falling back to the whole project.
+        """
+        rows = connection.execute(
+            """
+            SELECT reconciliation_id, status, shadow_partition, shadow_agreed
+            FROM repository_reconciliations
+            WHERE project_id = ? AND shadow_partition IS NOT NULL
+            ORDER BY created_at DESC LIMIT ?
+            """,
+            (project_id, self._RECONCILIATION_WINDOW),
+        ).fetchall()
+        resolved = [row for row in rows if row["status"] == "RESOLVED"]
+        agreed = sum(1 for row in resolved if row["shadow_agreed"] == 1)
+        disagreements = []
+        partitioned = 0
+        flowing = 0
+        for row in resolved:
+            partition = row["shadow_partition"]
+            if isinstance(partition, str):
+                partition = json.loads(partition)
+            if not partition.get("project_wide"):
+                partitioned += 1
+            flowing += len(partition.get("flowing_ticket_ids") or [])
+            if row["shadow_agreed"] == 0:
+                disagreements.append({
+                    "reconciliation_id": row["reconciliation_id"],
+                    "missed_ticket_ids": (partition.get("outcome") or {}).get("missed_ticket_ids", []),
+                })
+        return {
+            "rule": self.SHADOW_RULE,
+            "resolved": len(resolved),
+            "pending": len(rows) - len(resolved),
+            "agreed": agreed,
+            "disagreed": len(resolved) - agreed,
+            "agreement_rate": round(agreed / len(resolved), 3) if resolved else None,
+            "partitioned": partitioned,
+            "tickets_that_would_have_flowed": flowing,
+            "disagreements": disagreements[:10],
         }
 
     @staticmethod

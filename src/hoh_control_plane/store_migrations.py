@@ -40,7 +40,9 @@ class SchemaVersionError(SchemaMigrationError):
 # Bump it whenever a release changes the schema, so an older binary started on
 # the upgraded file refuses rather than guessing.
 #   1 -- first recorded version (after 0.3.30): schema_meta, tickets.status CHECK.
-SCHEMA_VERSION = 1
+#   2 -- ticket-scoped reconciliations and the merge shadow partition
+#        (repository_reconciliations.scope, frozen_ticket_ids, shadow_*).
+SCHEMA_VERSION = 2
 
 
 def read_schema_version(connection: Any, columns_of: Any) -> int:
@@ -160,6 +162,13 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("experience_notes", "retired_at", "TEXT"),
     ("experience_notes", "retired_by", "TEXT"),
     ("experience_notes", "retired_reason", "TEXT"),
+    # Every reconciliation before these columns closed the whole project, so
+    # 'project' states what was true of each existing row. No row had a frozen
+    # set, a shadow prediction or an agreement to record.
+    ("repository_reconciliations", "scope", "TEXT NOT NULL DEFAULT 'project'"),
+    ("repository_reconciliations", "frozen_ticket_ids", "TEXT"),
+    ("repository_reconciliations", "shadow_partition", "TEXT"),
+    ("repository_reconciliations", "shadow_agreed", "INTEGER"),
 )
 
 

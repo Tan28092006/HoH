@@ -39,6 +39,10 @@ CREATE TABLE IF NOT EXISTS project_repositories (
 -- immutable and stays pending until Planner has reconciled the board against
 -- the new artifact.  Execution admission consults this table, so a model
 -- cannot acknowledge a Git event and continue from an old plan by accident.
+-- scope 'project' closes the whole project; scope 'tickets' (a result that did
+-- not move main) closes only frozen_ticket_ids. shadow_partition records the
+-- scope rule's prediction for a merge Planner reviews, and shadow_agreed
+-- whether Planner's non-keep decisions fell inside it (wave 6D, shadow only).
 CREATE TABLE IF NOT EXISTS repository_reconciliations (
     reconciliation_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(project_id),
@@ -49,7 +53,11 @@ CREATE TABLE IF NOT EXISTS repository_reconciliations (
     created_at TEXT NOT NULL,
     resolved_by TEXT,
     resolved_at TEXT,
-    decision_manifest TEXT
+    decision_manifest TEXT,
+    scope TEXT NOT NULL DEFAULT 'project',
+    frozen_ticket_ids TEXT,
+    shadow_partition TEXT,
+    shadow_agreed INTEGER
 );
 CREATE INDEX IF NOT EXISTS repository_reconciliations_project_status
     ON repository_reconciliations(project_id, status, created_at);

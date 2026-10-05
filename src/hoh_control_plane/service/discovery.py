@@ -1243,7 +1243,7 @@ class DiscoveryMixin:
     ) -> list[dict[str, Any]]:
         if queue is None or queue["status"] not in {"pending", "offered"}:
             return []
-        if ExecutionGate.is_closed(connection, queue["project_id"]):
+        if ExecutionGate.is_closed(connection, queue["project_id"], queue["ticket_id"]):
             return []
         existing_offer_count = connection.execute(
             "SELECT COUNT(*) FROM work_offers WHERE queue_id = ? AND status = 'offered'",
