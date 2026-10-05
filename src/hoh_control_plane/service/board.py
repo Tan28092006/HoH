@@ -6,6 +6,7 @@ from hoh_control_plane.service._common import (
     Role,
     ValidationError,
     TicketStatus,
+    _iso,
     _now,
     _row,
     datetime,
@@ -302,26 +303,42 @@ class BoardMixin:
         require_project(actor, project_id)
         return project_id
 
-    # Phase name -> (start marker, end marker). Markers are resolved per ticket
-    # by _cycle_markers from audit events that the workflow already writes.
+    # Phase name -> (kind, start marker, end marker). Markers are resolved per
+    # ticket by _cycle_markers from audit events the workflow already writes.
+    # A wait phase is a ticket sitting in a queue for the next role; a service
+    # phase is that role holding the lease and working.
     _CYCLE_PHASES = (
-        ("ready_to_claim", "ready", "claimed"),
-        ("claim_to_submit", "claimed", "submitted"),
-        ("submit_to_verdict", "submitted", "verdict"),
-        ("verdict_to_merge", "verdict", "delivered"),
-        ("ready_to_merge", "ready", "delivered"),
+        ("ready_to_dev_claim", "wait", "ready", "dev_claim"),
+        ("dev_claim_to_submit", "service", "dev_claim", "submit"),
+        ("submit_to_qa_claim", "wait", "submit", "qa_claim"),
+        ("qa_claim_to_verdict", "service", "qa_claim", "verdict"),
+        ("verdict_to_integrator_claim", "wait", "verdict", "integrator_claim"),
+        ("integrator_claim_to_merged", "service", "integrator_claim", "delivered"),
     )
     _DELIVERY_EVENTS = ("integration.completed", "integration.landed_ungated")
+    _MARKER_EVENTS = (
+        "ticket.ready", "ticket.claimed", "candidate.frozen", "qa.started",
+        "ticket.verified", "integration.started", *_DELIVERY_EVENTS,
+    )
 
     def cycle_metrics(self, actor: Actor, project_id: str, limit: int = 20) -> dict[str, Any]:
-        """How long the loop takes, per delivered ticket and as median/p90.
+        """How long the loop takes and where the time goes, as p50/p90.
 
-        Read-only: computed from audit_events, qa_test_runs and merge_jobs, so
-        measuring the loop adds nothing to it. Phases use the first READY, the
-        first Developer claim, the last candidate freeze, the last passing QA
-        verdict and the delivery event; a rework round therefore shows up as a
-        longer claim-to-submit phase. Seconds; None where a phase did not occur
-        (an ungated landing has no verdict).
+        Read-only: computed from audit_events, the job tables and
+        repository_reconciliations, so measuring the loop adds nothing to it.
+
+        Per delivered ticket (the most recent ``limit``), each phase is split
+        into waiting for a role and that role's service time. Markers are the
+        first READY, the first Developer claim, the last candidate freeze, the
+        last QA claim and passing verdict of that candidate, the last Integrator
+        claim after it, and the delivery; a rework round therefore shows up in
+        Developer service time. Seconds; None where a phase did not occur (an
+        ungated landing has no QA). ``suite_runs`` counts project-suite
+        executions on the host: QA runs and gates that ran rather than reused.
+
+        Project-level figures read the most recent reconciliations and jobs:
+        how long barriers stayed open, how long QA and merge jobs queued for a
+        worker, and the merge shadow partition's agreement with Planner.
         """
         require_project(actor, project_id)
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
@@ -340,23 +357,30 @@ class BoardMixin:
                 (project_id, *self._DELIVERY_EVENTS, limit),
             ).fetchall()
             tickets: list[dict[str, Any]] = []
+            marker_types = ", ".join("?" for _ in self._MARKER_EVENTS)
             for row in delivered:
                 ticket_id = row["ticket_id"]
                 events = connection.execute(
-                    """
+                    f"""
                     SELECT event_type, actor_role, payload, occurred_at FROM audit_events
                     WHERE project_id = ? AND aggregate_id = ?
-                      AND event_type IN ('ticket.ready', 'ticket.claimed', 'candidate.frozen',
-                                         'ticket.verified', 'integration.completed',
-                                         'integration.landed_ungated')
+                      AND event_type IN ({marker_types})
                     ORDER BY sequence ASC
                     """,
-                    (project_id, ticket_id),
+                    (project_id, ticket_id, *self._MARKER_EVENTS),
                 ).fetchall()
                 markers = self._cycle_markers([dict(event) for event in events])
-                qa_runs = connection.execute(
+                suite_total = int(connection.execute(
                     "SELECT COUNT(*) FROM qa_test_runs WHERE ticket_id = ?", (ticket_id,)
-                ).fetchone()[0]
+                ).fetchone()[0])
+                suite_qa = int(connection.execute(
+                    """
+                    SELECT COUNT(*) FROM qa_test_runs r
+                    JOIN qa_test_jobs j ON j.test_run_id = r.test_run_id
+                    WHERE r.ticket_id = ?
+                    """,
+                    (ticket_id,),
+                ).fetchone()[0])
                 gate_events = connection.execute(
                     """
                     SELECT audit_events.payload FROM audit_events
@@ -370,7 +394,7 @@ class BoardMixin:
                 reused = sum(1 for mode in gate_modes if mode and "reused" in str(mode))
                 phases = {
                     name: self._seconds_between(markers.get(start), markers.get(end))
-                    for name, start, end in self._CYCLE_PHASES
+                    for name, _kind, start, end in self._CYCLE_PHASES
                 }
                 tickets.append(
                     {
@@ -378,24 +402,48 @@ class BoardMixin:
                         "delivered_at": markers.get("delivered") or row["delivered_at"],
                         "gated": markers.get("verdict") is not None,
                         "phases_seconds": phases,
-                        "qa_test_runs": int(qa_runs),
+                        "wait_seconds": self._phase_total(phases, "wait"),
+                        "service_seconds": self._phase_total(phases, "service"),
+                        "ready_to_merged_seconds": self._seconds_between(
+                            markers.get("ready"), markers.get("delivered")
+                        ),
+                        "suite_runs": {
+                            "qa": suite_qa, "gate": suite_total - suite_qa, "total": suite_total,
+                        },
                         "gate_runs": {"executed": len(gate_modes) - reused, "reused": reused},
                     }
                 )
             shadow = self._barrier_shadow_summary(connection, project_id)
+            barriers = self._barrier_open_summary(connection, project_id)
+            queues = self._job_queue_summary(connection, project_id)
         summary = {
-            name: self._distribution(
+            name: {"kind": kind, **self._distribution(
                 [ticket["phases_seconds"][name] for ticket in tickets]
-            )
-            for name, _start, _end in self._CYCLE_PHASES
+            )}
+            for name, kind, _start, _end in self._CYCLE_PHASES
+        }
+        for total in ("wait_seconds", "service_seconds", "ready_to_merged_seconds"):
+            summary[total] = self._distribution([ticket[total] for ticket in tickets])
+        summary["suite_runs_per_landed_ticket"] = {
+            **self._distribution([ticket["suite_runs"]["total"] for ticket in tickets]),
+            "total": sum(ticket["suite_runs"]["total"] for ticket in tickets),
         }
         return {
             "project_id": project_id,
             "delivered_tickets": len(tickets),
             "summary": summary,
+            "barrier_open_seconds": barriers,
+            "job_queue_seconds": queues,
             "barrier_shadow": shadow,
             "tickets": tickets,
         }
+
+    def _phase_total(self, phases: dict[str, float | None], kind: str) -> float | None:
+        values = [
+            phases[name] for name, phase_kind, _start, _end in self._CYCLE_PHASES
+            if phase_kind == kind and phases[name] is not None
+        ]
+        return round(sum(values), 3) if values else None
 
     # The most recent reconciliations a project-level figure reads, so the
     # metric's cost stays bounded however long a project lives.
@@ -448,19 +496,125 @@ class BoardMixin:
             "disagreements": disagreements[:10],
         }
 
+    def _barrier_open_summary(self, connection: Any, project_id: str) -> dict[str, Any]:
+        """How long reconciliations kept work waiting for Planner: created to resolved.
+
+        A reconciliation the server resolved in the same transaction (a
+        scope-disjoint merge) never blocked anything, so it is counted apart
+        rather than pulling the percentiles to zero. ``by_scope`` separates the
+        project-wide barrier from ticket-scoped freezes.
+        """
+        rows = connection.execute(
+            """
+            SELECT scope, status, resolved_by, created_at, resolved_at
+            FROM repository_reconciliations
+            WHERE project_id = ?
+            ORDER BY created_at DESC LIMIT ?
+            """,
+            (project_id, self._RECONCILIATION_WINDOW),
+        ).fetchall()
+        reviewed = [
+            row for row in rows
+            if row["status"] == "RESOLVED" and row["resolved_by"] != "system:scope-disjoint"
+        ]
+        durations = {
+            "project": [], "tickets": [],
+        }
+        for row in reviewed:
+            durations.setdefault(row["scope"] or "project", []).append(
+                self._seconds_between(row["created_at"], row["resolved_at"])
+            )
+        pending = [row for row in rows if row["status"] == "PENDING"]
+        now = _iso()
+        return {
+            **self._distribution([value for values in durations.values() for value in values]),
+            "by_scope": {scope: self._distribution(values) for scope, values in durations.items()},
+            "auto_resolved": sum(
+                1 for row in rows if row["resolved_by"] == "system:scope-disjoint"
+            ),
+            "pending": len(pending),
+            "oldest_pending_seconds": max(
+                (self._seconds_between(row["created_at"], now) for row in pending), default=None
+            ),
+        }
+
+    _QUEUE_WINDOW = 500
+
+    def _job_queue_summary(self, connection: Any, project_id: str) -> dict[str, Any]:
+        """How long QA and merge jobs waited for a worker: queued to started.
+
+        This is the test-slot wait the supervisor imposes. Merges are also split
+        by how their gate ran, since a merge that reuses a QA run no longer
+        waits for the slot (wave 6E).
+        """
+        summary: dict[str, Any] = {}
+        for kind, table in (("qa", "qa_test_jobs"), ("merge", "merge_jobs")):
+            rows = connection.execute(
+                f"""
+                SELECT created_at, started_at FROM {table}
+                WHERE project_id = ? AND started_at IS NOT NULL
+                ORDER BY created_at DESC LIMIT ?
+                """,
+                (project_id, self._QUEUE_WINDOW),
+            ).fetchall()
+            queued = connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE project_id = ? AND status = 'QUEUED'",
+                (project_id,),
+            ).fetchone()[0]
+            summary[kind] = {
+                **self._distribution([
+                    self._seconds_between(row["created_at"], row["started_at"]) for row in rows
+                ]),
+                "queued_now": int(queued),
+            }
+        by_mode: dict[str, list[float | None]] = {}
+        for row in connection.execute(
+            """
+            SELECT m.created_at, m.started_at, e.payload FROM merge_jobs m
+            JOIN audit_events e
+              ON e.aggregate_id = m.merge_job_id AND e.event_type = 'integration.gate_passed'
+            WHERE m.project_id = ? AND m.started_at IS NOT NULL
+            ORDER BY m.created_at DESC LIMIT ?
+            """,
+            (project_id, self._QUEUE_WINDOW),
+        ).fetchall():
+            mode = str(self._payload_field(row["payload"], "gate_mode") or "unknown")
+            by_mode.setdefault(mode, []).append(
+                self._seconds_between(row["created_at"], row["started_at"])
+            )
+        summary["merge"]["by_gate_mode"] = {
+            mode: self._distribution(values) for mode, values in sorted(by_mode.items())
+        }
+        return summary
+
     @staticmethod
     def _cycle_markers(events: list[dict[str, Any]]) -> dict[str, str]:
+        """Phase boundaries from a ticket's events, read in order.
+
+        A new candidate restarts everything after the freeze, and a new QA
+        claim everything after it, so the downstream markers always belong to
+        the candidate that was finally delivered.
+        """
         markers: dict[str, str] = {}
         for event in events:
             kind, at = event["event_type"], event["occurred_at"]
             if kind == "ticket.ready":
                 markers.setdefault("ready", at)
             elif kind == "ticket.claimed" and event["actor_role"] == Role.DEVELOPER.value:
-                markers.setdefault("claimed", at)
+                markers.setdefault("dev_claim", at)
             elif kind == "candidate.frozen":
-                markers["submitted"] = at
+                markers["submit"] = at
+                for later in ("qa_claim", "verdict", "integrator_claim"):
+                    markers.pop(later, None)
+            elif kind == "qa.started":
+                markers["qa_claim"] = at
+                for later in ("verdict", "integrator_claim"):
+                    markers.pop(later, None)
             elif kind == "ticket.verified":
                 markers["verdict"] = at
+                markers.pop("integrator_claim", None)
+            elif kind == "integration.started":
+                markers["integrator_claim"] = at
             elif kind in BoardMixin._DELIVERY_EVENTS:
                 markers["delivered"] = at
         return markers
@@ -486,7 +640,7 @@ class BoardMixin:
     def _distribution(values: list[float | None]) -> dict[str, Any]:
         present = sorted(value for value in values if value is not None)
         if not present:
-            return {"count": 0, "median": None, "p90": None}
+            return {"count": 0, "p50": None, "p90": None}
 
         def percentile(fraction: float) -> float:
             # Linear interpolation between closest ranks.
@@ -495,4 +649,4 @@ class BoardMixin:
             upper = min(lower + 1, len(present) - 1)
             return round(present[lower] + (present[upper] - present[lower]) * (position - lower), 3)
 
-        return {"count": len(present), "median": percentile(0.5), "p90": percentile(0.9)}
+        return {"count": len(present), "p50": percentile(0.5), "p90": percentile(0.9)}

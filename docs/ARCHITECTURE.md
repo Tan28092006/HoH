@@ -197,6 +197,21 @@ can only turn from no to yes. The worker is still started with
 QUEUED, untouched, if it would have to run the suite, so a misjudged lane can
 never put a second suite on the host.
 
+### Latency is measured, not argued (wave 6F)
+
+`cycle_metrics` (`board.py`; `planner.cycle_metrics`; REST `cycle-metrics`)
+stays a read-only projection of rows the workflow already writes, and reports
+every distribution as `count`, `p50`, `p90`. Each delivered ticket's lead time
+is split into waits for the next role (ready to Developer claim, freeze to QA
+claim, verdict to Integrator claim) and that role's service (claim to freeze,
+QA claim to verdict, Integrator claim to merge). Markers come from the
+delivered candidate: a new freeze or QA claim resets the later markers, so a
+rework round is Developer service time. Project figures read the most recent
+500 rows: `barrier_open_seconds` (created to resolved, by scope, excluding
+server auto-keeps, plus pending age), `job_queue_seconds` (QA and merge jobs
+queued to started, merges also by gate mode) and suite runs per landed ticket
+(`qa_test_runs` rows: QA runs and executed gates).
+
 ## Change routing
 
 | When you change | Also |
