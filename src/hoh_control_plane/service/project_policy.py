@@ -1,6 +1,7 @@
 """Project policy: test command, verification and capability profiles, validation contracts, skill policy."""
 from __future__ import annotations
 
+from hoh_control_plane import contracts
 from hoh_control_plane.service._common import (
     _estimate_tokens,
     _CONTRACT_TOKEN_BUDGET,
@@ -247,9 +248,9 @@ class ProjectPolicyMixin:
         self, acceptance_criteria: list[str], contract: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         self._bounded_list(
-            contract, "validation_contract", 30, 1, required=True, strings_only=False
+            contract, "validation_contract", contracts.CONTRACT_MAX_SCENARIOS, 1, required=True, strings_only=False
         )
-        allowed_methods = {"black_box", "white_box", "mixed"}
+        allowed_methods = contracts.VALIDATION_METHODS
         normalized: list[dict[str, Any]] = []
         seen: list[str] = []
         for index, item in enumerate(contract):
@@ -273,17 +274,18 @@ class ProjectPolicyMixin:
             # The ticket section is protected from compaction, so every character
             # here is carried by every packet for the ticket's whole life.
             self._bounded_text(criterion, f"validation_contract[{index}].criterion", _CONTRACT_TEXT_CHARS)
-            self._bounded_text(scenario_ref, f"validation_contract[{index}].scenario_ref", 200)
+            self._bounded_text(scenario_ref, f"validation_contract[{index}].scenario_ref", contracts.SCENARIO_REF_CHARS)
             self._bounded_text(expected, f"validation_contract[{index}].expected_observation", _CONTRACT_TEXT_CHARS)
             if method not in allowed_methods:
                 raise ValidationError("validation contract method must be black_box, white_box or mixed")
             self._bounded_list(
                 evidence_types, f"validation_contract[{index}].required_evidence_types",
-                20, 50, required=True,
+                contracts.CONTRACT_MAX_EVIDENCE_TYPES, contracts.EVIDENCE_TYPE_CHARS, required=True,
             )
             self._bounded_list(
                 required_capabilities,
-                f"validation_contract[{index}].required_capabilities", 20, 100,
+                f"validation_contract[{index}].required_capabilities",
+                contracts.CONTRACT_MAX_CAPABILITIES, contracts.CAPABILITY_CHARS,
             )
             if len(set(evidence_types)) != len(evidence_types):
                 raise ValidationError("required_evidence_types cannot contain duplicates")

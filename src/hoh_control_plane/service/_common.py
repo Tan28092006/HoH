@@ -13,6 +13,7 @@ from typing import Any
 import secrets
 from uuid import uuid4
 
+from hoh_control_plane import contracts
 from hoh_control_plane.domain import (
     CLOSED_TICKET_STATUSES,
     RETIRABLE_TICKET_STATUSES,
@@ -84,8 +85,10 @@ _CHECKPOINT_CHARS = 200
 # for the ticket's whole life, so it is bounded at write time rather than
 # compacted at read time. Six scenarios of typical length fit; a contract that
 # does not fit is a ticket that should be split.
-_CONTRACT_TEXT_CHARS = 600
-_CONTRACT_TOKEN_BUDGET = 1_200
+# The values live in hoh_control_plane.contracts, which the MCP and REST
+# schemas are built from, so the three cannot drift.
+_CONTRACT_TEXT_CHARS = contracts.CONTRACT_TEXT_CHARS
+_CONTRACT_TOKEN_BUDGET = contracts.CONTRACT_TOKEN_BUDGET
 
 # Retention policy for idempotency records: a replay is honored for this long,
 # after which purge_expired_idempotency_records may delete the row and the same

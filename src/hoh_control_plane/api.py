@@ -25,6 +25,15 @@ from hoh_control_plane.domain import (
 )
 from hoh_control_plane import __version__
 from hoh_control_plane.observability import WorkflowMetrics, correlation_scope
+from hoh_control_plane.contracts import (  # noqa: F401  (FindingInput etc. re-exported)
+    DeveloperClaims,
+    EvidenceInput,
+    FindingInput,
+    Findings,
+    ValidationContract,
+    ValidationScenarioInput,
+    Verdict,
+)
 from hoh_control_plane.seed import seed_demo as seed_demo_data
 from hoh_control_plane.service import ControlPlaneService
 from hoh_control_plane.store_factory import store_from_environment
@@ -59,15 +68,6 @@ class VerificationProfileRequest(StrictModel):
     quality_policy: str = Field(default="claim-evidence-v1", pattern=r"^(legacy|claim-evidence-v1)$")
 
 
-class ValidationScenarioInput(StrictModel):
-    criterion: str = Field(min_length=1, max_length=2000)
-    scenario_ref: str = Field(min_length=1, max_length=1000)
-    method: str = Field(pattern=r"^(black_box|white_box|mixed)$")
-    expected_observation: str = Field(min_length=1, max_length=4000)
-    required_evidence_types: list[str] = Field(min_length=1, max_length=20)
-    required_capabilities: list[str] = Field(default_factory=list, max_length=20)
-
-
 class TicketCreate(StrictModel):
     ticket_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9._-]+$")
     title: str = Field(min_length=1, max_length=240)
@@ -80,13 +80,13 @@ class TicketCreate(StrictModel):
     ticket_type: str = Field(default="feature_work", min_length=1, max_length=50)
     priority: int = Field(default=50, ge=0, le=100)
     ready: bool = False
-    validation_contract: list[ValidationScenarioInput] | None = None
+    validation_contract: ValidationContract | None = None
 
 
 class ValidationContractRequest(StrictModel):
     expected_version: int = Field(ge=1)
     reason: str = Field(min_length=1, max_length=2000)
-    validation_contract: list[ValidationScenarioInput] = Field(min_length=1, max_length=30)
+    validation_contract: ValidationContract
 
 
 class ClaimRequest(StrictModel):
@@ -105,33 +105,16 @@ class CandidateRequest(StrictModel):
     commit_sha: str = Field(min_length=40, max_length=64, pattern=r"^[0-9a-fA-F]+$")
     base_commit: str = Field(min_length=40, max_length=64, pattern=r"^[0-9a-fA-F]+$")
     branch_ref: str = Field(min_length=1, max_length=300)
-    developer_claims: list[str] = Field(default_factory=list, max_length=50)
+    developer_claims: DeveloperClaims = Field(default_factory=list)
     context_snapshot_id: str = Field(min_length=1, max_length=100)
-
-
-class EvidenceInput(StrictModel):
-    type: str = Field(min_length=1, max_length=50)
-    observation: str = Field(min_length=1, max_length=8000)
-    storage_ref: str = Field(min_length=1, max_length=1000)
-    scenario_ref: str | None = Field(default=None, max_length=1000)
-    environment_digest: str | None = Field(default=None, max_length=128)
-    storage_checksum: str | None = Field(default=None, max_length=128)
-
-
-class FindingInput(StrictModel):
-    criterion: str = Field(min_length=1, max_length=2000)
-    status: str = Field(pattern=r"^(verified|failed|insufficient_evidence|flaky)$")
-    severity: str = Field(default="unknown", max_length=30)
-    observation: str = Field(min_length=1, max_length=8000)
-    evidence: list[EvidenceInput] = Field(min_length=1, max_length=30)
 
 
 class VerdictRequest(StrictModel):
     lease_id: str = Field(min_length=1, max_length=100)
     candidate_id: str = Field(min_length=1, max_length=100)
     expected_version: int = Field(ge=1)
-    verdict: str = Field(pattern=r"^(passed|failed)$")
-    findings: list[FindingInput] = Field(min_length=1, max_length=50)
+    verdict: Verdict
+    findings: Findings
     context_snapshot_id: str = Field(min_length=1, max_length=100)
 
 

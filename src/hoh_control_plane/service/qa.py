@@ -8,6 +8,7 @@ _INFRASTRUCTURE_OUTCOMES = frozenset({
     "artifact_mismatch", "test_configuration_error",
 })
 
+from hoh_control_plane import contracts
 from hoh_control_plane.service._common import (
     require_snapshot_id,
     CHECKSUM_ARTIFACT,
@@ -73,7 +74,7 @@ class QaMixin:
         recorded rather than inventing a more specific one.
         """
         if supplied is not None and str(supplied).strip():
-            self._bounded_text(str(supplied), "evidence.scenario_ref", 1000)
+            self._bounded_text(str(supplied), "evidence.scenario_ref", contracts.EVIDENCE_SCENARIO_REF_CHARS)
             return str(supplied)
         return f"criterion:{criterion}"
 
@@ -87,7 +88,7 @@ class QaMixin:
         observation was filed in, which is a weaker but honest statement.
         """
         if supplied is not None and str(supplied).strip():
-            self._bounded_text(str(supplied), "evidence.environment_digest", 128)
+            self._bounded_text(str(supplied), "evidence.environment_digest", contracts.DIGEST_CHARS)
             return str(supplied)
         recorded = _row(
             connection.execute(
@@ -160,7 +161,7 @@ class QaMixin:
         needs to see the second quietly replacing the first.
         """
         if supplied is not None:
-            self._bounded_text(str(supplied), "evidence.storage_checksum", 128)
+            self._bounded_text(str(supplied), "evidence.storage_checksum", contracts.DIGEST_CHARS)
 
         def recorded_content_digest() -> str:
             if supplied is not None and str(supplied).strip():
@@ -705,9 +706,9 @@ class QaMixin:
     ) -> dict[str, Any]:
         require_role(actor, Role.QA)
         context_snapshot_id = require_snapshot_id(context_snapshot_id, "qa.submit_verdict")
-        if verdict not in {"passed", "failed"}:
+        if verdict not in contracts.VERDICTS:
             raise ValidationError("Verdict must be 'passed' or 'failed'")
-        self._bounded_list(findings, "findings", 50, 1, required=True, strings_only=False)
+        self._bounded_list(findings, "findings", contracts.MAX_FINDINGS, 1, required=True, strings_only=False)
         # Hashing evidence artifacts reads files of any size, so it runs before the
         # write lock is taken; the loop below consumes the results in order.
         checksums = self._precomputed_evidence_checksums(candidate_id, findings)
@@ -762,26 +763,26 @@ class QaMixin:
             timestamp = _iso()
             for finding_data in findings:
                 evidence_items = finding_data.get("evidence") or []
-                self._bounded_text(str(finding_data.get("criterion", "")), "finding.criterion", 2000)
-                self._bounded_text(str(finding_data.get("observation", "")), "finding.observation", 8000)
-                self._bounded_text(str(finding_data.get("severity", "unknown")), "finding.severity", 30)
-                self._bounded_list(evidence_items, "finding.evidence", 30, 1, required=True, strings_only=False)
+                self._bounded_text(str(finding_data.get("criterion", "")), "finding.criterion", contracts.FINDING_CRITERION_CHARS)
+                self._bounded_text(str(finding_data.get("observation", "")), "finding.observation", contracts.OBSERVATION_CHARS)
+                self._bounded_text(str(finding_data.get("severity", "unknown")), "finding.severity", contracts.SEVERITY_CHARS)
+                self._bounded_list(evidence_items, "finding.evidence", contracts.MAX_EVIDENCE_PER_FINDING, 1, required=True, strings_only=False)
                 status = str(finding_data.get("status", ""))
-                if status not in {"verified", "failed", "insufficient_evidence", "flaky"}:
+                if status not in contracts.FINDING_STATUSES:
                     raise ValidationError("QA finding has an invalid status")
                 criterion = str(finding_data.get("criterion", ""))
                 if status == "verified":
                     verified_criteria.add(criterion)
                 evidence_ids = []
                 for item in evidence_items:
-                    self._bounded_text(str(item.get("type", "")), "evidence.type", 50)
-                    self._bounded_text(str(item.get("observation", "")), "evidence.observation", 8000)
+                    self._bounded_text(str(item.get("type", "")), "evidence.type", contracts.EVIDENCE_TYPE_CHARS)
+                    self._bounded_text(str(item.get("observation", "")), "evidence.observation", contracts.OBSERVATION_CHARS)
                     # Canonicalize first, so every rejected reference carries the same
                     # typed reason rather than whichever guard happened to fire.
                     storage_ref = self._canonical_storage_ref(
                         str(item.get("storage_ref", "evidence://inline"))
                     )
-                    self._bounded_text(storage_ref, "evidence.storage_ref", 1000)
+                    self._bounded_text(storage_ref, "evidence.storage_ref", contracts.STORAGE_REF_CHARS)
                     observation = str(item.get("observation", ""))
                     precomputed = checksums.get(id(item))
                     if isinstance(precomputed, Exception):

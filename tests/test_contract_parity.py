@@ -287,3 +287,130 @@ async def test_a_stale_context_error_carries_a_retry_hint_through_mcp(
     )
     assert '"stale":["ticket"]' in message
     assert "ticket.get_context" in message
+
+
+# ---------------------------------------------------------------------------
+# One schema for structured agent writes (review H2). The MCP input schema, the
+# REST model and the service limit all come from hoh_control_plane.contracts.
+
+
+def _resolve(schema: dict, node: dict) -> dict:
+    """Follow a $ref and unwrap an Optional so the test reads the real type."""
+    while True:
+        if "$ref" in node:
+            node = schema["$defs"][node["$ref"].rsplit("/", 1)[1]]
+            continue
+        options = node.get("anyOf")
+        if options and any(option.get("type") == "null" for option in options):
+            node = next(option for option in options if option.get("type") != "null")
+            continue
+        return node
+
+
+async def _input_schema(service, actor: Actor, tool: str) -> dict:
+    tools = {item.name: item for item in await create_mcp_server(service, actor).list_tools()}
+    return tools[tool].inputSchema
+
+
+@pytest.mark.anyio
+async def test_the_verdict_schema_carries_the_service_enums_and_limits(service, actors) -> None:
+    from hoh_control_plane import contracts
+
+    schema = await _input_schema(service, actors["qa"], "qa.submit_verdict")
+    properties = schema["properties"]
+    assert sorted(_resolve(schema, properties["verdict"])["enum"]) == ["failed", "passed"]
+    findings = _resolve(schema, properties["findings"])
+    assert findings["maxItems"] == contracts.MAX_FINDINGS
+    finding = _resolve(schema, findings["items"])
+    assert set(_resolve(schema, finding["properties"]["status"])["enum"]) == contracts.FINDING_STATUSES
+    assert finding["properties"]["criterion"]["maxLength"] == contracts.FINDING_CRITERION_CHARS
+    assert finding["properties"]["observation"]["maxLength"] == contracts.OBSERVATION_CHARS
+    assert finding["additionalProperties"] is False
+    evidence = _resolve(schema, _resolve(schema, finding["properties"]["evidence"])["items"])
+    assert evidence["properties"]["storage_ref"]["maxLength"] == contracts.STORAGE_REF_CHARS
+    assert set(evidence["required"]) == {"type", "observation", "storage_ref"}
+
+
+@pytest.mark.anyio
+async def test_the_candidate_schema_bounds_developer_claims(service, actors) -> None:
+    from hoh_control_plane import contracts
+
+    schema = await _input_schema(service, actors["developer"], "dev.submit_candidate")
+    claims = _resolve(schema, schema["properties"]["developer_claims"])
+    assert claims["maxItems"] == contracts.MAX_DEVELOPER_CLAIMS
+    assert claims["items"]["maxLength"] == contracts.DEVELOPER_CLAIM_CHARS
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tool", ["planner.configure_validation_contract", "planner.create_ticket", "planner.update_ticket"]
+)
+async def test_every_validation_contract_schema_uses_the_service_limits(
+    service, actors, tool
+) -> None:
+    from hoh_control_plane import contracts
+
+    schema = await _input_schema(service, actors["planner"], tool)
+    contract = _resolve(schema, schema["properties"]["validation_contract"])
+    assert contract["maxItems"] == contracts.CONTRACT_MAX_SCENARIOS
+    scenario = _resolve(schema, contract["items"])
+    assert scenario["properties"]["criterion"]["maxLength"] == contracts.CONTRACT_TEXT_CHARS
+    assert scenario["properties"]["expected_observation"]["maxLength"] == contracts.CONTRACT_TEXT_CHARS
+    assert scenario["properties"]["scenario_ref"]["maxLength"] == contracts.SCENARIO_REF_CHARS
+    assert set(_resolve(schema, scenario["properties"]["method"])["enum"]) == contracts.VALIDATION_METHODS
+
+
+def test_rest_and_the_service_share_the_contract_types_and_limits() -> None:
+    from hoh_control_plane import api, contracts
+    from hoh_control_plane.service import _common
+
+    assert api.FindingInput is contracts.FindingInput
+    assert api.EvidenceInput is contracts.EvidenceInput
+    assert api.ValidationScenarioInput is contracts.ValidationScenarioInput
+    assert api.VerdictRequest.model_fields["verdict"].annotation == contracts.Verdict
+    assert _common._CONTRACT_TEXT_CHARS == contracts.CONTRACT_TEXT_CHARS
+    assert _common._CONTRACT_TOKEN_BUDGET == contracts.CONTRACT_TOKEN_BUDGET
+
+
+@pytest.mark.anyio
+async def test_an_uppercase_verdict_is_refused_by_the_schema(service, actors, seeded) -> None:
+    """PASS/FAIL used to fail only deep inside the service; now the schema says so."""
+    with pytest.raises(ToolError) as refused:
+        await create_mcp_server(service, actors["qa"]).call_tool(
+            "qa.submit_verdict",
+            {
+                "ticket_id": seeded["ticket"]["ticket_id"], "lease_id": "lease",
+                "candidate_id": "cand", "expected_version": 1, "verdict": "PASS",
+                "findings": [], "context_snapshot_id": "snapshot",
+            },
+        )
+    assert "verdict" in str(refused.value)
+
+
+def test_the_service_refuses_what_the_contract_refuses(service, actors) -> None:
+    """A contract scenario one character over the limit fails in the service too."""
+    from hoh_control_plane import contracts
+    from hoh_control_plane.domain import ValidationError
+
+    scenario = {
+        "criterion": "c" * (contracts.CONTRACT_TEXT_CHARS + 1), "scenario_ref": "s",
+        "method": "black_box", "expected_observation": "o",
+        "required_evidence_types": ["test_result"],
+    }
+    with pytest.raises(ValidationError, match="at most"):
+        service._validated_validation_contract([scenario["criterion"]], [scenario])
+    with pytest.raises(Exception):
+        contracts.ValidationScenarioInput(**scenario)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("role", ["planner", "developer", "qa", "integrator"])
+async def test_capabilities_name_only_tools_the_role_actually_has(service, actors, role) -> None:
+    """identity.get_capabilities used to advertise work:inbox to Planner."""
+    from hoh_control_plane.service.discovery import CAPABILITY_TOOLS
+
+    actor = actors[role]
+    tool_names = {item.name for item in await create_mcp_server(service, actor).list_tools()}
+    advertised = set(service.capabilities(actor))
+    for capability, tool in CAPABILITY_TOOLS.items():
+        assert (capability in advertised) == (tool in tool_names), (role, capability, tool)

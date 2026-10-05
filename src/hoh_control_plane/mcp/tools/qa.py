@@ -5,6 +5,7 @@ import anyio
 from collections.abc import Callable
 from typing import Any
 from mcp.server.fastmcp import FastMCP
+from hoh_control_plane.contracts import Findings, Verdict, as_payload
 from hoh_control_plane.domain import Actor, Role, ValidationError
 from hoh_control_plane.service import ControlPlaneService
 from hoh_control_plane.mcp.invoke import _require_snapshot
@@ -124,8 +125,8 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
             lease_id: str,
             candidate_id: str,
             expected_version: int,
-            verdict: str,
-            findings: list[dict[str, Any]],
+            verdict: Verdict,
+            findings: Findings,
             context_snapshot_id: str,
             idempotency_key: str | None = None,
         ) -> dict[str, Any]:
@@ -141,7 +142,7 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
                 "candidate_id": candidate_id,
                 "expected_version": expected_version,
                 "verdict": verdict,
-                "findings": findings,
+                "findings": as_payload(findings),
                 "context_snapshot_id": context_snapshot_id,
             }
             return invoke(

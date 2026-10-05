@@ -30,6 +30,50 @@ from hoh_control_plane.service._common import (
 )
 
 
+# Each advertised capability that one MCP tool provides, and that tool.
+# test_contract_parity asserts, per role, that capabilities() advertises the
+# capability exactly when the role's MCP surface registers the tool, so the
+# advertisement cannot promise a tool the role lacks (it once named work:inbox
+# to Planner).
+CAPABILITY_TOOLS: dict[str, str] = {
+    "context:resolve": "context.resolve",
+    "agent:presence": "agent.register",
+    "work:inbox": "work.inbox",
+    "work:wait_for_event": "work.wait_for_event",
+    "skill_compatibility:read": "skill.get_compatibility",
+    "experience:record": "experience.record",
+    "experience:get": "experience.get",
+    "experience:list": "experience.list",
+    "experience:retire": "experience.retire",
+    "feature:write": "planner.create_feature",
+    "ticket:plan": "planner.create_ticket",
+    "ticket:update": "planner.update_ticket",
+    "ticket:split": "planner.split_ticket",
+    "ticket:retire": "planner.retire_ticket_for_reconciliation",
+    "candidate:requeue": "planner.requeue_candidate",
+    "repository:configure": "planner.configure_repository",
+    "repository:sync": "planner.sync_repository",
+    "repository:reconcile": "planner.resolve_repository_reconciliation",
+    "ticket:stop_for_reconciliation": "planner.stop_ticket_for_reconciliation",
+    "external_landing:record": "planner.record_external_landing",
+    "test_command:configure": "planner.configure_test_command",
+    "verification_profile:configure": "planner.configure_verification_profile",
+    "agent_capabilities:approve": "planner.configure_agent_capability_profile",
+    "validation_contract:configure": "planner.configure_validation_contract",
+    "skill_policy:configure": "planner.configure_skill_policy",
+    "ticket:claim:developer": "work.claim",
+    "worktree:prepare": "dev.prepare_worktree",
+    "progress:append": "dev.append_progress",
+    "candidate:submit": "dev.submit_candidate",
+    "ticket:claim:qa": "qa.claim_candidate",
+    "tests:execute": "qa.run_project_tests",
+    "evidence:write": "qa.record_test_run",
+    "verdict:submit": "qa.submit_verdict",
+    "candidate:integrate": "integrator.merge_candidate",
+    "merge:record": "integrator.record_external_landing",
+}
+
+
 # One ticket-level predicate, used as a filter by the row view and as a column
 # by the rollup. Written once so the two views can never disagree about what
 # "waiting on a dependency" means.
@@ -491,7 +535,6 @@ class DiscoveryMixin:
             "ticket:read",
             "context:resolve",
             "agent:presence",
-            "work:inbox",
             "work:wait_for_event",
             "skill_compatibility:read",
             "experience:record",
@@ -518,14 +561,16 @@ class DiscoveryMixin:
                 "experience:list",
                 "experience:retire",
             ],
+            # Execution roles read durable offers; Planner is woken by events.
             Role.DEVELOPER: [
+                "work:inbox",
                 "ticket:claim:developer",
                 "worktree:prepare",
                 "progress:append",
                 "candidate:submit",
             ],
-            Role.QA: ["ticket:claim:qa", "tests:execute", "evidence:write", "verdict:submit"],
-            Role.INTEGRATOR: ["candidate:integrate", "merge:record"],
+            Role.QA: ["work:inbox", "ticket:claim:qa", "tests:execute", "evidence:write", "verdict:submit"],
+            Role.INTEGRATOR: ["work:inbox", "candidate:integrate", "merge:record"],
             Role.ADMIN: ["*"],
         }
         return common + role_capabilities[actor.role]

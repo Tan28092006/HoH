@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 from mcp.server.fastmcp import FastMCP
+from hoh_control_plane.contracts import DeveloperClaims
 from hoh_control_plane.domain import Actor, Role, ValidationError
 from hoh_control_plane.service import ControlPlaneService
 from hoh_control_plane.mcp.invoke import _require_snapshot
@@ -120,7 +121,7 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
             commit_sha: str,
             base_commit: str,
             branch_ref: str,
-            developer_claims: list[str],
+            developer_claims: DeveloperClaims,
             context_snapshot_id: str,
             idempotency_key: str | None = None,
         ) -> dict[str, Any]:

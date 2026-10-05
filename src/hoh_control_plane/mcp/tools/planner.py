@@ -5,6 +5,7 @@ import anyio
 from collections.abc import Callable
 from typing import Any
 from mcp.server.fastmcp import FastMCP
+from hoh_control_plane.contracts import ValidationContract, as_payload
 from hoh_control_plane.domain import Actor, Role, ValidationError
 from hoh_control_plane.service import ControlPlaneService
 
@@ -315,10 +316,11 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
             ticket_type: str = "feature_work",
             priority: int = 50,
             parent_ticket_id: str | None = None,
-            validation_contract: list[dict[str, Any]] | None = None,
+            validation_contract: ValidationContract | None = None,
             idempotency_key: str | None = None,
         ) -> dict[str, Any]:
             """Create a bounded backlog ticket for Developer, QA or Integrator work."""
+            validation_contract = as_payload(validation_contract)
             arguments = {
                 "feature_id": feature_id,
                 "ticket_id": ticket_id,
@@ -372,11 +374,12 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
         def planner_configure_validation_contract(
             ticket_id: str,
             expected_version: int,
-            validation_contract: list[dict[str, Any]],
+            validation_contract: ValidationContract,
             reason: str,
             idempotency_key: str | None = None,
         ) -> dict[str, Any]:
             """Bind every criterion to a scenario, observation and required evidence."""
+            validation_contract = as_payload(validation_contract)
             arguments = {
                 "ticket_id": ticket_id,
                 "expected_version": expected_version,
@@ -617,12 +620,13 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
             objective: str | None = None,
             priority: int | None = None,
             acceptance_criteria: list[str] | None = None,
-            validation_contract: list[dict[str, Any]] | None = None,
+            validation_contract: ValidationContract | None = None,
             preservation_constraints: list[str] | None = None,
             dependency_ids: list[str] | None = None,
             idempotency_key: str | None = None,
         ) -> dict[str, Any]:
             """Update bounded planning fields on an eligible backlog, ready or blocked ticket."""
+            validation_contract = as_payload(validation_contract)
             arguments = {
                 "ticket_id": ticket_id,
                 "expected_version": expected_version,
