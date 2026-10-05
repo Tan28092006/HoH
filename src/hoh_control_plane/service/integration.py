@@ -876,6 +876,16 @@ class IntegrationMixin:
                  actor.agent_id, timestamp, timestamp, candidate["candidate_id"],
                  (candidate.get("qa_evidence_from") or candidate["candidate_id"]) if carry_qa else None),
             )
+            # The patch is still the Developer's: the derived candidate keeps the
+            # original maker's family, never the Integrator's (wave 7C3).
+            if candidate.get("maker_model_family"):
+                connection.execute(
+                    "UPDATE candidates SET maker_model_family = ?, maker_model = ? "
+                    "WHERE candidate_id = ?",
+                    (candidate["maker_model_family"], candidate.get("maker_model"), derived_id),
+                )
+            else:
+                self._stamp_candidate_maker(connection, derived_id, candidate["submitted_by"])
             for path in rebased_paths:
                 connection.execute(
                     "INSERT INTO candidate_changed_paths (candidate_id, path) VALUES (?, ?)",
