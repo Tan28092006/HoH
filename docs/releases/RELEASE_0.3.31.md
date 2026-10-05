@@ -53,4 +53,4 @@ Both fixes come from the [system-design re-review](../reviews/2026-10-05-system-
 
 ## Verification
 
-Full suite with coverage: see the release commit. UI and PostgreSQL tests not run.
+Full suite with coverage: 1116 passed, 31 skipped, coverage 82%. UI and PostgreSQL tests not run.

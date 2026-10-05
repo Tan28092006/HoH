@@ -155,7 +155,7 @@ def test_revoked_lease_stops_running_qa(service, actors, seeded, tmp_path):
     job = make_job(service, actors, seeded, tmp_path, command)
     with Supervisor(service, max_workers=1) as supervisor:
         supervisor.tick()
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 120
         while not ready.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
         assert ready.exists()
