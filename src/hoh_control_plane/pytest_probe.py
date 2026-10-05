@@ -44,10 +44,31 @@ def main():
         "implementation": platform.python_implementation(), "platform": platform.system(),
         "isolated": bool(sys.flags.isolated), "phase": "starting", "provenance_status": "unverified",
         "source_modules": {}, "test_counts": {"passed": 0, "failed": 0, "skipped": 0, "collection_errors": 0},
-        "resource_failures": 0, "resource_before": resources.resource_snapshot(),
+        "resource_failures": 0, "foreign_import_errors": [],
+        "resource_before": resources.resource_snapshot(),
         "dependencies": {d.metadata["Name"]: d.version for d in importlib.metadata.distributions()
                          if d.metadata.get("Name")},
     }
+
+    def foreign_import_path(text):
+        """The failing frame of an import error, when it lies outside the worktree.
+
+        An import that fails inside the candidate's own file is the candidate's
+        fault; one that fails in another checkout or an installed package is the
+        environment's, and is never a reason to send the candidate back.
+        """
+        if "ImportError" not in text and "ModuleNotFoundError" not in text:
+            return None
+        import re
+        paths = re.findall(r"""([A-Za-z]:[\\/][^\s"'<>:|]+?\.py|/[^\s"'<>:|]+?\.py)\b""", text)
+        if not paths:
+            return None
+        last = Path(paths[-1])
+        try:
+            last.resolve().relative_to(root)
+        except (OSError, ValueError):
+            return str(last)
+        return None
 
     def git_sha():
         try:
@@ -129,6 +150,10 @@ def main():
         def pytest_collectreport(self, report):
             if report.failed:
                 facts["test_counts"]["collection_errors"] += 1
+                foreign = foreign_import_path(str(report.longrepr))
+                if foreign and len(facts["foreign_import_errors"]) < 20:
+                    facts["foreign_import_errors"].append(
+                        {"nodeid": report.nodeid[:500], "path": foreign[:500]})
                 save()
 
         @pytest.hookimpl(hookwrapper=True)

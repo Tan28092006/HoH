@@ -345,6 +345,23 @@ with the ordinary tools.
   drift, or when an older pending reconciliation captured one of the same
   tickets (commit order). Planner kept having to restate exactly this.
 
+- **Environment failures are not QA rejections.** `qa_runner._execute_pytest`
+  classifies a run as infrastructure (`INFRASTRUCTURE_REASONS`, shared with
+  `service/qa.py`; the manifest's `classification` is `infrastructure_failure`)
+  on MemoryError, Windows commit exhaustion (0xC000012D) or a paging-file
+  message, pytest exit 2 without a collection error, 3 or 4, a collection
+  import error whose failing frame lies outside the worktree (`pytest_probe`
+  `foreign_import_errors`), or a provenance mismatch. Exit 2 with the
+  candidate's own collection errors stays `test_failure`. Memory, exit-code and
+  foreign-import failures are retried once by the runner with half the xdist
+  workers (`retry_of` in the manifest); what still fails parks the ticket for
+  infrastructure as before and never reaches `MAX_QA_REJECTIONS`. A failed
+  verdict whose evidence cites only infrastructure runs is refused
+  (`verdict_cites_only_infrastructure`). A frozen `-n auto` runs as
+  `min(CPUs, min(free commit, free physical) / 600 MB)` workers, at least one,
+  from `resource_probe`; the frozen command and digest are unchanged and the
+  manifest records `xdist_workers` requested and effective.
+
 ## Change routing
 
 | When you change | Also |

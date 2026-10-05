@@ -31,6 +31,71 @@ _SOURCE_IDENTITY_PROBE = (
 _PYTHON_INTERPRETER_NAMES = frozenset({"python", "python3", "python.exe", "pythonw.exe"})
 _SOURCE_IDENTITY_PROBE_TIMEOUT_SECONDS = 30
 
+# Wave 7A: a run that failed because of the host, not the candidate. These are
+# recorded as infrastructure_failure, retried once with fewer xdist workers, and
+# never count as a QA rejection.
+INFRASTRUCTURE_REASONS = frozenset({
+    "resource_unready", "resource_exhausted", "native_termination", "timeout", "cancelled",
+    "capture_failure", "output_truncated", "launch_failure", "incomplete_evidence",
+    "artifact_mismatch", "test_configuration_error", "pytest_interrupted",
+    "pytest_internal_error", "pytest_usage_error", "foreign_import",
+})
+_RETRIED_REASONS = frozenset({
+    "resource_exhausted", "native_termination", "pytest_interrupted",
+    "pytest_internal_error", "pytest_usage_error", "foreign_import",
+    "test_configuration_error",
+})
+# STATUS_COMMITMENT_LIMIT: Windows ran out of commit (pagefile) memory.
+_OOM_EXIT_CODES = frozenset({0xC000012D, 0xC000012D - 2**32})
+_MEMORY_MARKERS = ("MemoryError", "WinError 1455", "paging file is too small")
+#: Rough peak commit per pytest-xdist worker, used to size "-n auto".
+WORKER_MEMORY_BYTES = 600 * 1024**2
+
+
+def xdist_workers(arguments: list[str]) -> str | None:
+    """The requested xdist worker count ("auto" or a number), if any."""
+    for index, argument in enumerate(arguments):
+        if argument in ("-n", "--numprocesses") and index + 1 < len(arguments):
+            return arguments[index + 1]
+        if argument.startswith("--numprocesses="):
+            return argument.split("=", 1)[1]
+        if argument.startswith("-n") and len(argument) > 2 and not argument.startswith("--"):
+            return argument[2:]
+    return None
+
+
+def with_xdist_workers(arguments: list[str], workers: int) -> list[str]:
+    """The arguments with their xdist worker count replaced by ``workers``."""
+    result: list[str] = []
+    skip = False
+    for index, argument in enumerate(arguments):
+        if skip:
+            skip = False
+            continue
+        if argument in ("-n", "--numprocesses") and index + 1 < len(arguments):
+            result += [argument, str(workers)]
+            skip = True
+        elif argument.startswith("--numprocesses="):
+            result.append(f"--numprocesses={workers}")
+        elif argument.startswith("-n") and len(argument) > 2 and not argument.startswith("--"):
+            result.append(f"-n{workers}")
+        else:
+            result.append(argument)
+    return result
+
+
+def memory_sized_workers(resources: dict, cpu_count: int | None = None) -> int:
+    """Workers the host's free memory can hold: min(commit, physical) / 600 MB,
+    capped at the CPU count, at least one."""
+    cpus = cpu_count or os.cpu_count() or 1
+    free = [
+        resources[key] for key in ("available_commit_bytes", "available_physical_bytes")
+        if isinstance(resources.get(key), int)
+    ]
+    if not free:
+        return cpus
+    return max(1, min(cpus, min(free) // WORKER_MEMORY_BYTES))
+
 
 @dataclass(frozen=True, slots=True)
 class TestExecution:
@@ -252,8 +317,9 @@ class ProjectTestRunner:
             raise ValidationError("Invalid frozen project provenance_modules configuration")
         return modules
 
-    def _execute_pytest(self, command, worktree, timeout, environment):
+    def _execute_pytest(self, command, worktree, timeout, environment, *, retry_of=None):
         flags, arguments = self._pytest_arguments(command)
+        requested_workers = xdist_workers(arguments)
         started = time.perf_counter()
         digest = hashlib.sha256("\0".join(command).encode()).hexdigest()
         modules = self._provenance_modules(worktree)
@@ -262,6 +328,14 @@ class ProjectTestRunner:
                     "provenance_modules": modules, "host_resources": resources,
                     "environment_inputs": {k: environment[k] for k in
                         ("PYTHONPATH", "PYTHONNOUSERSITE", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS") if k in environment}}
+        if retry_of is not None:
+            manifest["retry_of"] = retry_of
+            arguments = retry_of["arguments"]
+        elif requested_workers == "auto":
+            # The frozen command stays as recorded; the run uses what memory holds.
+            arguments = with_xdist_workers(arguments, memory_sized_workers(resources))
+        effective_workers = xdist_workers(arguments)
+        manifest["xdist_workers"] = {"requested": requested_workers, "effective": effective_workers}
         def result(reason, *, child=None, completed=None):
             child = child or {}
             manifest["child"] = child
@@ -275,7 +349,11 @@ class ProjectTestRunner:
                 stdout=completed.stdout if completed else "", stderr=completed.stderr if completed else reason,
                 resolved_source=paths[0] if paths else None, environment_digest=hashlib.sha256(material).hexdigest(),
                 artifact_mismatch=provenance in {"mismatch", "unresolved"}, provenance_status=provenance,
-                termination_reason=reason, environment_manifest=manifest,
+                termination_reason=reason, environment_manifest={
+                    **manifest, "classification": (
+                        "passed" if reason == "passed" else
+                        "infrastructure_failure" if reason in INFRASTRUCTURE_REASONS else
+                        "candidate_failure")},
                 stdout_truncated=bool(completed and completed.stdout_truncated),
                 stderr_truncated=bool(completed and completed.stderr_truncated),
                 capture_errors=completed.capture_errors if completed else ())
@@ -319,19 +397,42 @@ class ProjectTestRunner:
                 reason = "output_truncated"
             elif completed.returncode == 127 and "[hoh:exec-error]" in completed.stderr:
                 reason = "launch_failure"
+            elif completed.returncode in _OOM_EXIT_CODES or child.get("resource_failures") or any(
+                marker in (completed.stderr or "")[-20_000:] or marker in (completed.stdout or "")[-20_000:]
+                for marker in _MEMORY_MARKERS
+            ) and completed.returncode != 0:
+                reason = "resource_exhausted"
             elif completed.returncode < 0 or completed.returncode > 255:
                 reason = "native_termination"
             elif child.get("provenance_status") in {"mismatch", "unresolved"}:
                 reason = "artifact_mismatch"
+            elif child.get("foreign_import_errors"):
+                reason = "foreign_import"
+            elif completed.returncode == 2 and not (child.get("test_counts") or {}).get("collection_errors"):
+                reason = "pytest_interrupted"
+            elif completed.returncode == 3:
+                reason = "pytest_internal_error"
+            elif completed.returncode == 4:
+                reason = "pytest_usage_error"
             elif child.get("phase") != "session_finished":
                 reason = "incomplete_evidence"
-            elif child.get("resource_failures"):
-                reason = "resource_exhausted"
             elif completed.returncode != 0:
+                # 1: tests failed; 2 here: the candidate's own collection errors.
                 reason = "test_failure" if completed.returncode in (1, 2) else "test_configuration_error"
             elif child.get("provenance_status") not in {"verified", "not_applicable"}:
                 reason = "incomplete_evidence"
-            return result(reason, child=child, completed=completed)
+        if retry_of is None and reason in _RETRIED_REASONS:
+            # Once, with half the workers: an environment failure is retried by
+            # the runner, never sent back to the Developer.
+            current = effective_workers
+            retry_arguments = arguments
+            if current is not None and current.isdigit():
+                retry_arguments = with_xdist_workers(arguments, max(1, int(current) // 2))
+            return self._execute_pytest(command, worktree, timeout, environment, retry_of={
+                "reason": reason, "exit_code": completed.returncode,
+                "xdist_workers": current, "arguments": retry_arguments,
+            })
+        return result(reason, child=child, completed=completed)
 
     def _resolve_candidate_source(
         self, command: list[str], worktree_path: str, environment: dict[str, str]
