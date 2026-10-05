@@ -506,7 +506,9 @@ CREATE TABLE IF NOT EXISTS agent_presence (
     skill_compatibility TEXT NOT NULL DEFAULT '{}',
     -- Where to knock. An agent that registers none is not broken: it polls,
     -- which stays a complete path on its own.
-    endpoint TEXT
+    endpoint TEXT,
+    -- When this agent last registered, i.e. when its current chat began.
+    session_started_at TEXT
 );
 CREATE INDEX IF NOT EXISTS agent_presence_role_expiry
     ON agent_presence(role, expires_at);
@@ -746,6 +748,24 @@ CREATE TABLE IF NOT EXISTS agent_tool_calls (
 );
 CREATE INDEX IF NOT EXISTS agent_tool_calls_project_sequence
     ON agent_tool_calls(project_id, sequence);
+
+-- How an execution role says it worked a ticket (work.report_usage): a fresh
+-- worker or the dispatcher chat itself, and the tokens it spent when known.
+-- Self-reported and advisory; it measures dispatcher discipline, it grants
+-- nothing.
+CREATE TABLE IF NOT EXISTS ticket_usage_reports (
+    report_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
+    agent_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    worker TEXT NOT NULL CHECK (worker IN ('fresh_subagent', 'dispatcher', 'new_session')),
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    reported_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ticket_usage_reports_ticket
+    ON ticket_usage_reports(ticket_id, reported_at);
 
 CREATE TABLE IF NOT EXISTS agent_event_waiters (
     agent_id TEXT PRIMARY KEY,

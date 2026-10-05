@@ -38,6 +38,13 @@ has not already produced a Planner job is sent once with `work.report_failure`.
 Normal conflicts, empty queues, transient timeouts and running jobs do not create
 failure context or wake Planner.
 
+An execution role is woken by a project-wide reconciliation only; a
+ticket-scoped one (QA rejection, gate regression) freezes its own tickets and
+wakes Planner. Once an execution chat's session (since its last
+`agent.register`) has claimed five tickets, an idle wait result also carries
+`advice: start_new_session`; a wait on the agent's own job never does. The
+advice refuses nothing.
+
 The local **Phiên agent** dialog shows waiting, notified, timed-out and expired
 connections. It reports HoH-observed connection state, not undocumented internal
 busy state from either GUI. An agent working outside HoH must not advertise

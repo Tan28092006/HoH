@@ -49,7 +49,7 @@ from `event_wait`; `service.discovery` uses the `agent_wakeup` vocabulary.
 
 ## The service
 
-`ControlPlaneService` (`service/__init__.py`) is one class assembled from 24
+`ControlPlaneService` (`service/__init__.py`) is one class assembled from 25
 mixins over a shared kernel, `service/_common.py`. Mixins import only `_common`,
 but they call each other through `self`. About 156 distinct cross-mixin method
 uses exist, and `validation` and `leases` act as a shared kernel for everything.
@@ -79,7 +79,8 @@ helper you are about to change across `service/`.
 | `spec.py` | Spec digest |
 | `session.py` | `session.bootstrap` |
 | `developer.py` | Progress and blockers |
-| `board.py` | Board, event lists and digests for the UI |
+| `board.py` | Board, event lists and digests for the UI; `cycle_metrics` |
+| `usage.py` | `work.report_usage` and the dispatcher session soft cap |
 | `idempotency.py` | Idempotency key reservation and replay |
 | `validation.py` | Version checks, audit `_event`, bounded-text validators |
 
@@ -211,6 +212,28 @@ rework round is Developer service time. Project figures read the most recent
 server auto-keeps, plus pending age), `job_queue_seconds` (QA and merge jobs
 queued to started, merges also by gate mode) and suite runs per landed ticket
 (`qa_test_runs` rows: QA runs and executed gates).
+
+### Dispatcher discipline is measured and bounded (wave 6G)
+
+The fresh-worker-per-ticket rule was prose. It is now measured and nudged, but
+deliberately not enforced: the server cannot see whether a chat delegated.
+
+- **Report.** One small tool, `work.report_usage(ticket_id, worker, tokens_in?,
+  tokens_out?)`, for execution roles, rather than optional fields on three
+  writes whose payloads are bound by idempotency keys and contracts.
+  `worker` is `fresh_subagent`, `new_session` or `dispatcher`
+  (`contracts.WorkerKind`); token counts are optional because not every client
+  shows them. Only an agent with a claim event on the ticket may report, and
+  rows go to `ticket_usage_reports`. A rework round reports again.
+- **Measure.** `cycle_metrics.worker_usage` gives, over the delivered tickets,
+  the share whose every reported round used a fresh worker and tokens per
+  ticket (in, out, total) as p50/p90; each ticket row carries its `usage`.
+- **Bound.** `agent.register`, which a chat calls once when it starts, stamps
+  `agent_presence.session_started_at`. When that session has claimed
+  `DISPATCHER_TICKET_LIMIT` (5) distinct tickets, an idle `work.wait_for_event`
+  result (not a wait on the agent's own job) carries `advice:
+  start_new_session`. The server never refuses a claim over it, and a presence
+  from before the column has no session and gets no advice.
 
 ## Change routing
 

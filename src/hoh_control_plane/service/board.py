@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hoh_control_plane import contracts
 from hoh_control_plane.service._common import (
     Actor,
     Any,
@@ -411,6 +412,7 @@ class BoardMixin:
                             "qa": suite_qa, "gate": suite_total - suite_qa, "total": suite_total,
                         },
                         "gate_runs": {"executed": len(gate_modes) - reused, "reused": reused},
+                        "usage": self._ticket_usage(connection, ticket_id),
                     }
                 )
             shadow = self._barrier_shadow_summary(connection, project_id)
@@ -432,10 +434,55 @@ class BoardMixin:
             "project_id": project_id,
             "delivered_tickets": len(tickets),
             "summary": summary,
+            "worker_usage": self._worker_usage_summary(tickets),
             "barrier_open_seconds": barriers,
             "job_queue_seconds": queues,
             "barrier_shadow": shadow,
             "tickets": tickets,
+        }
+
+    @staticmethod
+    def _ticket_usage(connection: Any, ticket_id: str) -> dict[str, Any]:
+        """What the roles reported about how they worked one ticket (work.report_usage)."""
+        rows = connection.execute(
+            "SELECT worker, tokens_in, tokens_out FROM ticket_usage_reports WHERE ticket_id = ?",
+            (ticket_id,),
+        ).fetchall()
+        if not rows:
+            return {"reports": 0, "fresh_workers": None, "tokens_in": None, "tokens_out": None}
+
+        def total(field: str) -> int | None:
+            values = [row[field] for row in rows if row[field] is not None]
+            return sum(values) if values else None
+
+        return {
+            "reports": len(rows),
+            # Fresh only if every reported round kept its transcript to itself.
+            "fresh_workers": all(row["worker"] in contracts.FRESH_WORKER_KINDS for row in rows),
+            "by_worker": {
+                kind: sum(1 for row in rows if row["worker"] == kind)
+                for kind in sorted({row["worker"] for row in rows})
+            },
+            "tokens_in": total("tokens_in"),
+            "tokens_out": total("tokens_out"),
+        }
+
+    def _worker_usage_summary(self, tickets: list[dict[str, Any]]) -> dict[str, Any]:
+        """Dispatcher discipline over the delivered tickets: who did the work, at what cost."""
+        reported = [ticket["usage"] for ticket in tickets if ticket["usage"]["reports"]]
+        fresh = sum(1 for usage in reported if usage["fresh_workers"])
+
+        def tokens(usage: dict[str, Any]) -> int | None:
+            parts = [usage[field] for field in ("tokens_in", "tokens_out") if usage[field] is not None]
+            return sum(parts) if parts else None
+
+        return {
+            "reported_tickets": len(reported),
+            "unreported_tickets": len(tickets) - len(reported),
+            "fresh_worker_share": round(fresh / len(reported), 3) if reported else None,
+            "tokens_per_ticket": self._distribution([tokens(usage) for usage in reported]),
+            "tokens_in_per_ticket": self._distribution([usage["tokens_in"] for usage in reported]),
+            "tokens_out_per_ticket": self._distribution([usage["tokens_out"] for usage in reported]),
         }
 
     def _phase_total(self, phases: dict[str, float | None], kind: str) -> float | None:

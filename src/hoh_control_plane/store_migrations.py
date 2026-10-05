@@ -41,7 +41,8 @@ class SchemaVersionError(SchemaMigrationError):
 # the upgraded file refuses rather than guessing.
 #   1 -- first recorded version (after 0.3.30): schema_meta, tickets.status CHECK.
 #   2 -- ticket-scoped reconciliations and the merge shadow partition
-#        (repository_reconciliations.scope, frozen_ticket_ids, shadow_*).
+#        (repository_reconciliations.scope, frozen_ticket_ids, shadow_*),
+#        agent_presence.session_started_at and ticket_usage_reports.
 SCHEMA_VERSION = 2
 
 
@@ -169,6 +170,10 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("repository_reconciliations", "frozen_ticket_ids", "TEXT"),
     ("repository_reconciliations", "shadow_partition", "TEXT"),
     ("repository_reconciliations", "shadow_agreed", "INTEGER"),
+    # When the current agent session registered. NULL for a presence recorded
+    # before the column: its session start is unknown, so no ticket count and
+    # no restart advice is derived from it.
+    ("agent_presence", "session_started_at", "TEXT"),
 )
 
 
