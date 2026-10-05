@@ -775,3 +775,74 @@ def test_a_merge_that_may_affect_open_work_waits_for_planner(
     _merge(service, actors, seeded, tmp_path)
 
     assert _latest_reconciliation(service)["status"] == "PENDING"
+
+
+def _snapshot(service, actor, ticket):
+    return service.get_ticket_context(actor, ticket["ticket_id"])["context_snapshot_id"]
+
+
+def test_a_candidate_already_on_main_is_not_queued_as_drift(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    # Someone fast-forwarded main to the candidate by hand. That is delivered
+    # work: the merge must refuse with a landing hint, not send it to rework.
+    from hoh_control_plane.domain import ReleasePolicyError
+    repository, ticket, candidate, verified = _candidate_ready_for_integration(
+        service, actors, seeded, tmp_path
+    )
+    integration = _claimed_for_integration(service, actors, ticket, verified)
+    _git(repository, "merge", "--ff-only", candidate["candidate"]["commit_sha"])
+
+    with pytest.raises(ReleasePolicyError) as refused:
+        service.queue_merge_candidate(
+            actors["integrator"], ticket["ticket_id"],
+            integration["lease"]["lease_id"], integration["ticket"]["version"],
+            context_snapshot_id=_snapshot(service, actors["integrator"], ticket),
+        )
+    assert refused.value.details["reason"] == "candidate_already_on_main"
+
+
+def test_a_candidate_landed_after_queueing_closes_the_job_without_rework(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    repository, ticket, candidate, verified = _candidate_ready_for_integration(
+        service, actors, seeded, tmp_path
+    )
+    integration = _claimed_for_integration(service, actors, ticket, verified)
+    queued = service.queue_merge_candidate(
+        actors["integrator"], ticket["ticket_id"],
+        integration["lease"]["lease_id"], integration["ticket"]["version"],
+        context_snapshot_id=_snapshot(service, actors["integrator"], ticket),
+    )
+    _git(repository, "merge", "--ff-only", candidate["candidate"]["commit_sha"])
+
+    job = service.execute_queued_merge(queued["merge_job"]["merge_job_id"])
+
+    assert job["status"] == "FAILED"
+    assert "candidate_already_on_main" in job["error_message"]
+    with service.store.connection() as connection:
+        status = connection.execute(
+            "SELECT status FROM tickets WHERE ticket_id = ?", (ticket["ticket_id"],)
+        ).fetchone()["status"]
+    assert status != "REWORK"
+
+
+def test_a_committed_claim_survives_contention_while_building_its_brief(
+    service, actors, seeded, monkeypatch
+) -> None:
+    # The lease is committed before the packet is compiled. Contention there
+    # must not surface as an error, or the transport retries a claim the
+    # caller already holds.
+    from hoh_control_plane.store import ContentionError
+    ticket = seeded["ticket"]
+
+    def contended(*args, **kwargs):
+        raise ContentionError("database is busy")
+
+    monkeypatch.setattr(service, "get_ticket_context", contended)
+    claimed = service.claim_ticket(actors["developer"], ticket["ticket_id"], ticket["version"], 900)
+
+    assert claimed["lease"]["lease_id"]
+    assert claimed["current_context_snapshot_id"] is None
+    assert claimed["worker_brief"] is None
+    assert "ticket.get_context" in claimed["next_action"]

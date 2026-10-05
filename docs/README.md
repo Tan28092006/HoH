@@ -16,6 +16,7 @@ its tests win.
 | [PAPER_ALIGNMENT.md](PAPER_ALIGNMENT.md) | Comparing behavior with the Harness-of-Harness paper (`2609.01481v1.pdf` in the root) | snapshot 2026-09-14 |
 | [CONTEXT_DISTRIBUTION_REVIEW.md](CONTEXT_DISTRIBUTION_REVIEW.md) | Changing packet shape, compaction, budgets or long-session behavior | snapshot through 0.3.23 |
 | [reviews/2026-10-harness-architecture-review.md](reviews/2026-10-harness-architecture-review.md) | Planning structural work on the harness; it ranks known risks and refactors | snapshot 2026-10-04 at 0.3.25 |
+| [reviews/2026-10-05-system-design-review.md](reviews/2026-10-05-system-design-review.md) | Re-checking HoH against System Design Interview Vol. 2 after C1–C10; lists remaining gaps with fixes | snapshot 2026-10-05 |
 | [reviews/2026-10-role-agents-as-subagents.md](reviews/2026-10-role-agents-as-subagents.md) | Changing how role chats delegate tickets, the worker brief, QA independence, the rework budget, per-role models, packet provenance or SHA abbreviation | snapshot 2026-10-05 at 0.3.30 + wave 5 |
 | [releases/README.md](releases/README.md) | Relaxing or reshaping an invariant: find the release that introduced it | historical |
 

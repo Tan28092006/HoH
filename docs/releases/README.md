@@ -27,6 +27,7 @@ introduced it. The "Guards" column says what change should trigger that read.
 | [0.3.28](RELEASE_0.3.28.md) | Correctness wave 1: no Git in the write lock, service-enforced snapshots, idempotency, exact evidence match, sync CAS, legacy merge removed, Planner job expiry | Candidate submission, idempotency, repository sync |
 | [0.3.29](RELEASE_0.3.29.md) | Wave 2: MCP error details, resolvable refs, unchanged packets, compact delivery, dir scopes, experience expiry, cycle metrics, less ceremony | Client setup docs, wait protocol wording |
 | [0.3.30](RELEASE_0.3.30.md) | Large modules split (mcp package, planning mixins, store schema/migrations), ExecutionGate | Module layout |
+| [0.3.31](RELEASE_0.3.31.md) | Role agents as subagents (worker brief, QA independence, rework budget, model per role, provenance, short SHAs); guarded transitions, schema version, shared contracts | Claim results, ticket transitions, MCP schemas |
 
 Releases before 0.3.14 are described in
 [RUNTIME_OPERATIONS](../RUNTIME_OPERATIONS.md),

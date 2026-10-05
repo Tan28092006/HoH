@@ -6,6 +6,7 @@ from hoh_control_plane.service._common import (
     Any,
     AuthorizationError,
     ConflictError,
+    DomainError,
     Role,
     SkillCompatibilityError,
     TicketStatus,
@@ -342,12 +343,23 @@ class LeaseMixin:
         # The packet ticket.get_context returns right now, compiled and recorded
         # after the claim committed: an agent can write from it without spending
         # a round trip and a full packet on re-reading.
-        result["current_context_snapshot_id"] = self.get_ticket_context(
-            actor, ticket_id
-        )["context_snapshot_id"]
-        result["worker_brief"] = self._worker_brief(
-            actor, result["ticket"], result["lease"], result["current_context_snapshot_id"]
-        )
+        # The claim has committed. Nothing after this point may fail the call: a
+        # raised error here would make the transport retry a claim the caller
+        # already holds and report a conflict for work it owns.
+        try:
+            result["current_context_snapshot_id"] = self.get_ticket_context(
+                actor, ticket_id
+            )["context_snapshot_id"]
+            result["worker_brief"] = self._worker_brief(
+                actor, result["ticket"], result["lease"], result["current_context_snapshot_id"]
+            )
+        except DomainError:  # includes ContentionError
+            result["current_context_snapshot_id"] = None
+            result["worker_brief"] = None
+            result["next_action"] = (
+                "The claim succeeded; call ticket.get_context for this ticket and use "
+                "its context_snapshot_id before the next write."
+            )
         return result
 
     def _worker_brief(

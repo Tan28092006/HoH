@@ -471,6 +471,18 @@ class IntegrationMixin:
         candidate = snapshot["candidate"]
         mainline = f"refs/heads/{default_branch}"
         base = candidate["base_commit"]
+        # A candidate someone already put on main is delivered work, not drift:
+        # sending it to rework would ask for a change that has landed.
+        if self.git_worktrees.commit_descends_from(
+            repository_path=repository_path,
+            ancestor_commit=candidate["commit_sha"],
+            descendant_commit=mainline,
+        ):
+            raise ReleasePolicyError(
+                "The candidate is already on the default branch; record the landing "
+                "with record_external_landing instead of merging",
+                {"reason": "candidate_already_on_main"},
+            )
         base_is_current_main = self.git_worktrees.commit_descends_from(
             repository_path=repository_path,
             ancestor_commit=mainline,
@@ -671,6 +683,18 @@ class IntegrationMixin:
             current_main = self.git_worktrees._resolve_commit(
                 Path(repository["repository_path"]), f"refs/heads/{project['default_branch']}")
             if current_main != candidate["base_commit"]:
+                if self.git_worktrees.commit_descends_from(
+                    repository_path=repository["repository_path"],
+                    ancestor_commit=candidate["commit_sha"],
+                    descendant_commit=current_main,
+                ):
+                    # Landed outside this job. Close the job without rework so the
+                    # landing can be recorded instead of refused as landing_job_active.
+                    return self.fail_queued_merge(
+                        merge_job_id,
+                        "candidate_already_on_main: the candidate is already on the default "
+                        "branch; record the landing with record_external_landing.",
+                    )
                 return self._complete_queued_merge(merge_job_id, False, current_main)
             reused = self._reusable_qa_run(job["candidate_id"], command, profile["timeout_seconds"])
         except DomainError as error:

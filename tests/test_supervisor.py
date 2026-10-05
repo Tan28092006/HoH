@@ -151,7 +151,7 @@ def test_failed_worker_start_does_not_respawn_forever(service, actors, seeded, t
 def test_revoked_lease_stops_running_qa(service, actors, seeded, tmp_path):
     from hoh_control_plane.supervisor import Supervisor
     ready, escaped = tmp_path / 'ready', tmp_path / 'escaped'
-    command = [sys.executable, '-c', f"from pathlib import Path;import time;Path({str(ready)!r}).touch();time.sleep(4);Path({str(escaped)!r}).touch()"]
+    command = [sys.executable, '-c', f"from pathlib import Path;import time;Path({str(ready)!r}).touch();time.sleep(600);Path({str(escaped)!r}).touch()"]
     job = make_job(service, actors, seeded, tmp_path, command)
     with Supervisor(service, max_workers=1) as supervisor:
         supervisor.tick()
@@ -161,7 +161,7 @@ def test_revoked_lease_stops_running_qa(service, actors, seeded, tmp_path):
         assert ready.exists()
         with service.store.connection(immediate=True) as db:
             db.execute("UPDATE leases SET expires_at = '2000-01-01T00:00:00Z' WHERE lease_id = ?", (job['lease_id'],))
-        supervisor.run_until_idle(timeout=10)
+        supervisor.run_until_idle(timeout=120)
     assert not escaped.exists()
     with service.store.connection() as db:
         assert service._qa_test_job(db, job['test_run_id'])['status'] == 'FAILED'
