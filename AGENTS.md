@@ -52,16 +52,19 @@ ticket state here; `tests/test_repo_docs.py` caps it at 900 words.
 
 The service enforces these; [ARCHITECTURE.md](docs/ARCHITECTURE.md) says where.
 
-- Every observed commit on the default branch or a fetched remote branch opens a
-  repository reconciliation. Until Planner classifies every ticket that was open
-  (keep, revise, cancel, supersede, complete, rework) and resolves it, no new
-  offer, claim, submission or merge starts; QA already running may finish its
-  evidence. The server resolves a merge's reconciliation itself, as `keep`, only
-  when the merged paths miss every open ticket's scope root, no open ticket
-  depends on it, and no docs/spec or root file changed. A successful merge opens
-  the next reconciliation atomically with its result. QA rejection, integration
-  regression and drift onto an already-observed `main` open a ticket-scoped one
-  instead: only that ticket and its transitive dependents freeze.
+- HoH's own gated merge opens no barrier: the server records `keep` and flags
+  open tickets the merged paths reach (scope overlap, transitive dependency,
+  docs/spec or root file) `planning_base_stale`; their next passed QA verdict
+  needs a verified `intent_check`. Planner gets an advisory event.
+- Any other observed commit on the default branch or a fetched remote branch
+  opens a repository reconciliation, freezing only tickets that closure reaches
+  (whole project for docs/spec, root files, rewritten history or unknown diffs).
+  Until Planner classifies each captured ticket (keep, revise, cancel,
+  supersede, complete, rework) and resolves it, nothing new starts for it;
+  running QA may finish. QA rejection, integration regression and drift onto an
+  observed `main` freeze only that ticket and its dependents.
+- Planner is an asynchronous advisor: nothing routine waits on it, yet it can
+  stop, revise or retire any ticket anytime.
 - Planner sync fetches every remote head with prune but never checks out, pulls,
   merges or rebases the shared checkout. An obsolete ticket is retired through
   the pending reconciliation, which preserves its worktrees, candidates and

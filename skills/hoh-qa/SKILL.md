@@ -29,6 +29,10 @@ own equipment, or transfers evidence to another SHA.
    `scenario_ref`, `storage_checksum` and `environment_digest` may be added.
    Record your own observations before resolving the Developer's claims
    (`ctx:candidate:<id>:developer_claims`); then compare, never adopt them.
+   If the ticket carries `intent_check` (a merge moved main under its plan),
+   a fresh-context reviewer, not the Developer and ideally another model, adds
+   one finding with criterion `intent_check`: `verified` if the intent still
+   holds on the new main, `failed` if it is stale. A pass without it is refused.
 6. Submit a verdict only from evidence on this exact SHA, passing the
    `context_snapshot_id` of a packet read after your claim, or the claim's
    `current_context_snapshot_id` (refused without one). The verdict
