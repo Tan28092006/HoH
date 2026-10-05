@@ -13,6 +13,7 @@ from hoh_control_plane.service._common import (
     _id,
     _iso,
     _row,
+    _transition_ticket,
     require_project,
     require_role,
     Connection,
@@ -74,19 +75,15 @@ class TicketRetirementMixin:
             blocked_reason = f"repository_reconciliation/{reconciliation_id}: {reason}"
             self._close_ticket_dispatch(connection, ticket_id, timestamp)
             connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease["lease_id"],))
-            connection.execute(
-                """
-                UPDATE tickets
-                SET status = ?, blocked_reason = ?, version = ?, updated_at = ?
-                WHERE ticket_id = ?
-                """,
-                (
-                    TicketStatus.BLOCKED.value,
-                    blocked_reason,
-                    next_version,
-                    timestamp,
-                    ticket_id,
+            _transition_ticket(
+                connection, ticket_id, expected_version=ticket["version"],
+                from_statuses=(
+                    TicketStatus.DEV_IN_PROGRESS,
+                    TicketStatus.QA_IN_PROGRESS,
+                    TicketStatus.MERGE_READY,
                 ),
+                changes={"status": TicketStatus.BLOCKED, "blocked_reason": blocked_reason,
+                         "updated_at": timestamp},
             )
             entry_id = _id(connection, "ctx")
             connection.execute(
@@ -377,14 +374,11 @@ class TicketRetirementMixin:
                 self._fence_ticket_for_retirement(
                     connection, ticket_id, request["request_id"], timestamp
                 )
-                next_version = int(ticket["version"]) + 1
-                connection.execute(
-                    """
-                    UPDATE tickets
-                    SET status = ?, blocked_reason = NULL, version = ?, updated_at = ?
-                    WHERE ticket_id = ?
-                    """,
-                    (request["target_status"], next_version, timestamp, ticket_id),
+                next_version = _transition_ticket(
+                    connection, ticket_id, expected_version=ticket["version"],
+                    from_statuses=(ticket["status"],),
+                    changes={"status": request["target_status"], "blocked_reason": None,
+                             "updated_at": timestamp},
                 )
                 entry_id = _id(connection, "ctx")
                 connection.execute(
@@ -592,11 +586,11 @@ class TicketRetirementMixin:
                 connection, ticket_id, project_id, replacement_ticket_id
             )
             timestamp = _iso()
-            next_version = ticket["version"] + 1
             closed_offers = self._close_ticket_dispatch(connection, ticket_id, timestamp)
-            connection.execute(
-                "UPDATE tickets SET status = ?, version = ?, updated_at = ? WHERE ticket_id = ?",
-                (next_status.value, next_version, timestamp, ticket_id),
+            next_version = _transition_ticket(
+                connection, ticket_id, expected_version=ticket["version"],
+                from_statuses=allowed_statuses,
+                changes={"status": next_status, "updated_at": timestamp},
             )
             entry_id = _id(connection, "ctx")
             connection.execute(

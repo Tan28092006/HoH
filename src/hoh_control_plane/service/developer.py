@@ -10,6 +10,7 @@ from hoh_control_plane.service._common import (
     TicketStatus,
     _id,
     _iso,
+    _transition_ticket,
     require_role,
 )
 
@@ -88,12 +89,11 @@ class DeveloperMixin:
                  actor.agent_id, actor.role.value, timestamp),
             )
             next_version = ticket["version"] + 1
-            connection.execute(
-                """
-                UPDATE tickets SET status = ?, blocked_reason = ?, version = ?, updated_at = ?
-                WHERE ticket_id = ?
-                """,
-                (TicketStatus.BLOCKED.value, reason, next_version, timestamp, ticket_id),
+            _transition_ticket(
+                connection, ticket_id, expected_version=ticket["version"],
+                from_statuses=(TicketStatus.DEV_IN_PROGRESS,),
+                changes={"status": TicketStatus.BLOCKED, "blocked_reason": reason,
+                         "updated_at": timestamp},
             )
             connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease_id,))
             self._event(

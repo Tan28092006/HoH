@@ -19,6 +19,7 @@ from hoh_control_plane.service._common import (
     _iso,
     _now,
     _row,
+    _transition_ticket,
     datetime,
     json,
     require_project,
@@ -327,13 +328,11 @@ class PlannerJobMixin:
                     self._close_ticket_dispatch(connection, ticket_id, timestamp)
                     connection.execute("DELETE FROM worktree_ownership WHERE ticket_id = ?", (ticket_id,))
                     connection.execute("DELETE FROM leases WHERE ticket_id = ?", (ticket_id,))
-                    next_version = int(ticket["version"]) + 1
-                    connection.execute(
-                        """
-                        UPDATE tickets SET status = 'BLOCKED', blocked_reason = ?,
-                            version = ?, updated_at = ? WHERE ticket_id = ?
-                        """,
-                        (summary, next_version, timestamp, ticket_id),
+                    next_version = _transition_ticket(
+                        connection, ticket_id, expected_version=ticket["version"],
+                        from_statuses=(ticket["status"],),
+                        changes={"status": TicketStatus.BLOCKED, "blocked_reason": summary,
+                                 "updated_at": timestamp},
                     )
                     ticket = self._ticket(connection, ticket_id)
                     self._event(
@@ -505,12 +504,11 @@ class PlannerJobMixin:
                     timestamp,
                 ),
             )
-            connection.execute(
-                """
-                UPDATE tickets SET status = ?, blocked_reason = NULL,
-                    version = ?, updated_at = ? WHERE ticket_id = ?
-                """,
-                (next_status.value, next_version, timestamp, ticket["ticket_id"]),
+            _transition_ticket(
+                connection, ticket["ticket_id"], expected_version=ticket["version"],
+                from_statuses=(TicketStatus.BLOCKED, TicketStatus.REWORK),
+                changes={"status": next_status, "blocked_reason": None,
+                         "updated_at": timestamp},
             )
             connection.execute(
                 """

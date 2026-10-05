@@ -12,6 +12,7 @@ from hoh_control_plane.service._common import (
     _id,
     _iso,
     _row,
+    _transition_ticket,
     require_role,
     Connection,
 )
@@ -145,13 +146,11 @@ class CandidateRecoveryMixin:
             next_version = ticket["version"] + 1
 
             closed_offers = self._close_ticket_dispatch(connection, ticket_id, timestamp)
-            connection.execute(
-                """
-                UPDATE tickets
-                SET status = ?, blocked_reason = ?, version = ?, updated_at = ?
-                WHERE ticket_id = ?
-                """,
-                (TicketStatus.REWORK.value, reason, next_version, timestamp, ticket_id),
+            _transition_ticket(
+                connection, ticket_id, expected_version=ticket["version"],
+                from_statuses=(TicketStatus.QA_READY,),
+                changes={"status": TicketStatus.REWORK, "blocked_reason": reason,
+                         "updated_at": timestamp},
             )
 
             entry_id = _id(connection, "ctx")
@@ -275,13 +274,11 @@ class CandidateRecoveryMixin:
             )
             timestamp = _iso()
             next_version = ticket["version"] + 1
-            connection.execute(
-                """
-                UPDATE tickets
-                SET status = ?, blocked_reason = NULL, version = ?, updated_at = ?
-                WHERE ticket_id = ?
-                """,
-                (TicketStatus.QA_READY.value, next_version, timestamp, ticket_id),
+            _transition_ticket(
+                connection, ticket_id, expected_version=ticket["version"],
+                from_statuses=(TicketStatus.BLOCKED, TicketStatus.REWORK),
+                changes={"status": TicketStatus.QA_READY, "blocked_reason": None,
+                         "updated_at": timestamp},
             )
             connection.execute(
                 """

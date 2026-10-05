@@ -87,11 +87,18 @@ helper you are about to change across `service/`.
 
 - A write is `with self.store.connection(immediate=True)`: SQLite
   `BEGIN IMMEDIATE`, or one PostgreSQL advisory lock per schema. **All writers are
-  serialized.** Most guards are Python checks followed by an unguarded
-  `UPDATE ... WHERE ticket_id = ?`; they are correct only because of that
-  serialization. Do not add a write through `connection()` without `immediate`,
-  and do not move PostgreSQL to row locks without adding status or version
-  predicates to the updates.
+  serialized.** Guards are Python checks, but every ticket write then goes
+  through `_transition_ticket` in `service/_common.py`, which repeats the
+  checked version and status as `WHERE version = ? AND status IN (...)` and
+  raises `ConflictError` when no row matches (`test_ticket_transitions.py`
+  forbids a raw `UPDATE tickets` elsewhere). Other tables' updates still rely on
+  the serialization: do not add a write through `connection()` without
+  `immediate`, and do not move PostgreSQL to row locks without guarding them.
+- `tickets.status` has a `CHECK` over the `TicketStatus` values. New databases
+  get it from the DDL; an existing SQLite database gets it by a verbatim table
+  rebuild (`_migrate_ticket_status_check`), skipped when a stored status or
+  foreign key is already invalid. An existing PostgreSQL database is not
+  altered, since no PostgreSQL upgrade path is under test.
 - Do not run Git, subprocesses or large file I/O inside a write transaction. The
   queued paths follow the pattern *check and mark RUNNING → external work with no
   transaction → re-check and complete*. The synchronous `submit_candidate` path follows it

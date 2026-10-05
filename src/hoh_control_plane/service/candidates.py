@@ -15,6 +15,7 @@ from hoh_control_plane.service._common import (
     _iso,
     _now,
     _row,
+    _transition_ticket,
     json,
     require_role,
     Connection,
@@ -223,9 +224,12 @@ class CandidateMixin:
             if profile is not None:
                 connection.execute("""INSERT INTO candidate_test_profiles (candidate_id, test_command, timeout_seconds, configured_at)
                     VALUES (?, ?, ?, ?)""", (candidate_id, json.dumps(profile["test_command"]), profile["timeout_seconds"], timestamp))
-            next_version = ticket["version"] + 1
-            connection.execute("""UPDATE tickets SET status = ?, base_commit = ?, candidate_commit = ?, version = ?, updated_at = ?
-                WHERE ticket_id = ?""", (TicketStatus.QA_READY.value, base_commit, commit_sha, next_version, timestamp, job["ticket_id"]))
+            next_version = _transition_ticket(
+                connection, job["ticket_id"], expected_version=ticket["version"],
+                from_statuses=(TicketStatus.DEV_IN_PROGRESS,),
+                changes={"status": TicketStatus.QA_READY, "base_commit": base_commit,
+                         "candidate_commit": commit_sha, "updated_at": timestamp},
+            )
             connection.execute("DELETE FROM leases WHERE lease_id = ?", (job["lease_id"],))
             connection.execute("UPDATE worktrees SET last_verified_at = ? WHERE ticket_id = ?", (timestamp, job["ticket_id"]))
             connection.execute("""UPDATE candidate_submission_jobs SET status = 'COMPLETED', candidate_id = ?, error_message = NULL, completed_at = ?
@@ -427,21 +431,11 @@ class CandidateMixin:
                         timestamp,
                     ),
                 )
-            next_version = ticket["version"] + 1
-            connection.execute(
-                """
-                UPDATE tickets
-                SET status = ?, base_commit = ?, candidate_commit = ?, version = ?, updated_at = ?
-                WHERE ticket_id = ?
-                """,
-                (
-                    TicketStatus.QA_READY.value,
-                    base_commit,
-                    commit_sha,
-                    next_version,
-                    timestamp,
-                    ticket_id,
-                ),
+            next_version = _transition_ticket(
+                connection, ticket_id, expected_version=ticket["version"],
+                from_statuses=(TicketStatus.DEV_IN_PROGRESS,),
+                changes={"status": TicketStatus.QA_READY, "base_commit": base_commit,
+                         "candidate_commit": commit_sha, "updated_at": timestamp},
             )
             connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease_id,))
             self._event(

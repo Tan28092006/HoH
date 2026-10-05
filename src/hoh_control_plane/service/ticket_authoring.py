@@ -11,6 +11,7 @@ from hoh_control_plane.service._common import (
     ValidationError,
     _id,
     _iso,
+    _transition_ticket,
     json,
     require_project,
     require_role,
@@ -206,14 +207,12 @@ class TicketAuthoringMixin:
                 connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
             )
             self._assert_quality_ready(project, ticket)
-            next_version = ticket["version"] + 1
             timestamp = _iso()
-            connection.execute(
-                """
-                UPDATE tickets SET status = ?, blocked_reason = NULL, version = ?, updated_at = ?
-                WHERE ticket_id = ?
-                """,
-                (TicketStatus.READY.value, next_version, timestamp, ticket_id),
+            next_version = _transition_ticket(
+                connection, ticket_id, expected_version=ticket["version"],
+                from_statuses=(TicketStatus.BACKLOG, TicketStatus.BLOCKED),
+                changes={"status": TicketStatus.READY, "blocked_reason": None,
+                         "updated_at": timestamp},
             )
             self._event(
                 connection, actor, project_id, "ticket.ready", "ticket", ticket_id,
@@ -254,13 +253,10 @@ class TicketAuthoringMixin:
             if normalized_scope == previous_scope:
                 raise ValidationError("file_scope is unchanged")
             timestamp = _iso()
-            next_version = ticket["version"] + 1
-            connection.execute(
-                """
-                UPDATE tickets SET file_scope = ?, version = ?, updated_at = ?
-                WHERE ticket_id = ?
-                """,
-                (json.dumps(normalized_scope), next_version, timestamp, ticket_id),
+            next_version = _transition_ticket(
+                connection, ticket_id, expected_version=ticket["version"],
+                from_statuses=(TicketStatus.BACKLOG, TicketStatus.BLOCKED),
+                changes={"file_scope": json.dumps(normalized_scope), "updated_at": timestamp},
             )
             entry_id = _id(connection, "ctx")
             connection.execute(
@@ -417,37 +413,24 @@ class TicketAuthoringMixin:
                     )
 
             timestamp = _iso()
-            next_version = ticket["version"] + 1
-            set_clauses = ["version = ?", "updated_at = ?"]
-            params: list[Any] = [next_version, timestamp]
-            changed_fields = []
+            changes: dict[str, Any] = {"updated_at": timestamp}
             if title is not None:
-                set_clauses.append("title = ?")
-                params.append(title)
-                changed_fields.append("title")
+                changes["title"] = title
             if objective is not None:
-                set_clauses.append("objective = ?")
-                params.append(objective)
-                changed_fields.append("objective")
+                changes["objective"] = objective
             if priority is not None:
-                set_clauses.append("priority = ?")
-                params.append(priority)
-                changed_fields.append("priority")
+                changes["priority"] = priority
             if acceptance_criteria is not None:
-                set_clauses.append("acceptance_criteria = ?")
-                params.append(json.dumps(acceptance_criteria))
-                changed_fields.append("acceptance_criteria")
+                changes["acceptance_criteria"] = json.dumps(acceptance_criteria)
             if normalized_contract is not None:
-                set_clauses.append("validation_contract = ?")
-                params.append(json.dumps(normalized_contract))
-                changed_fields.append("validation_contract")
+                changes["validation_contract"] = json.dumps(normalized_contract)
             if preservation_constraints is not None:
-                set_clauses.append("preservation_constraints = ?")
-                params.append(json.dumps(preservation_constraints))
-                changed_fields.append("preservation_constraints")
-            params.append(ticket_id)
-            connection.execute(
-                f"UPDATE tickets SET {', '.join(set_clauses)} WHERE ticket_id = ?", params
+                changes["preservation_constraints"] = json.dumps(preservation_constraints)
+            changed_fields = [field for field in changes if field != "updated_at"]
+            next_version = _transition_ticket(
+                connection, ticket_id, expected_version=ticket["version"],
+                from_statuses=(TicketStatus.BACKLOG, TicketStatus.READY, TicketStatus.BLOCKED),
+                changes=changes,
             )
             if normalized_dependency_ids is not None:
                 connection.execute(
@@ -531,11 +514,11 @@ class TicketAuthoringMixin:
             ]
 
             timestamp = _iso()
-            next_version = ticket["version"] + 1
             closed_offers = self._close_ticket_dispatch(connection, ticket_id, timestamp)
-            connection.execute(
-                "UPDATE tickets SET status = ?, version = ?, updated_at = ? WHERE ticket_id = ?",
-                (TicketStatus.SUPERSEDED.value, next_version, timestamp, ticket_id),
+            next_version = _transition_ticket(
+                connection, ticket_id, expected_version=ticket["version"],
+                from_statuses=RETIRABLE_TICKET_STATUSES,
+                changes={"status": TicketStatus.SUPERSEDED, "updated_at": timestamp},
             )
             entry_id = _id(connection, "ctx")
             source_ref = ",".join(f"ticket:{rid}" for rid in replacement_ticket_ids)

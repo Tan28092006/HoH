@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS tickets (
     ticket_type TEXT NOT NULL DEFAULT 'feature_work',
     title TEXT NOT NULL,
     objective TEXT NOT NULL,
-    status TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('BACKLOG', 'READY', 'DEV_IN_PROGRESS', 'QA_READY', 'QA_IN_PROGRESS', 'REWORK', 'VERIFIED', 'MERGE_READY', 'DONE', 'BLOCKED', 'CANCELLED', 'SUPERSEDED')),
     priority INTEGER NOT NULL DEFAULT 50,
     required_role TEXT NOT NULL,
     acceptance_criteria TEXT NOT NULL,
@@ -802,6 +802,17 @@ CREATE TABLE IF NOT EXISTS project_capability_preflights (
     PRIMARY KEY (project_id, capability)
 );
 """
+
+
+# The ticket lifecycle the tickets.status CHECK admits; it must equal
+# domain.TicketStatus (tests/test_store_migrations.py holds them together).
+TICKET_STATUSES = (
+    "BACKLOG", "READY", "DEV_IN_PROGRESS", "QA_READY", "QA_IN_PROGRESS", "REWORK",
+    "VERIFIED", "MERGE_READY", "DONE", "BLOCKED", "CANCELLED", "SUPERSEDED",
+)
+TICKET_STATUS_CHECK = "CHECK (status IN ({}))".format(
+    ", ".join(f"'{status}'" for status in TICKET_STATUSES)
+)
 
 
 # How an evidence row's checksum was obtained. Both are legitimate, but only one

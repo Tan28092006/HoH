@@ -447,3 +447,71 @@ class ExecutionGate:
                 "Repository changed after the current plan was formed; Planner must reconcile every open ticket before execution continues",
                 {"reason": "repository_reconciliation_required", **state},
             )
+
+
+#: Ticket columns a lifecycle write may set. ``version`` is not here: the
+#: transition sets it, always to ``expected_version + 1``.
+_TRANSITION_COLUMNS = frozenset({
+    "status", "blocked_reason", "base_commit", "candidate_commit", "updated_at",
+    "title", "objective", "priority", "acceptance_criteria", "validation_contract",
+    "preservation_constraints", "file_scope",
+})
+
+
+def _transition_ticket(
+    connection: Connection,
+    ticket_id: str,
+    *,
+    expected_version: int,
+    from_statuses: Any,
+    changes: dict[str, Any],
+) -> int:
+    """Write one ticket change guarded at the SQL level, and return the new version.
+
+    The UPDATE matches only while the row still has ``expected_version`` and one
+    of ``from_statuses``. Every caller has already checked both in Python, so
+    under the global write lock this never refuses anything; it is what keeps a
+    writer outside that lock (a non-``immediate`` connection, or PostgreSQL row
+    locks) from silently overwriting a newer ticket state.
+    """
+    if not changes:
+        raise ValueError("A ticket transition must change at least one column")
+    unknown = set(changes) - _TRANSITION_COLUMNS
+    if unknown:
+        raise ValueError(f"Not a ticket transition column: {', '.join(sorted(unknown))}")
+    statuses = tuple(
+        status.value if isinstance(status, TicketStatus) else TicketStatus(status).value
+        for status in from_statuses
+    )
+    if not statuses:
+        raise ValueError("A ticket transition needs at least one source status")
+    values = {
+        column: (value.value if isinstance(value, TicketStatus) else value)
+        for column, value in changes.items()
+    }
+    if "status" in values:
+        values["status"] = TicketStatus(values["status"]).value
+    next_version = int(expected_version) + 1
+    assignments = ", ".join(f"{column} = ?" for column in values)
+    placeholders = ", ".join("?" for _ in statuses)
+    cursor = connection.execute(
+        f"UPDATE tickets SET {assignments}, version = ? "
+        f"WHERE ticket_id = ? AND version = ? AND status IN ({placeholders})",
+        (*values.values(), next_version, ticket_id, int(expected_version), *statuses),
+    )
+    if cursor.rowcount != 1:
+        current = connection.execute(
+            "SELECT status, version FROM tickets WHERE ticket_id = ?", (ticket_id,)
+        ).fetchone()
+        raise ConflictError(
+            "Ticket changed before this write could apply; read it again",
+            {
+                "reason": "ticket_transition_conflict",
+                "ticket_id": ticket_id,
+                "expected_version": int(expected_version),
+                "expected_statuses": list(statuses),
+                "current_version": None if current is None else current["version"],
+                "current_status": None if current is None else current["status"],
+            },
+        )
+    return next_version

@@ -28,6 +28,7 @@ from hoh_control_plane.service._common import (
     _iso,
     _now,
     _row,
+    _transition_ticket,
     hashlib,
     json,
     re,
@@ -613,9 +614,12 @@ class QaMixin:
     def _park_qa_infrastructure(self, connection, actor, ticket, job, reason, storage_ref):
         """Stop offers for source work and preserve the candidate for a guarded retry."""
         timestamp = _iso()
-        next_version = ticket["version"] + 1
-        connection.execute("UPDATE tickets SET status = ?, blocked_reason = ?, version = ?, updated_at = ? WHERE ticket_id = ?",
-            (TicketStatus.BLOCKED.value, "qa.infrastructure/" + reason, next_version, timestamp, ticket["ticket_id"]))
+        next_version = _transition_ticket(
+            connection, ticket["ticket_id"], expected_version=ticket["version"],
+            from_statuses=(ticket["status"],),
+            changes={"status": TicketStatus.BLOCKED, "blocked_reason": "qa.infrastructure/" + reason,
+                     "updated_at": timestamp},
+        )
         connection.execute("DELETE FROM leases WHERE lease_id = ?", (job["lease_id"],))
         self._close_ticket_dispatch(connection, ticket["ticket_id"], timestamp)
         entry_id = _id(connection, "ctx")
@@ -883,15 +887,15 @@ class QaMixin:
                         timestamp,
                     ),
                 )
-            next_version = ticket["version"] + 1
-            connection.execute(
-                "UPDATE tickets SET status = ?, version = ?, updated_at = ? WHERE ticket_id = ?",
-                (next_status.value, next_version, timestamp, ticket_id),
+            changes: dict[str, Any] = {"status": next_status, "updated_at": timestamp}
+            if next_status == TicketStatus.BLOCKED:
+                changes["blocked_reason"] = "qa.infrastructure/insufficient_evidence"
+            next_version = _transition_ticket(
+                connection, ticket_id, expected_version=ticket["version"],
+                from_statuses=(TicketStatus.QA_IN_PROGRESS,), changes=changes,
             )
             connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease_id,))
             if next_status == TicketStatus.BLOCKED:
-                connection.execute("UPDATE tickets SET blocked_reason = ? WHERE ticket_id = ?",
-                                   ("qa.infrastructure/insufficient_evidence", ticket_id))
                 self._close_ticket_dispatch(connection, ticket_id, timestamp)
             self._event(
                 connection,

@@ -3,10 +3,12 @@ backends, and the SQLite-only table rebuilds that repair constraints."""
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from typing import Any
 
 from hoh_control_plane.domain import DomainError
+from hoh_control_plane.store_schema import TICKET_STATUS_CHECK, TICKET_STATUSES
 
 
 class SchemaMigrationError(DomainError):
@@ -25,6 +27,11 @@ class SchemaMigrationError(DomainError):
 # The suffix is also how a foreign key left pointing at one of those dropped
 # temporaries is recognized and repaired below.
 _MIGRATION_TABLE_SUFFIX = "_legacy"
+
+# The tickets.status column as every earlier schema declared it, followed by the
+# comma or newline that ends the declaration. ``\b`` keeps merge_status and the
+# like from matching.
+_TICKET_STATUS_COLUMN = re.compile(r"(\bstatus\s+TEXT\s+NOT\s+NULL)\s*(?=,|\n|\))", re.IGNORECASE)
 
 
 # Columns added to tables that already existed by the time they were needed.
@@ -237,7 +244,18 @@ class SQLiteRebuildMigrations:
             raise SchemaMigrationError(
                 f"Foreign key references to a dropped migration table remain in {table}"
             )
+        SQLiteRebuildMigrations._rebuild_table(connection, table, repaired_sql)
 
+    @staticmethod
+    def _rebuild_table(connection: sqlite3.Connection, table: str, definition_sql: str) -> None:
+        """Recreate one table from ``definition_sql`` and copy every row across.
+
+        SQLite's own table-rebuild procedure: needs foreign_keys=OFF and
+        legacy_alter_table=ON (set by ``initialize``), so the rename does not
+        rewrite other tables' references to the temporary name. Indexes are
+        recreated verbatim and the row count is proved unchanged.
+        """
+        before = connection.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0]
         columns = ", ".join(
             f'"{row["name"]}"'
             for row in connection.execute(f'PRAGMA table_info("{table}")').fetchall()
@@ -264,13 +282,63 @@ class SQLiteRebuildMigrations:
             connection.execute(f'DROP INDEX IF EXISTS "{index_name}"')
         rebuild_name = f"{table}__rebuild"
         connection.execute(f'ALTER TABLE "{table}" RENAME TO "{rebuild_name}"')
-        connection.execute(repaired_sql)
+        connection.execute(definition_sql)
         connection.execute(
             f'INSERT INTO "{table}" ({columns}) SELECT {columns} FROM "{rebuild_name}"'
         )
         connection.execute(f'DROP TABLE "{rebuild_name}"')
         for index_sql in indexes:
             connection.execute(index_sql)
+        after = connection.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0]
+        if after != before:
+            raise SchemaMigrationError(
+                f"Rebuilding {table} copied {after} of {before} rows"
+            )
+
+    @classmethod
+    def _migrate_ticket_status_check(cls, connection: sqlite3.Connection) -> bool:
+        """Give a database created before it the tickets.status CHECK.
+
+        Ticket transitions are guarded in SQL by version and status; the CHECK
+        stops a write from storing a status the lifecycle does not have. SQLite
+        cannot add a CHECK in place, so the table is rebuilt from its own stored
+        definition with only the status column changed: every column, default,
+        foreign key and index it has acquired survives.
+
+        Left alone, and so still enforced only by the service, when the stored
+        definition does not have exactly one recognisable ``status TEXT NOT
+        NULL`` column, when a row already holds a status outside the
+        vocabulary, or when a ticket row already has a dangling foreign key:
+        refusing to start over data the upgrade did not write would
+        take the control plane down for a fault this migration cannot repair.
+        Returns whether it rebuilt the table.
+        """
+        definition = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tickets'"
+        ).fetchone()
+        if definition is None or TICKET_STATUS_CHECK in definition["sql"]:
+            return False
+        matches = list(_TICKET_STATUS_COLUMN.finditer(definition["sql"]))
+        if len(matches) != 1:
+            return False
+        present = {
+            row[0] for row in connection.execute("SELECT DISTINCT status FROM tickets")
+        }
+        if not present <= set(TICKET_STATUSES):
+            return False
+        if connection.execute('PRAGMA foreign_key_check("tickets")').fetchall():
+            # A dangling reference that predates the upgrade would fail the
+            # post-rebuild proof and block startup; it is not this migration's.
+            return False
+        match = matches[0]
+        rebuilt_sql = (
+            definition["sql"][: match.end(1)]
+            + " "
+            + TICKET_STATUS_CHECK
+            + definition["sql"][match.end(1):]
+        )
+        cls._rebuild_table(connection, "tickets", rebuilt_sql)
+        return True
 
     @staticmethod
     def _require_clean_foreign_keys(connection: sqlite3.Connection, tables: list[str]) -> None:

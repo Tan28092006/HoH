@@ -14,6 +14,7 @@ from hoh_control_plane.service._common import (
     _id,
     _iso,
     _row,
+    _transition_ticket,
     json,
     require_project,
     require_role,
@@ -347,12 +348,11 @@ class ProjectPolicyMixin:
                 self._assert_quality_ready(
                     project, {**ticket, "validation_contract": normalized}
                 )
-            next_version = ticket["version"] + 1
             timestamp = _iso()
-            connection.execute(
-                "UPDATE tickets SET validation_contract = ?, version = ?, updated_at = ? "
-                "WHERE ticket_id = ?",
-                (json.dumps(normalized), next_version, timestamp, ticket_id),
+            next_version = _transition_ticket(
+                connection, ticket_id, expected_version=ticket["version"],
+                from_statuses=(TicketStatus.BACKLOG, TicketStatus.READY, TicketStatus.BLOCKED),
+                changes={"validation_contract": json.dumps(normalized), "updated_at": timestamp},
             )
             entry_id = _id(connection, "ctx")
             connection.execute(

@@ -258,8 +258,12 @@ class SQLiteStore(SQLiteRebuildMigrations):
             self._migrate_planner_job_types(connection)
             self._migrate_planner_intervention_types(connection)
             apply_additive_columns(connection, self._existing_columns(connection))
+            tickets_rebuilt = self._migrate_ticket_status_check(connection)
             repaired = self._migrate_stale_migration_table_references(connection)
-            self._require_clean_foreign_keys(connection, [*repaired, "planner_interventions"])
+            self._require_clean_foreign_keys(
+                connection,
+                [*repaired, "planner_interventions", *(["tickets"] if tickets_rebuilt else [])],
+            )
 
     @staticmethod
     def _existing_columns(connection: sqlite3.Connection) -> Any:

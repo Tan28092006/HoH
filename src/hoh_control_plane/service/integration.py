@@ -21,6 +21,7 @@ from hoh_control_plane.service._common import (
     _iso,
     _now,
     _row,
+    _transition_ticket,
     Path,
     hashlib,
     re,
@@ -199,12 +200,11 @@ class IntegrationMixin:
                     landed_commit, actor.agent_id, actor.role.value, timestamp,
                 ),
             )
-            connection.execute(
-                """
-                UPDATE tickets SET status = ?, blocked_reason = NULL, version = ?, updated_at = ?
-                WHERE ticket_id = ?
-                """,
-                (TicketStatus.DONE.value, next_version, timestamp, ticket_id),
+            _transition_ticket(
+                connection, ticket_id, expected_version=ticket["version"],
+                from_statuses=(ticket["status"],),
+                changes={"status": TicketStatus.DONE, "blocked_reason": None,
+                         "updated_at": timestamp},
             )
             self._event(
                 connection, actor, project_id,
@@ -910,13 +910,11 @@ class IntegrationMixin:
                         actor.agent_id, actor.role.value, timestamp,
                     ),
                 )
-                connection.execute(
-                    """
-                    UPDATE tickets
-                    SET status = ?, blocked_reason = ?, version = ?, updated_at = ?
-                    WHERE ticket_id = ?
-                    """,
-                    (TicketStatus.REWORK.value, reason, next_version, timestamp, job["ticket_id"]),
+                _transition_ticket(
+                    connection, job["ticket_id"], expected_version=ticket["version"],
+                    from_statuses=(TicketStatus.MERGE_READY,),
+                    changes={"status": TicketStatus.REWORK, "blocked_reason": reason,
+                             "updated_at": timestamp},
                 )
                 self._event(
                     connection, actor, job["project_id"],
@@ -966,13 +964,11 @@ class IntegrationMixin:
                      regression_failure, timestamp, merge_job_id),
                 )
                 return self._merge_job(connection, merge_job_id)
-            connection.execute(
-                """
-                UPDATE tickets
-                SET status = ?, blocked_reason = NULL, version = ?, updated_at = ?
-                WHERE ticket_id = ?
-                """,
-                (TicketStatus.DONE.value, next_version, timestamp, job["ticket_id"]),
+            _transition_ticket(
+                connection, job["ticket_id"], expected_version=ticket["version"],
+                from_statuses=(TicketStatus.MERGE_READY,),
+                changes={"status": TicketStatus.DONE, "blocked_reason": None,
+                         "updated_at": timestamp},
             )
             self._event(
                 connection, actor, job["project_id"], "integration.completed", "ticket",
@@ -1072,13 +1068,11 @@ class IntegrationMixin:
                 connection.execute(
                     "DELETE FROM leases WHERE ticket_id = ?", (ticket["ticket_id"],)
                 )
-                next_version = int(ticket["version"]) + 1
-                connection.execute(
-                    """
-                    UPDATE tickets SET status = 'BLOCKED', blocked_reason = ?,
-                        version = ?, updated_at = ? WHERE ticket_id = ?
-                    """,
-                    (error_message, next_version, timestamp, ticket["ticket_id"]),
+                next_version = _transition_ticket(
+                    connection, ticket["ticket_id"], expected_version=ticket["version"],
+                    from_statuses=(ticket["status"],),
+                    changes={"status": TicketStatus.BLOCKED, "blocked_reason": error_message,
+                             "updated_at": timestamp},
                 )
                 blocked = self._ticket(connection, ticket["ticket_id"])
                 self._event(

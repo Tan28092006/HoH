@@ -15,6 +15,7 @@ from hoh_control_plane.service._common import (
     _now,
     _row,
     _required_execution_capabilities,
+    _transition_ticket,
     datetime,
     json,
     re,
@@ -83,16 +84,12 @@ class LeaseMixin:
                     if lease["role"] == Role.QA.value
                     else TicketStatus.READY
                 )
-                next_version = ticket["version"] + 1
                 self._retire_expired_jobs(connection, lease)
                 connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease["lease_id"],))
-                connection.execute(
-                    """
-                    UPDATE tickets
-                    SET status = ?, version = ?, updated_at = ?
-                    WHERE ticket_id = ?
-                    """,
-                    (fallback.value, next_version, _iso(timestamp), ticket["ticket_id"]),
+                next_version = _transition_ticket(
+                    connection, ticket["ticket_id"], expected_version=ticket["version"],
+                    from_statuses=(ticket["status"],),
+                    changes={"status": fallback, "updated_at": _iso(timestamp)},
                 )
                 self._event(
                     connection,
@@ -319,10 +316,10 @@ class LeaseMixin:
                     _iso(timestamp + timedelta(seconds=lease_seconds)),
                 ),
             )
-            next_version = ticket["version"] + 1
-            connection.execute(
-                "UPDATE tickets SET status = ?, version = ?, updated_at = ? WHERE ticket_id = ?",
-                (next_status.value, next_version, _iso(timestamp), ticket_id),
+            next_version = _transition_ticket(
+                connection, ticket_id, expected_version=ticket["version"],
+                from_statuses=allowed_statuses,
+                changes={"status": next_status, "updated_at": _iso(timestamp)},
             )
             self._event(
                 connection,
@@ -376,9 +373,10 @@ class LeaseMixin:
                 if lease["role"] == Role.QA.value
                 else TicketStatus.READY
             )
-            connection.execute(
-                "UPDATE tickets SET status = ?, version = version + 1, updated_at = ? WHERE ticket_id = ?",
-                (fallback.value, _iso(), ticket_id),
+            _transition_ticket(
+                connection, ticket_id, expected_version=current["version"],
+                from_statuses=(current["status"],),
+                changes={"status": fallback, "updated_at": _iso()},
             )
             project_id = self._project_for_ticket(connection, ticket_id)
             self._queue_ticket(
