@@ -185,6 +185,10 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # (NULL when the derived candidate must be assessed by QA again).
     ("candidates", "derived_from", "TEXT"),
     ("candidates", "qa_evidence_from", "TEXT"),
+    # A non-blocking flag set when a merge moved main under a ticket's plan.
+    # NULL for every older ticket: none was planned against a moved base the
+    # flag could describe.
+    ("tickets", "planning_base_stale", "TEXT"),
 )
 
 

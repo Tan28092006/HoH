@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS tickets (
     blocked_reason TEXT,
     base_commit TEXT,
     candidate_commit TEXT,
+    planning_base_stale TEXT,
     version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL

@@ -205,10 +205,12 @@ candidate QA ran on its exact base already keep `main` correct. So the scope of
 a reconciliation follows what the result can have invalidated.
 
 - **Project-wide** (`scope = 'project'`): a commit on the default branch
-  observed by `planner.sync_repository` (wave 7A), a successful merge (still auto-kept when
-  scope-disjoint), and base drift onto a `main` HoH had not observed. Each may
-  change any ticket's plan, and outside work carries no ticket or contract to
-  bound it.
+  observed by `planner.sync_repository` (wave 7A; other branches are recorded
+  only) that touches docs/spec or a root file, rewrites history, has an unknown
+  or truncated diff, or moves neither the default branch nor its upstream; and
+  base drift onto a `main` HoH had not observed. Later syncs extend the one
+  pending observation instead of opening another, and never narrow it. A
+  successful HoH merge no longer opens one (wave 7C, below).
 - **Ticket-scoped** (`scope = 'tickets'`): a QA rejection, an integration gate
   regression, and base drift onto a `main` HoH had already observed. None moves
   `main` (the drift's movement was a merge or a sync that opened, and Planner
@@ -230,16 +232,60 @@ a reconciliation follows what the result can have invalidated.
   Commit order is kept where reconciliations meet: a project-wide one waits for
   every older one, and two ticket-scoped ones wait only when they captured a
   common ticket.
-- **Merges run in shadow mode.** A merge that auto-keep cannot resolve still
-  closes the whole project. Beside it, `_shadow_merge_partition` stores in
+- **Merges ran in shadow mode until wave 7C.** A merge that auto-keep could
+  not resolve closed the whole project. Beside it, `_shadow_merge_partition` stores in
   `shadow_partition` what a scope rule would have frozen: tickets whose scope
   root overlaps a merged path, unscoped tickets, and tickets depending on the
   merged one, transitively; docs/spec, root-file or unknown paths freeze
   everything. When Planner resolves it, `shadow_agreed` records whether every
   ticket Planner did not `keep` fell inside that set, and the outcome is added
   beside the prediction, never into Planner's manifest. `planner.cycle_metrics`
-  reports agreement as `barrier_shadow`. Nothing admits work from the
-  prediction; acting on it waits for the owner to judge the agreement record.
+  reports agreement as `barrier_shadow`. Wave 7C now acts on the same rule, so
+  merges no longer write new shadow rows; the existing ones remain the record.
+
+### Planner off the critical path (wave 7C, part 1)
+
+Owner-approved: nothing routine waits on Planner. Correctness of `main` is
+still held by the fast-forward of a QA-verified tree; only the plan can go
+stale, and that is now caught where it matters, at the next QA.
+
+- **HoH's own merge opens no barrier.** `_open_commit_reconciliation` with
+  `merged_ticket_id` computes `_shadow_merge_partition` (rule
+  `scope-closure-v1`: scope-root overlap, unscoped tickets, transitive
+  dependents of the merged ticket; docs/spec, root-file or unknown paths reach
+  every open ticket) and writes the reconciliation RESOLVED at once, every
+  ticket `keep`, `resolved_by` `system:merge-advisory` (or
+  `system:scope-disjoint` when nothing is reached). No offer is withdrawn. The
+  reached tickets get `tickets.planning_base_stale` (JSON: merge commit,
+  merged ticket, reconciliation, reason, `intent_check: required`) through
+  `_flag_planning_base_stale`, which does not bump the ticket version, so live
+  leases keep their `expected_version`. Planner receives
+  `project.planning_base_advanced` listing them, plus the existing
+  `delivery_completed` report; neither blocks anything.
+- **`intent_check` at the next QA.** Packets show `planning_base_stale` to
+  Developer, QA and Integrator; QA and Integrator packets add
+  `ticket.intent_check` with the instruction. `qa.submit_verdict` accepts a
+  finding with criterion `intent_check` outside the contract while the flag is
+  set, refuses a `passed` verdict without a verified one, and clears the flag
+  on a pass. A `failed` verdict whose only non-verified finding is
+  `intent_check` blocks the ticket with `blocked_reason = plan_stale`
+  (event `ticket.plan_stale`), does not count against the rework budget, and
+  opens the usual QA-failure Planner job. Choosing a different model for the
+  reviewer is advice in the QA card, not yet enforced (that is wave 7C-3).
+- **Outside commits freeze only what they reach.** `_sync_repository_once`
+  asks `_outside_commit_frozen_tickets`: for a fast-forward of the default
+  branch and/or upstream with a known diff (under 200 paths), the same
+  closure without a merged ticket, plus every open dependent of a reached
+  ticket, becomes a `scope = 'tickets'` reconciliation; offers are withdrawn
+  only for those tickets. When the diff reaches no ticket the record is
+  written RESOLVED by `system:no-ticket-reached` with no decisions (nothing is
+  kept, so outside commits are still never auto-kept). Project-wide remains
+  for the baseline, docs/spec or root files, non-fast-forward (rewritten or
+  new upstream) history, unknown or truncated diffs, and an observation that
+  moved only non-default branches.
+- **Planner is an asynchronous advisor.** It still resolves the reconciliations
+  above and can stop, revise or retire any ticket at any time through the
+  existing tools; the skill card describes it as an advisor.
 
 ### A merge lane beside the test slot (wave 6E)
 

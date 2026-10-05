@@ -239,12 +239,13 @@ class RepositoryReconciliationMixin:
                 entry_id = _id(connection, "ctx")
                 # One pending observation per project: a later sync (Planner's
                 # or the scheduler sweep's) appends to it instead of opening a
-                # duplicate Planner must resolve in turn (HOH-280).
+                # duplicate Planner must resolve in turn (HOH-280). Results of
+                # HoH's own work (QA rejection, regression) are not observations
+                # and keep their own records.
                 pending_observation = connection.execute(
                     """
                     SELECT * FROM repository_reconciliations
                     WHERE project_id = ? AND status = 'PENDING'
-                      AND COALESCE(scope, 'project') = 'project'
                       AND observation_ref LIKE 'ctx:entry:%'
                     ORDER BY created_at DESC LIMIT 1
                     """,
@@ -257,7 +258,7 @@ class RepositoryReconciliationMixin:
                 manifest["context_ref"] = f"ctx:entry:{entry_id}"
                 manifest["reconciliation_id"] = reconciliation_id
                 manifest["reconciliation_extended"] = pending_observation is not None
-                open_ticket_versions = {
+                all_open_ticket_versions = open_ticket_versions = {
                     str(row["ticket_id"]): {
                         "version": int(row["version"]),
                         "status": str(row["status"]),
@@ -274,6 +275,43 @@ class RepositoryReconciliationMixin:
                         (project_id,),
                     ).fetchall()
                 }
+                frozen_ticket_ids = None
+                if not baseline_reconciliation:
+                    frozen_ticket_ids = self._outside_commit_frozen_tickets(
+                        connection,
+                        list(open_ticket_versions),
+                        manifest,
+                        current.get("observed_upstream_commit") != manifest["upstream_commit"],
+                    )
+                existing = None
+                if pending_observation is not None:
+                    # Extending the one pending observation never narrows it:
+                    # a project-wide record stays project-wide, and a
+                    # ticket-scoped one grows to the union of reached tickets.
+                    existing = self._repository_reconciliation(pending_observation)
+                    existing_frozen = existing.get("frozen_ticket_ids")
+                    if isinstance(existing_frozen, str):
+                        existing_frozen = json.loads(existing_frozen)
+                    if (
+                        frozen_ticket_ids is None
+                        or existing["scope"] != TICKETS_SCOPE
+                        or existing_frozen is None
+                    ):
+                        frozen_ticket_ids = None
+                    else:
+                        frozen_ticket_ids = sorted(
+                            set(frozen_ticket_ids) | set(existing_frozen)
+                        )
+                scope = PROJECT_SCOPE
+                if frozen_ticket_ids is not None:
+                    scope = TICKETS_SCOPE
+                    open_ticket_versions = {
+                        ticket_id: all_open_ticket_versions[ticket_id]
+                        for ticket_id in frozen_ticket_ids
+                        if ticket_id in all_open_ticket_versions
+                    }
+                manifest["reconciliation_scope"] = scope
+                manifest["frozen_ticket_ids"] = frozen_ticket_ids
                 connection.execute(
                     """INSERT INTO context_entries
                        (entry_id, project_id, entry_type, content, source_ref,
@@ -290,23 +328,25 @@ class RepositoryReconciliationMixin:
                         timestamp,
                     ),
                 )
-                if pending_observation is not None:
-                    existing = self._repository_reconciliation(pending_observation)
+                if existing is not None:
                     merged_commits = self._union_observed_commits(
                         existing["observed_commits"], observed_commits
                     )
                     # Never shrink or re-baseline what was captured: a ticket
-                    # keeps the version first observed, new open tickets join.
+                    # keeps the version first observed, new reached tickets join.
                     merged_versions = {**open_ticket_versions, **existing["ticket_versions"]}
                     connection.execute(
                         """
                         UPDATE repository_reconciliations
-                        SET observed_commits = ?, ticket_versions = ?
+                        SET observed_commits = ?, ticket_versions = ?, scope = ?,
+                            frozen_ticket_ids = ?
                         WHERE reconciliation_id = ?
                         """,
                         (
                             json.dumps(merged_commits, sort_keys=True),
                             json.dumps(merged_versions, sort_keys=True),
+                            scope,
+                            None if frozen_ticket_ids is None else json.dumps(frozen_ticket_ids),
                             reconciliation_id,
                         ),
                     )
@@ -315,8 +355,8 @@ class RepositoryReconciliationMixin:
                         """
                         INSERT INTO repository_reconciliations
                             (reconciliation_id, project_id, observation_ref, observed_commits,
-                             ticket_versions, status, created_at)
-                        VALUES (?, ?, ?, ?, ?, 'PENDING', ?)
+                             ticket_versions, status, created_at, scope, frozen_ticket_ids)
+                        VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)
                         """,
                         (
                             reconciliation_id,
@@ -325,9 +365,33 @@ class RepositoryReconciliationMixin:
                             json.dumps(observed_commits, sort_keys=True),
                             json.dumps(open_ticket_versions, sort_keys=True),
                             timestamp,
+                            scope,
+                            None if frozen_ticket_ids is None else json.dumps(frozen_ticket_ids),
                         ),
                     )
-                self._withdraw_offers(connection, project_id, timestamp)
+                    if frozen_ticket_ids == []:
+                        # Nothing on the board can be reached by the outside
+                        # paths: the observation is recorded, no ticket is kept
+                        # or frozen.
+                        connection.execute(
+                            """
+                            UPDATE repository_reconciliations
+                            SET status = 'RESOLVED', resolved_by = 'system:no-ticket-reached',
+                                resolved_at = ?, decision_manifest = ?
+                            WHERE reconciliation_id = ?
+                            """,
+                            (
+                                timestamp,
+                                json.dumps({
+                                    "summary": "Observed commits reach no open ticket's scope "
+                                               "or dependencies; nothing to reclassify.",
+                                    "ticket_decisions": [],
+                                    "new_ticket_ids": [],
+                                }, sort_keys=True),
+                                reconciliation_id,
+                            ),
+                        )
+                self._withdraw_offers(connection, project_id, timestamp, frozen_ticket_ids)
                 self._event(
                     connection,
                     actor,
@@ -346,6 +410,11 @@ class RepositoryReconciliationMixin:
                         "observed_commit_count": len(observed_commits),
                         "reconciliation_id": reconciliation_id,
                         "extended": manifest["reconciliation_extended"],
+                        "scope": scope,
+                        **(
+                            {"frozen_ticket_ids": frozen_ticket_ids}
+                            if frozen_ticket_ids is not None else {}
+                        ),
                     },
                 )
             pending = self._repository_reconciliation_state(connection, project_id)
@@ -428,6 +497,11 @@ class RepositoryReconciliationMixin:
         REWORK or BLOCKED, gets ``rework`` and its dependents ``keep``, since the
         dependency edges already hold them. It stays pending for Planner when an
         older pending reconciliation captured one of the same tickets.
+
+        With ``merged_ticket_id`` and ``changed_paths`` (HoH's own gated merge)
+        nothing closes: the record is resolved by the server at once and the
+        tickets the merged paths can reach get a non-blocking
+        ``planning_base_stale`` flag (wave 7C).
         """
         project = self._one(
             connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
@@ -483,28 +557,59 @@ class RepositoryReconciliationMixin:
             ),
         )
         auto_reason = None
+        stale_ticket_ids: list[str] = []
         if merged_ticket_id is not None and changed_paths is not None:
-            auto_reason = self._merge_cannot_affect_open_work(
+            # Wave 7C: HoH's own gated merge never waits for Planner. main is
+            # still correct (fast-forward of a QA-verified tree); what may be
+            # stale is the plan of tickets the merged paths can reach. Those
+            # are flagged, not frozen: their next QA must include an
+            # intent_check, and Planner is told asynchronously.
+            partition = self._shadow_merge_partition(
                 connection, list(ticket_versions), merged_ticket_id, changed_paths
             )
-        if auto_reason is not None:
+            stale_ticket_ids = list(partition["frozen_ticket_ids"])
+            resolver = "system:merge-advisory" if stale_ticket_ids else "system:scope-disjoint"
+            auto_reason = (
+                f"Merged {merged_ticket_id} changed {len(changed_paths)} path(s); "
+                + (
+                    f"{len(stale_ticket_ids)} open ticket(s) it can reach keep running with "
+                    "planning_base_stale and an intent_check at their next QA."
+                    if stale_ticket_ids else
+                    "no open ticket's scope or dependencies reach them."
+                )
+                + " Recorded as keep by the server; Planner may still stop or retire any ticket."
+            )
             manifest = {
                 "summary": auto_reason,
                 "ticket_decisions": [
                     {"ticket_id": ticket_id, "disposition": "keep", "reason": auto_reason,
-                     "decided_by": "system:scope-disjoint"}
+                     "decided_by": resolver,
+                     **({"planning_base_stale": True} if ticket_id in stale_ticket_ids else {})}
                     for ticket_id in sorted(ticket_versions)
                 ],
                 "new_ticket_ids": [],
+                "planning_base_stale": partition,
             }
             connection.execute(
                 """
                 UPDATE repository_reconciliations
-                SET status = 'RESOLVED', resolved_by = 'system:scope-disjoint',
+                SET status = 'RESOLVED', resolved_by = ?,
                     resolved_at = ?, decision_manifest = ?
                 WHERE reconciliation_id = ?
                 """,
-                (timestamp, json.dumps(manifest, sort_keys=True), reconciliation_id),
+                (resolver, timestamp, json.dumps(manifest, sort_keys=True), reconciliation_id),
+            )
+            self._flag_planning_base_stale(
+                connection,
+                stale_ticket_ids,
+                {
+                    "commit": commit,
+                    "merged_ticket_id": merged_ticket_id,
+                    "reconciliation_id": reconciliation_id,
+                    "reason": partition["reason"],
+                    "flagged_at": timestamp,
+                    "intent_check": "required",
+                },
             )
         elif (
             rework_ticket_id is not None
@@ -543,19 +648,6 @@ class RepositoryReconciliationMixin:
                 """,
                 (decided_by, timestamp, json.dumps(manifest, sort_keys=True), reconciliation_id),
             )
-        elif merged_ticket_id is not None and changed_paths is not None:
-            # Shadow mode: record what the scope rule would have frozen, while
-            # the barrier stays project-wide. Nothing reads this to admit work.
-            connection.execute(
-                "UPDATE repository_reconciliations SET shadow_partition = ? "
-                "WHERE reconciliation_id = ?",
-                (
-                    json.dumps(self._shadow_merge_partition(
-                        connection, list(ticket_versions), merged_ticket_id, changed_paths
-                    ), sort_keys=True),
-                    reconciliation_id,
-                ),
-            )
         if advance_mainline:
             connection.execute(
                 """
@@ -591,9 +683,55 @@ class RepositoryReconciliationMixin:
                     {"frozen_ticket_ids": frozen_ticket_ids}
                     if frozen_ticket_ids is not None else {}
                 ),
+                **(
+                    {"planning_base_stale_ticket_ids": stale_ticket_ids}
+                    if merged_ticket_id is not None else {}
+                ),
             },
         )
+        if stale_ticket_ids:
+            # The Planner's advisory: nothing waits on it. Planner reads it in
+            # its own time and may stop, revise or retire any listed ticket.
+            self._event(
+                connection,
+                actor,
+                project_id,
+                "project.planning_base_advanced",
+                "project",
+                project_id,
+                next_version,
+                {
+                    "reconciliation_id": reconciliation_id,
+                    "commit": commit,
+                    "merged_ticket_id": merged_ticket_id,
+                    "planning_base_stale_ticket_ids": stale_ticket_ids,
+                    "blocking": False,
+                },
+            )
         return reconciliation_id
+
+    @staticmethod
+    def _flag_planning_base_stale(
+        connection: Connection, ticket_ids: list[str], flag: dict[str, Any]
+    ) -> None:
+        """Mark open tickets whose plan predates a merge that can reach them.
+
+        The flag never blocks a claim, an offer or a submission. QA reads it
+        from the packet and must add an ``intent_check`` finding; a passed
+        verdict that includes one clears it. It deliberately does not bump the
+        ticket version, so a live lease's expected_version stays valid.
+        """
+        if not ticket_ids:
+            return
+        placeholders = ",".join("?" for _ in ticket_ids)
+        connection.execute(
+            f"""
+            UPDATE tickets SET planning_base_stale = ?
+            WHERE ticket_id IN ({placeholders})
+              AND status NOT IN ('DONE', 'CANCELLED', 'SUPERSEDED')
+            """,
+            (json.dumps(flag, sort_keys=True), *ticket_ids),
+        )
 
     @staticmethod
     def _withdraw_offers(
@@ -677,10 +815,13 @@ class RepositoryReconciliationMixin:
         self,
         connection: Connection,
         open_ticket_ids: list[str],
-        merged_ticket_id: str,
+        merged_ticket_id: str | None,
         changed_paths: list[str],
     ) -> dict[str, Any]:
         """The tickets a scope-partitioned barrier would freeze after this merge.
+
+        ``merged_ticket_id`` is None for a commit HoH did not merge; then no
+        ticket is reached through a dependency on it.
 
         Conservative by construction: a ticket is frozen when its scope root
         overlaps a merged path, when it has no scope, or when it depends on the
@@ -703,7 +844,10 @@ class RepositoryReconciliationMixin:
                 "flowing_ticket_ids": [],
                 "changed_path_count": len(paths),
             }
-        dependents = set(self._frozen_ticket_closure(connection, merged_ticket_id))
+        dependents = (
+            set(self._frozen_ticket_closure(connection, merged_ticket_id))
+            if merged_ticket_id is not None else set()
+        )
         frozen = []
         for ticket_id in ordered:
             row = connection.execute(
@@ -728,6 +872,56 @@ class RepositoryReconciliationMixin:
             "flowing_ticket_ids": [ticket_id for ticket_id in ordered if ticket_id not in frozen],
             "changed_path_count": len(paths),
         }
+
+    def _outside_commit_frozen_tickets(
+        self,
+        connection: Connection,
+        open_ticket_ids: list[str],
+        manifest: dict[str, Any],
+        upstream_changed: bool,
+    ) -> list[str] | None:
+        """The tickets an observed outside commit can affect, or None for all.
+
+        Wave 7C: a commit HoH did not merge freezes only the scope closure of
+        its changed paths (scope overlap, unscoped tickets, and every open
+        ticket depending on one of those, transitively). The whole project
+        still closes for rewritten history, a docs/spec or repository-root
+        change, an unknown or truncated diff, and any observation that did not
+        move the default branch or its upstream at all.
+        """
+        mainline = manifest.get("mainline_update")
+        if mainline is None and not upstream_changed:
+            return None
+        paths: list[str] = []
+        if mainline is not None:
+            if mainline.get("history_relation") != "fast_forward":
+                return None
+            changes = mainline.get("changes") or []
+            if len(changes) >= 200 or (mainline.get("commits") and not changes):
+                return None
+            paths.extend(str(change["path"]) for change in changes)
+        if upstream_changed:
+            upstream_ref = manifest.get("upstream_ref")
+            for update in manifest.get("branch_updates") or []:
+                if (
+                    update.get("branch") == upstream_ref
+                    and update.get("history_relation") != "fast_forward"
+                ):
+                    return None
+            if int(manifest.get("behind") or 0) > 0:
+                changes = manifest.get("incoming_changes") or []
+                if not changes or len(changes) >= 200:
+                    return None
+                paths.extend(str(change["path"]) for change in changes)
+        if not paths:
+            return []
+        partition = self._shadow_merge_partition(connection, open_ticket_ids, None, paths)
+        if partition["project_wide"]:
+            return None
+        frozen = set(partition["frozen_ticket_ids"])
+        for ticket_id in list(frozen):
+            frozen.update(self._frozen_ticket_closure(connection, ticket_id))
+        return sorted(frozen & set(open_ticket_ids))
 
     @staticmethod
     def _shadow_outcome(
