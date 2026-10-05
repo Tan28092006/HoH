@@ -72,9 +72,9 @@ The service enforces these; [ARCHITECTURE.md](docs/ARCHITECTURE.md) says where.
   candidate. QA independently executes the declared scenarios on that frozen
   candidate and attaches every required evidence type. A gated merge or ungated
   landing creates one durable `delivery_completed` Planner report.
-- QA claim authority is the intersection of live declared capabilities and a
-  Planner-approved profile backed by host-observed preflight evidence from the
-  same machine (QA registers a stable hostname as `machine_id`). Missing
+- QA claim authority is live declared capabilities intersected with what a
+  host preflight proved on the same machine (QA registers a stable hostname as
+  `machine_id`); the server approves it, Planner may override. Missing
   capability is an infrastructure gap, never a reason to weaken acceptance.
 - `dev.submit_candidate`, `qa.submit_verdict` and `integrator.merge_candidate`
   require the `context_snapshot_id` of a packet read just before the write.

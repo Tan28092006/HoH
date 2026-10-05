@@ -714,6 +714,13 @@ class DiscoveryMixin:
                 for project_id in sorted(actor.project_ids):
                     if project_id == "*":
                         continue
+                    if existing is not None:
+                        # What the preflight proved was this declaration on this
+                        # machine; the server's approval lapses with it.
+                        self._revoke_host_preflight_approvals(
+                            connection, actor, project_id, "declaration_changed",
+                            agent_id=actor.agent_id,
+                        )
                     self._event(
                         connection,
                         actor,

@@ -115,75 +115,108 @@ def test_qa_publishes_preflight_evidence_without_any_lease(service, actors, bloc
     assert HOST not in str(record), "the machine is kept as a fingerprint, never its name"
 
 
-def test_the_block_becomes_exactly_one_planner_job_that_names_the_call(
-    service, actors, blocked
-) -> None:
+def test_the_preflight_approves_and_qa_can_claim_at_once(service, actors, blocked) -> None:
+    """Wave 7A: the server approves declared and proven itself; no Planner turn."""
     result = service.run_capability_preflight(actors["qa"], "project-1")
 
-    [job] = _open_jobs(service, blocked["ticket_id"])
-    assert result["planner_jobs"] == [job["planner_job_id"]]
-    assert "owner=planner action=capability_approval" in job["summary"]
-    assert "planner.configure_agent_capability_profile" in job["summary"]
-    assert result["preflight_ref"] in job["summary"]
-
-    # Retrying the preflight, and QA polling its inbox, add nothing.
-    again = service.run_capability_preflight(actors["qa"], "project-1")
-    assert again["reused"] is True
-    assert again["preflight_ref"] == result["preflight_ref"]
-    service.get_agent_inbox(actors["qa"], "project-1")
-    service.get_agent_inbox(actors["qa"], "project-1")
-    assert [row["planner_job_id"] for row in _open_jobs(service, blocked["ticket_id"])] == [
-        job["planner_job_id"]
-    ]
+    assert result["approved"] == CAPABILITIES
+    assert _open_jobs(service, blocked["ticket_id"]) == []
     with service.store.connection() as connection:
-        interventions = connection.execute(
-            "SELECT COUNT(*) FROM planner_interventions WHERE planner_job_id = ?",
-            (job["planner_job_id"],),
-        ).fetchone()[0]
-    assert interventions == 1, "the Planner is woken once, not on every poll"
+        presence = dict(connection.execute(
+            "SELECT * FROM agent_presence WHERE agent_id = ?", (actors["qa"].agent_id,)
+        ).fetchone())
+    assert presence["capability_approved_by"] == "system:host-preflight"
+    claim = service.claim_qa(actors["qa"], blocked["ticket_id"],
+                             blocked["submitted"]["ticket"]["version"], 900)
+    assert claim["lease"]["role"] == Role.QA.value
 
 
-def test_a_ticket_that_becomes_blocked_after_the_preflight_still_gets_its_job(
-    service, actors, seeded
+def test_a_preflight_closes_a_review_job_opened_before_it(service, actors, blocked) -> None:
+    blocked["prober"].equipped = {"build_execution"}
+    service.run_capability_preflight(actors["qa"], "project-1")
+    [job] = _open_jobs(service, blocked["ticket_id"])
+    assert "owner=infrastructure" in job["summary"]
+
+    blocked["prober"].equipped = set(CAPABILITIES)
+    result = service.run_capability_preflight(actors["qa"], "project-1")
+
+    assert result["resolved_planner_jobs"] == [job["planner_job_id"]]
+    assert _open_jobs(service, blocked["ticket_id"]) == []
+
+
+def test_the_approval_persists_until_the_configuration_changes(
+    service, actors, blocked
 ) -> None:
-    """Preflight first, candidate later: the inbox opens the job, running no probe."""
-    prober = FakeProber()
-    service.capability_prober = prober
-    service.configure_verification_profile(
-        actors["planner"], "project-1", capabilities=CAPABILITIES, quality_policy="legacy",
-    )
+    service.run_capability_preflight(actors["qa"], "project-1")
+    version = blocked["submitted"]["ticket"]["version"]
+
+    # A new session on the same machine with the same declaration keeps it.
     service.register_agent(
         actors["qa"], skills=["hoh-qa"], execution_capabilities=CAPABILITIES, machine_id=HOST,
     )
-    first = service.run_capability_preflight(actors["qa"], "project-1")
-    assert first["planner_jobs"] == []
-    probes_before = len(prober.calls)
+    assert service.get_agent_inbox(actors["qa"], "project-1")["capability_blockers"] == []
 
-    ticket = seeded["ticket"]
-    contract = [
-        {
-            "criterion": criterion, "scenario_ref": f"b:{index}", "method": "black_box",
-            "expected_observation": f"Seen: {criterion}", "required_evidence_types": ["test_result"],
-            "required_capabilities": CAPABILITIES,
-        }
-        for index, criterion in enumerate(ticket["acceptance_criteria"], start=1)
-    ]
-    service.configure_validation_contract(
-        actors["planner"], ticket["ticket_id"], ticket["version"], contract, "Browser.",
+    # The project's preflight configuration changes: the approval lapses, and
+    # the earlier record is not reused for it.
+    service.configure_capability_preflight(
+        actors["planner"], "project-1", "build_execution", ["node", "--version"], "Node build.",
     )
-    version = service.get_ticket_context(actors["planner"], ticket["ticket_id"])["ticket"]["version"]
-    claimed = service.claim_ticket(actors["developer"], ticket["ticket_id"], version, 900)
-    service.submit_candidate(
-        actors["developer"], ticket["ticket_id"], claimed["lease"]["lease_id"],
-        claimed["ticket"]["version"], "a" * 40, "b" * 40, "agent/dev-01/DEV-142", ["Ready."],
-        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
-    )
-
     inbox = service.get_agent_inbox(actors["qa"], "project-1")
+    assert inbox["capability_blockers"][0]["missing_approval"] == CAPABILITIES
+    assert inbox["capability_preflight"] is None
+    with pytest.raises(ValidationError):
+        service.claim_qa(actors["qa"], blocked["ticket_id"], version, 900)
 
-    assert len(inbox["capability_preflight"]["planner_jobs"]) == 1
-    assert len(_open_jobs(service, ticket["ticket_id"])) == 1
-    assert len(prober.calls) == probes_before, "the inbox path starts no process"
+    assert service.run_capability_preflight(actors["qa"], "project-1")["approved"] == CAPABILITIES
+    service.claim_qa(actors["qa"], blocked["ticket_id"], version, 900)
+
+
+def test_a_changed_declaration_revokes_the_server_approval(service, actors, blocked) -> None:
+    service.run_capability_preflight(actors["qa"], "project-1")
+
+    service.register_agent(
+        actors["qa"], skills=["hoh-qa"], execution_capabilities=["build_execution"],
+        machine_id=HOST,
+    )
+
+    with service.store.connection() as connection:
+        approved = connection.execute(
+            "SELECT approved_execution_capabilities FROM agent_presence WHERE agent_id = ?",
+            (actors["qa"].agent_id,),
+        ).fetchone()[0]
+    assert approved == "[]"
+
+
+def test_an_unproven_capability_is_never_approved(service, actors, blocked) -> None:
+    blocked["prober"].equipped = {"build_execution"}
+
+    result = service.run_capability_preflight(actors["qa"], "project-1")
+
+    assert result["approved"] == ["build_execution"]
+    with pytest.raises(ValidationError):
+        service.claim_qa(actors["qa"], blocked["ticket_id"],
+                         blocked["submitted"]["ticket"]["version"], 900)
+
+
+def test_a_preflight_on_another_host_approves_nothing(service, actors, blocked) -> None:
+    blocked["prober"].host = "the-hoh-host"
+
+    result = service.run_capability_preflight(actors["qa"], "project-1")
+
+    assert result["approved"] is None
+    with pytest.raises(ValidationError):
+        service.claim_qa(actors["qa"], blocked["ticket_id"],
+                         blocked["submitted"]["ticket"]["version"], 900)
+
+
+def _clear_approval(service, agent_id: str) -> None:
+    """The state of an agent nobody approved, as before wave 7A."""
+    with service.store.connection(immediate=True) as connection:
+        connection.execute(
+            "UPDATE agent_presence SET approved_execution_capabilities = '[]', "
+            "capability_approved_by = NULL WHERE agent_id = ?",
+            (agent_id,),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +229,7 @@ def test_the_planner_review_event_carries_evidence_and_no_machine_name(
     from hoh_control_plane.event_wait import _pending
 
     service.run_capability_preflight(actors["qa"], "project-1")
+    _clear_approval(service, actors["qa"].agent_id)
     service.register_agent(actors["planner"], skills=["hoh-planner"], capacity=1)
     # Resolve the job so the review event, not the job, is what the Planner sees.
     with service.store.connection(immediate=True) as connection:
@@ -212,23 +246,19 @@ def test_the_planner_review_event_carries_evidence_and_no_machine_name(
     assert "planner.configure_agent_capability_profile" in event["next_action"]
 
 
-def test_approval_from_the_preflight_unblocks_qa_and_closes_the_job(
+def test_a_planner_override_is_still_accepted_from_the_preflight(
     service, actors, blocked
 ) -> None:
     result = service.run_capability_preflight(actors["qa"], "project-1")
-    [job] = _open_jobs(service, blocked["ticket_id"])
+    _clear_approval(service, actors["qa"].agent_id)
 
     approved = service.configure_agent_capability_profile(
-        actors["planner"], "project-1", actors["qa"].agent_id, CAPABILITIES,
+        actors["planner"], "project-1", actors["qa"].agent_id, ["build_execution"],
         [result["preflight_ref"]],
     )
 
-    assert approved["approved_execution_capabilities"] == CAPABILITIES
-    assert approved["resolved_planner_jobs"] == [job["planner_job_id"]]
-    assert _open_jobs(service, blocked["ticket_id"]) == []
-    claim = service.claim_qa(actors["qa"], blocked["ticket_id"],
-                             blocked["submitted"]["ticket"]["version"], 900)
-    assert claim["lease"]["role"] == Role.QA.value
+    assert approved["approved_execution_capabilities"] == ["build_execution"]
+    assert approved["capability_approved_by"] == actors["planner"].agent_id
 
 
 @pytest.mark.parametrize(

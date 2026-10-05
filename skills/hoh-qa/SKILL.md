@@ -42,8 +42,8 @@ own equipment, or transfers evidence to another SHA.
 check the real tool and re-register once with the verified subset. Do not declare
 a capability to unlock a claim. `missing_approval` means call
 `qa.run_capability_preflight` once: the HoH host probes this machine, no lease is
-needed, and HoH opens the Planner approval job from the result. Then wait
-silently; keep the candidate frozen.
+needed, and the server approves what it proves on this machine. Anything
+unproven becomes an infrastructure job; wait silently, keep the candidate frozen.
 
 Read [runner-and-capabilities.md](references/runner-and-capabilities.md) for a
 blocked runner, provenance, recovery or Planner handoff. Read

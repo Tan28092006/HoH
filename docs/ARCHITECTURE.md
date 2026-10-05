@@ -317,6 +317,23 @@ with the ordinary tools.
   turn. Reconciliations opened by merges, drift or QA results are not merged
   into it.
 
+- **The server approves QA capability from host preflight.**
+  `run_capability_preflight` (`service/capability.py`) sets the agent's approved
+  profile to declared ∩ proven ∩ verification profile, bound to its registered
+  machine, in the transaction that records the preflight
+  (`_approve_from_preflight`, event `qa.capability_auto_approved`,
+  `capability_approved_by = system:host-preflight`), and closes the review jobs
+  that approval clears. Planner could only ever approve that same set
+  (`_proven_by_preflight`, release 0.3.25), so its step added a wait and no
+  information. Nothing is approved from a record taken on another host. The
+  approval persists across sessions of that agent on that machine until its
+  declaration or machine changes (`register_agent`) or the project's preflight
+  commands, test command or capability profile change; then
+  `_revoke_host_preflight_approvals` clears it (`system:approval-revoked`) and
+  the inbox ignores preflights older than the revocation, so QA reruns one.
+  `planner.configure_agent_capability_profile` stays for overrides, which a
+  revocation leaves alone.
+
 ## Change routing
 
 | When you change | Also |
