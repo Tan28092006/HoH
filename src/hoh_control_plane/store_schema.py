@@ -5,6 +5,12 @@ from __future__ import annotations
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 
+-- Which schema version wrote this database (store_migrations.SCHEMA_VERSION).
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS projects (
     project_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,

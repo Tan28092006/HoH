@@ -108,8 +108,12 @@ helper you are about to change across `service/`.
   (`_event` in `validation.py`). Events are an audit trail, not an event-sourced
   log: current state cannot be rebuilt from them.
 - Schema changes are additive (`ADDITIVE_COLUMNS`, `MIGRATED_INDEXES` in
-  `store_migrations.py`) plus SQLite table rebuilds detected by schema text. There is no
-  schema version number.
+  `store_migrations.py`) plus SQLite table rebuilds detected by schema text.
+  `schema_meta` records `SCHEMA_VERSION` (`store_migrations.py`) on both
+  backends. `initialize` refuses, before touching the file, a database whose
+  version is newer than the code's (`SchemaVersionError`); an older or
+  unrecorded one (version 0) runs the migrations and is stamped. Bump
+  `SCHEMA_VERSION` with every schema change; `test_schema_version.py`.
 
 ## Where invariants are enforced
 

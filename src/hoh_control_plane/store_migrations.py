@@ -23,6 +23,63 @@ class SchemaMigrationError(DomainError):
     status_code = 500
 
 
+class SchemaVersionError(SchemaMigrationError):
+    """The database was written by a newer HoH than this one.
+
+    Raised before anything is executed against it: older code cannot know which
+    columns, constraints or meanings a newer release added, so running it would
+    risk writing rows the newer release then misreads.
+    """
+
+    code = "schema_version_unsupported"
+
+
+# The schema this code creates and upgrades to, recorded in schema_meta.
+# A database with no record predates versioning and is version 0; the additive
+# migrations and rebuilds below take any such database to this version.
+# Bump it whenever a release changes the schema, so an older binary started on
+# the upgraded file refuses rather than guessing.
+#   1 -- first recorded version (after 0.3.30): schema_meta, tickets.status CHECK.
+SCHEMA_VERSION = 1
+
+
+def read_schema_version(connection: Any, columns_of: Any) -> int:
+    """The version recorded in the database, 0 when it was never recorded."""
+    if "value" not in columns_of("schema_meta"):
+        return 0
+    row = connection.execute(
+        "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+    ).fetchone()
+    if row is None:
+        return 0
+    try:
+        return int(row[0])
+    except (TypeError, ValueError) as error:
+        raise SchemaVersionError(
+            f"The database records an unreadable schema version {row[0]!r}; "
+            "refusing to start rather than guess what wrote it."
+        ) from error
+
+
+def require_supported_schema_version(found: int, location: str) -> None:
+    if found > SCHEMA_VERSION:
+        raise SchemaVersionError(
+            f"Database {location} has schema version {found}, newer than the "
+            f"version {SCHEMA_VERSION} this HoH build supports. It was upgraded by a "
+            "newer release; start that release (or a newer one) against it, or "
+            "point this build at a different database. Nothing was changed.",
+            {"database_schema_version": found, "supported_schema_version": SCHEMA_VERSION},
+        )
+
+
+def record_schema_version(connection: Any) -> None:
+    connection.execute(
+        "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?) "
+        "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        (str(SCHEMA_VERSION),),
+    )
+
+
 # A table rebuilt in place is renamed to this suffix, copied from, and dropped.
 # The suffix is also how a foreign key left pointing at one of those dropped
 # temporaries is recognized and repaired below.

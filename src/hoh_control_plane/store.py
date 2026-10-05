@@ -10,10 +10,15 @@ from hoh_control_plane.domain import DomainError
 from hoh_control_plane.store_migrations import (  # noqa: F401  (re-exported)
     ADDITIVE_COLUMNS,
     MIGRATED_INDEXES,
+    SCHEMA_VERSION,
     SQLiteRebuildMigrations,
     SchemaMigrationError,
+    SchemaVersionError,
     apply_additive_columns,
     backfill_experience_scopes,
+    read_schema_version,
+    record_schema_version,
+    require_supported_schema_version,
 )
 from hoh_control_plane.store_schema import (  # noqa: F401  (re-exported)
     CHECKSUM_ARTIFACT,
@@ -226,6 +231,12 @@ class SQLiteStore(SQLiteRebuildMigrations):
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as connection:
+            # A database a newer release upgraded is refused before anything,
+            # even a pragma, touches it.
+            columns_of = self._existing_columns(connection)
+            require_supported_schema_version(
+                read_schema_version(connection, columns_of), str(self.path)
+            )
             # WAL allows many MCP reader processes and one short-lived writer to coexist.
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = NORMAL")
@@ -250,6 +261,11 @@ class SQLiteStore(SQLiteRebuildMigrations):
             connection.execute("PRAGMA legacy_alter_table = ON")
             connection.execute("PRAGMA foreign_keys = OFF")
             self._begin_immediate(connection)
+            # Again under the write lock: another process may have upgraded the
+            # file between the first check and this transaction.
+            require_supported_schema_version(
+                read_schema_version(connection, columns_of), str(self.path)
+            )
             # The rebuilds below repair foreign keys and CHECK constraints that
             # only a SQLite database ever had wrong, so they stay here rather
             # than moving into the shared list: a PostgreSQL database created
@@ -264,6 +280,7 @@ class SQLiteStore(SQLiteRebuildMigrations):
                 connection,
                 [*repaired, "planner_interventions", *(["tickets"] if tickets_rebuilt else [])],
             )
+            record_schema_version(connection)
 
     @staticmethod
     def _existing_columns(connection: sqlite3.Connection) -> Any:

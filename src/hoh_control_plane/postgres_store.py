@@ -22,6 +22,9 @@ from hoh_control_plane.store import (
     StoreConnection,
     StoreIntegrityError,
     apply_additive_columns,
+    read_schema_version,
+    record_schema_version,
+    require_supported_schema_version,
 )
 
 
@@ -114,6 +117,12 @@ class PostgresStore:
         try:
             connection.execute(f"SET LOCAL lock_timeout = '{int(self.lock_timeout_seconds * 1000)}ms'")
             connection.execute("SELECT pg_advisory_xact_lock(684643, hashtext(current_schema()))")
+            seam = StoreConnection(connection, self.dialect)
+            # Refuse a database a newer release upgraded before changing it.
+            require_supported_schema_version(
+                read_schema_version(seam, self._existing_columns(connection)),
+                "(PostgreSQL, current schema)",
+            )
             connection.execute(translate_schema())
             # The schema script creates anything missing whole, but it cannot
             # add a column to a table that already exists, so a database from an
@@ -125,10 +134,8 @@ class PostgresStore:
             # Wrapped rather than used raw: the shared migration is written in
             # qmark style like every other statement in this codebase, and only
             # the seam knows to translate it for this driver.
-            apply_additive_columns(
-                StoreConnection(connection, self.dialect),
-                self._existing_columns(connection),
-            )
+            apply_additive_columns(seam, self._existing_columns(connection))
+            record_schema_version(seam)
             connection.commit()
         finally:
             connection.close()

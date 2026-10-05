@@ -359,6 +359,25 @@ def test_migrating_a_postgres_database_twice_changes_nothing(pg_service) -> None
     assert count > 0, "no duplicate-column error, and the table is intact"
 
 
+def test_postgres_records_and_enforces_the_schema_version(pg_service) -> None:
+    from hoh_control_plane.store import SCHEMA_VERSION, SchemaVersionError
+
+    with pg_service.store.connection() as connection:
+        recorded = connection.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()[0]
+    assert int(recorded) == SCHEMA_VERSION
+
+    with pg_service.store.connection(immediate=True) as connection:
+        connection.execute("DELETE FROM schema_meta")
+    pg_service.store.initialize()  # an unversioned (older) database is upgraded
+    with pg_service.store.connection(immediate=True) as connection:
+        assert int(connection.execute("SELECT value FROM schema_meta").fetchone()[0]) == SCHEMA_VERSION
+        connection.execute("UPDATE schema_meta SET value = ?", (str(SCHEMA_VERSION + 1),))
+    with pytest.raises(SchemaVersionError, match="newer"):
+        pg_service.store.initialize()
+
+
 def test_the_experience_index_is_rebuilt_on_postgres_too(pg_service, pg_seeded) -> None:
     """The backfill is written in qmark style; only the seam translates it.
 
