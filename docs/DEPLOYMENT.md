@@ -7,7 +7,7 @@ the architecture specification also includes future requirements.
 ## Pilot topology
 
 One trusted execution host runs API/dashboard, HTTP MCP, scheduler, Git repositories
-and native supervised workers. Set `HOH_WORKER_MODE=supervised` and run
+and native supervised workers. Keep `HOH_WORKER_MODE=supervised` (the default) and run
 `hoh-supervisor`; see [RUNTIME_OPERATIONS.md](RUNTIME_OPERATIONS.md). Docker/WSL
 is optional. Keep SQLite on local disk. Back
 up using SQLite's backup API and retain corresponding Git objects/evidence.

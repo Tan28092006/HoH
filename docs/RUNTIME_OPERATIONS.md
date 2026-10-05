@@ -67,10 +67,11 @@ configuration. Follow AGENT_KIT.md for HTTP ingress and bearer identities. For
 PostgreSQL, configure `HOH_DATABASE_URL` securely and an absolute
 `HOH_ARTIFACT_ROOT` accessible to these processes on the execution host.
 
-Set `HOH_WORKER_MODE=supervised` on **every MCP service process**. MCP then queues
-durable jobs and the supervisor executes them. `legacy` remains the compatibility
-default and launches detached workers without supervisor guarantees. Unknown
-mode values fail instead of selecting legacy silently.
+`HOH_WORKER_MODE` defaults to `supervised`: MCP queues durable
+jobs and the supervisor executes them, so a supervisor must run beside every MCP
+service process. `HOH_WORKER_MODE=legacy` is an explicit opt-in that launches
+detached workers without the job lock, timeout or crash recovery. Unknown mode
+values fail instead of selecting either mode silently.
 
 Use an OS service manager to restart the supervisor and scheduler after failure
 or reboot. This package supplies foreground commands and a health probe; it does

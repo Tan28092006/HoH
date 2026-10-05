@@ -218,9 +218,10 @@ def test_a_client_supplied_role_cannot_override_the_credential(service) -> None:
 
 
 @pytest.mark.parametrize("launcher", ["_start_qa_test_worker", "_start_worktree_provision_worker", "_start_candidate_submission_worker", "_start_merge_worker"])
-def test_postgres_worker_credentials_are_not_in_process_arguments(launcher):
+def test_postgres_worker_credentials_are_not_in_process_arguments(launcher, monkeypatch):
     from unittest.mock import patch
     from hoh_control_plane import mcp_server
+    monkeypatch.setenv("HOH_WORKER_MODE", "legacy")  # only legacy mode spawns
     dsn = "postgresql://fixture-user:fixture-password@db.invalid/hoh"
     with patch.object(mcp_server.subprocess, "Popen") as popen:
         getattr(mcp_server, launcher)(dsn, "fixture-job")

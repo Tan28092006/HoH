@@ -15,13 +15,14 @@ One host process (`deploy/desktop/hoh_desktop.py --host` locally) serves:
   `mcp/tools/` (`common`, `planner`, `developer`, `qa`, `integrator`, each with
   `register(server, service, actor, invoke)`); `mcp/invoke.py` is the audited,
   idempotent, contention-retried call wrapper and error text; `mcp/workers.py`
-  spawns legacy-mode workers; `mcp/http_app.py` authenticates the bearer. Over
+  spawns workers only in opt-in legacy mode; `mcp/http_app.py` authenticates the bearer. Over
   HTTP each bearer credential gets its own FastMCP instance, so tools outside the
   caller's role are absent. Over stdio the role comes from `HOH_AGENT_ROLE`.
 - **Supervisor** — `supervisor.py` runs queued jobs in managed worker processes
   (`managed_worker.py`, `managed_process.py`) and recovers RUNNING jobs on start.
-  `HOH_WORKER_MODE=supervised` selects it; the default `legacy` mode spawns
-  unsupervised `*_worker.py` processes. The desktop host sets `supervised`.
+  `HOH_WORKER_MODE` defaults to `supervised`, so MCP only queues; the explicit
+  opt-in `legacy` mode spawns unsupervised `*_worker.py` processes with no job
+  lock, timeout or recovery. The desktop host and `local_agent` set `supervised`.
 - **Scheduler** — `scheduler.py` sweeps expired leases and dispatches offers.
 
 State lives in one database (SQLite by default; PostgreSQL optional) and Git:

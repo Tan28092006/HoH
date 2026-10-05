@@ -1,4 +1,8 @@
-"""Detached worker processes started by MCP tools (legacy worker mode)."""
+"""Worker launch for queued MCP jobs.
+
+Supervised mode (the default) only queues: hoh-supervisor drains the durable
+queue. ``HOH_WORKER_MODE=legacy`` opts in to detached, unsupervised workers.
+"""
 from __future__ import annotations
 
 import os
@@ -19,8 +23,14 @@ def _worker_location(database_path: Path | str) -> tuple[str, dict[str, str] | N
     return location, None
 
 
+#: Queued jobs wait for hoh-supervisor, which holds the job lock, enforces the
+#: worker timeout and recovers RUNNING work after a crash. ``legacy`` (detached,
+#: unsupervised workers) must be selected explicitly.
+DEFAULT_WORKER_MODE = 'supervised'
+
+
 def _supervised_workers() -> bool:
-    mode = os.getenv('HOH_WORKER_MODE', 'legacy')
+    mode = os.getenv('HOH_WORKER_MODE') or DEFAULT_WORKER_MODE
     if mode not in {'legacy', 'supervised'}:
         raise ValidationError('HOH_WORKER_MODE must be legacy or supervised')
     return mode == 'supervised'

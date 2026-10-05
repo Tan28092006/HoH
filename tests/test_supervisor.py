@@ -2,6 +2,8 @@ from concurrent.futures import Future
 import os
 from pathlib import Path
 
+import pytest
+
 
 def test_serializes_memory_heavy_jobs_but_keeps_git_worker_capacity(service, monkeypatch):
     from concurrent.futures import Future
@@ -75,6 +77,32 @@ def test_supervised_mcp_does_not_launch_unbounded_detached_workers(monkeypatch, 
     monkeypatch.setenv('HOH_WORKER_MODE', 'supervised')
     monkeypatch.setattr(mcp_server.subprocess, 'Popen', lambda *a, **kw: (_ for _ in ()).throw(AssertionError('Unbounded spawn')))
     mcp_server._start_qa_test_worker(tmp_path / 'unused.db', 'testrun_queued')
+
+
+@pytest.mark.parametrize('unset', [True, False])
+def test_supervised_is_the_default_worker_mode(monkeypatch, tmp_path, unset):
+    """With no explicit mode, MCP only queues: no lock-less, timeout-less spawn."""
+    from hoh_control_plane import mcp_server
+    from hoh_control_plane.mcp import workers
+    if unset:
+        monkeypatch.delenv('HOH_WORKER_MODE', raising=False)
+    else:
+        monkeypatch.setenv('HOH_WORKER_MODE', '')
+    monkeypatch.setattr(mcp_server.subprocess, 'Popen', lambda *a, **kw: (_ for _ in ()).throw(AssertionError('Unbounded spawn')))
+    assert workers.DEFAULT_WORKER_MODE == 'supervised'
+    assert workers._supervised_workers()
+    for launcher in ('_start_qa_test_worker', '_start_worktree_provision_worker',
+                     '_start_candidate_submission_worker', '_start_merge_worker'):
+        getattr(mcp_server, launcher)(tmp_path / 'unused.db', 'job_queued')
+
+
+def test_legacy_worker_mode_is_an_explicit_opt_in(monkeypatch, tmp_path):
+    from hoh_control_plane import mcp_server
+    monkeypatch.setenv('HOH_WORKER_MODE', 'legacy')
+    launched = []
+    monkeypatch.setattr(mcp_server.subprocess, 'Popen', lambda command, **kw: launched.append(command))
+    mcp_server._start_qa_test_worker(tmp_path / 'unused.db', 'testrun_queued')
+    assert launched and launched[0][2] == 'hoh_control_plane.qa_worker'
 
 
 def test_maximum_concurrency_is_enforced_before_spawn(service, actors, seeded, tmp_path, monkeypatch):
