@@ -40,8 +40,8 @@ class CandidateMixin:
         """Durably acknowledge a candidate before detached Git validation begins."""
         require_role(actor, Role.DEVELOPER)
         context_snapshot_id = require_snapshot_id(context_snapshot_id, "dev.submit_candidate")
-        self._valid_commit(commit_sha, "commit_sha")
-        self._valid_commit(base_commit, "base_commit")
+        commit_sha = self._full_commit(actor, ticket_id, commit_sha, "commit_sha")
+        base_commit = self._full_commit(actor, ticket_id, base_commit, "base_commit")
         self._bounded_text(branch_ref, "branch_ref", 300)
         self._bounded_list(developer_claims, "developer_claims", 50, 2000)
         with self.store.connection(immediate=True) as connection:
@@ -292,8 +292,8 @@ class CandidateMixin:
     ) -> dict[str, Any]:
         require_role(actor, Role.DEVELOPER)
         context_snapshot_id = require_snapshot_id(context_snapshot_id, "dev.submit_candidate")
-        self._valid_commit(commit_sha, "commit_sha")
-        self._valid_commit(base_commit, "base_commit")
+        commit_sha = self._full_commit(actor, ticket_id, commit_sha, "commit_sha")
+        base_commit = self._full_commit(actor, ticket_id, base_commit, "base_commit")
         self._bounded_text(branch_ref, "branch_ref", 300)
         self._bounded_list(developer_claims, "developer_claims", 50, 2000)
         # Read -> Git with no transaction held -> re-validate and write. Git

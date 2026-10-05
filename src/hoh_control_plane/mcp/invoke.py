@@ -12,7 +12,7 @@ from mcp.types import TextContent
 from hoh_control_plane.observability import correlation_scope
 from hoh_control_plane.domain import Actor, ConflictError, DomainError
 from hoh_control_plane.service import ControlPlaneService
-from hoh_control_plane.service._common import delivered_json, require_snapshot_id
+from hoh_control_plane.service._common import agent_facing, delivered_json, require_snapshot_id
 from hoh_control_plane.store import ContentionError
 
 
@@ -56,6 +56,8 @@ class _CompactFastMCP(FastMCP):
         result = await super().call_tool(name, arguments)
         if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict):
             _content, structured = result
+            # Every result an agent reads names commits and digests in short form.
+            structured = agent_facing(structured)
             # A non-dict return value is wrapped as {"result": value} by FastMCP.
             payload = structured["result"] if set(structured) == {"result"} else structured
             return [TextContent(type="text", text=delivered_json(payload))], structured

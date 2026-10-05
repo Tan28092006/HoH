@@ -181,7 +181,7 @@ def test_compaction_retains_criteria_constraints_candidate_sha_and_findings(
             context["ticket"]["preservation_constraints"]
             == ticket["preservation_constraints"]
         )
-        assert context["candidate"]["commit_sha"] == candidate["candidate"]["commit_sha"]
+        assert context["candidate"]["commit_sha"] == candidate["candidate"]["commit_sha"][:12]
         assert context["known_failures"][0]["status"] == "failed"
         assert (
             context["known_failures"][0]["evidence"][0]["storage_ref"]
@@ -275,7 +275,7 @@ def test_qa_packet_keeps_candidate_identity_and_test_interface(
     )
 
     assert context["candidate"]["candidate_id"] == candidate["candidate"]["candidate_id"]
-    assert context["candidate"]["base_commit"] == candidate["candidate"]["base_commit"]
+    assert context["candidate"]["base_commit"] == candidate["candidate"]["base_commit"][:12]
     assert context["candidate"]["branch_ref"] == candidate["candidate"]["branch_ref"]
     omitted = {entry["section"] for entry in context["omitted_sections"]}
     assert "candidate" not in omitted

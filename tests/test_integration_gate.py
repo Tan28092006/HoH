@@ -207,7 +207,7 @@ def test_failing_regression_gate_records_rework_context_for_the_developer(
     # The queued gate binds the entry to the rejected candidate by reference and
     # records the mainline it left unchanged (the candidate's base).
     assert failure["source_ref"] == f"candidate:{candidate['candidate']['candidate_id']}"
-    assert failure["artifact_commit"] == candidate["candidate"]["base_commit"]
+    assert failure["artifact_commit"] == candidate["candidate"]["base_commit"][:12]
     assert context["ticket"]["blocked_reason"]
     assert any(
         run["test_run_id"] == gate_run["test_run_id"]

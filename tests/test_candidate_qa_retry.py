@@ -151,8 +151,9 @@ def test_recovery_reopens_a_blocked_ticket_for_an_independent_fresh_qa_verdict(
         if entry["entry_type"] == "planner_decision"
         and entry["source_ref"] == finding_ids[0]
     )
-    assert candidate["commit_sha"] in decision["content"]
-    assert decision["artifact_commit"] == candidate["commit_sha"]
+    # Packets show commits as 12-character prefixes; the store keeps them whole.
+    assert candidate["commit_sha"][:12] in decision["content"]
+    assert decision["artifact_commit"] == candidate["commit_sha"][:12]
 
     # The QA rejection opened a reconciliation barrier; Planner assesses it first.
     keep_open_tickets(service, actors["planner"])

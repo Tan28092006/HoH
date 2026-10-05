@@ -292,6 +292,37 @@ def _required_execution_capabilities(ticket: dict[str, Any]) -> set[str]:
     }
 
 
+# What an agent reads names a commit by 12 hex characters, as `git log` would.
+# A full SHA-1 costs about ten tokens and a SHA-256 digest about sixteen, every
+# time a packet or result repeats one, and no agent compares them by eye. The
+# store, audit events and evidence reports keep the full value; tools that take
+# a commit accept either form and resolve a prefix before any comparison.
+AGENT_SHA_CHARS = 12
+_FULL_HEX = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+_EMBEDDED_HEX = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{40}(?:[0-9a-f]{24})?(?![0-9A-Za-z])")
+
+
+def agent_facing(payload: Any) -> Any:
+    """Abbreviate every full commit SHA and SHA-256 digest in what an agent reads.
+
+    A whole value that is a 40 or 64 hex string is shortened. Inside prose (a
+    value with whitespace) embedded ones are shortened too; a value without
+    whitespace is a reference an agent may pass back, so only an exact match is
+    touched. Idempotent: an abbreviated value no longer matches.
+    """
+    if isinstance(payload, str):
+        if _FULL_HEX.fullmatch(payload):
+            return payload[:AGENT_SHA_CHARS]
+        if any(character.isspace() for character in payload):
+            return _EMBEDDED_HEX.sub(lambda match: match.group(0)[:AGENT_SHA_CHARS], payload)
+        return payload
+    if isinstance(payload, dict):
+        return {key: agent_facing(value) for key, value in payload.items()}
+    if isinstance(payload, (list, tuple)):
+        return [agent_facing(value) for value in payload]
+    return payload
+
+
 def delivered_json(payload: Any) -> str:
     """The exact text an MCP tool result carries: compact, unescaped JSON."""
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False, default=str)

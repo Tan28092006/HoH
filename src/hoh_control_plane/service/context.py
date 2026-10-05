@@ -32,6 +32,7 @@ from hoh_control_plane.service._common import (
     Connection,
     json,
     _serialize,
+    agent_facing,
     _validated_budget,
     require_project,
 )
@@ -1052,6 +1053,8 @@ class ContextMixin:
         smaller than that floor: a Developer without acceptance criteria, or QA
         without the frozen candidate SHA, is more dangerous than an oversized packet.
         """
+        # Shortened before fitting, so the budget measures the SHAs as delivered.
+        payload = agent_facing(payload)
         omitted: list[dict[str, Any]] = payload.pop("_precompiled_omissions", [])
         payload["token_budget"] = token_budget
         payload["omitted_sections"] = omitted

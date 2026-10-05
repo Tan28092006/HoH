@@ -814,6 +814,27 @@ class GitWorktreeManager:
             raise ValidationError("Git commit or branch cannot be resolved")
         return result.stdout.strip()
 
+    def expand_commit(self, repository: Path, prefix: str, field: str) -> str:
+        """Resolve an abbreviated commit SHA to the full one, or refuse it.
+
+        Only a commit whose name starts with the prefix counts, so a branch or
+        tag that happens to be spelled in hex can never stand in for it.
+        """
+        result = self._git(repository, "rev-parse", "--verify", "--quiet", f"{prefix}^{{commit}}", check=False)
+        full = result.stdout.strip().lower()
+        if result.returncode == 0 and full.startswith(prefix.lower()):
+            return full
+        matches = self._git(repository, "rev-parse", f"--disambiguate={prefix}", check=False)
+        if len(matches.stdout.split()) > 1:
+            raise ValidationError(
+                f"{field} {prefix} is ambiguous in the project repository; pass more characters",
+                {"reason": "commit_prefix_ambiguous", "field": field},
+            )
+        raise ValidationError(
+            f"{field} {prefix} names no commit in the project repository",
+            {"reason": "commit_unknown", "field": field},
+        )
+
     @staticmethod
     def _existing_directory(value: str, field: str) -> Path:
         try:

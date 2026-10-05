@@ -13,7 +13,12 @@ from hoh_control_plane.service._common import (
     _row,
     json,
     Connection,
+    Path,
+    re,
+    require_project,
 )
+
+_ABBREVIATED_COMMIT_RE = re.compile(r"[0-9a-fA-F]{7,39}")
 
 
 class ValidationMixin:
@@ -121,10 +126,37 @@ class ValidationMixin:
         if not isinstance(value, int) or isinstance(value, bool) or not 30 <= value <= 3600:
             raise ValidationError("offer_seconds must be an integer from 30 to 3600")
 
-    @staticmethod
-    def _valid_commit(value: str, field: str) -> None:
-        if not COMMIT_RE.fullmatch(value):
-            raise ValidationError(f"{field} must be a 40-64 character hexadecimal digest")
+    def _full_commit(self, actor: Actor, ticket_id: str, value: Any, field: str) -> str:
+        """Accept a full or abbreviated (7+ hex) commit SHA; return the full one.
+
+        Agents read commits as 12-character abbreviations, so a tool that takes
+        a commit must accept one. The prefix is resolved in the project
+        repository before anything compares it with a stored full SHA. Git runs
+        outside any write transaction.
+        """
+        if isinstance(value, str) and COMMIT_RE.fullmatch(value):
+            return value
+        if not isinstance(value, str) or not _ABBREVIATED_COMMIT_RE.fullmatch(value):
+            raise ValidationError(
+                f"{field} must be a commit SHA of at least 7 hexadecimal characters",
+                {"reason": "commit_invalid", "field": field},
+            )
+        with self.store.connection() as connection:
+            project_id = self._project_for_ticket(connection, ticket_id)
+            require_project(actor, project_id)
+            repository = _row(connection.execute(
+                "SELECT repository_path FROM project_repositories WHERE project_id = ?",
+                (project_id,),
+            ).fetchone())
+        if repository is None:
+            raise ValidationError(
+                f"{field} is abbreviated and this project has no repository to resolve it in; "
+                "pass the full SHA",
+                {"reason": "commit_unresolvable", "field": field},
+            )
+        return self.git_worktrees.expand_commit(
+            Path(repository["repository_path"]), value, field
+        )
 
     @staticmethod
     def _strip_ref(reference: str, kind: str) -> str:

@@ -266,7 +266,7 @@ def test_failed_qa_becomes_rework_context_bound_to_candidate(
 
     assert verdict["ticket"]["status"] == TicketStatus.REWORK.value
     context = service.get_ticket_context(actors["developer_2"], "DEV-142")
-    assert context["candidate"]["commit_sha"] == "a" * 40
+    assert context["candidate"]["commit_sha"] == "a" * 12
     assert context["known_failures"][0]["evidence"][0]["storage_ref"].startswith(
         "evidence://"
     )
