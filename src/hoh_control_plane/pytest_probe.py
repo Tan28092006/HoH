@@ -15,7 +15,21 @@ import subprocess
 import sys
 
 
+def _drop_own_directory():
+    """Remove this file's directory, which Python put first on sys.path.
+
+    The probe runs as a script, so its directory -- the installed
+    hoh_control_plane package -- becomes sys.path[0]. Its subpackages would then
+    shadow same-named top-level packages for the candidate: hoh_control_plane/mcp
+    hid the MCP SDK's ``mcp`` and broke every test importing it.
+    """
+    own = Path(__file__).resolve().parent
+    sys.path[:] = [entry for entry in sys.path
+                   if not entry or Path(entry).resolve() != own]
+
+
 def main():
+    _drop_own_directory()
     report, settings_path, *arguments = sys.argv[1:]
     settings = json.loads(Path(settings_path).read_text(encoding="utf-8"))
     root = Path.cwd().resolve()

@@ -601,3 +601,33 @@ def test_a_failing_run_is_never_reused(service, actors, seeded, tmp_path: Path) 
 
     assert "reused" not in again
     assert again["test_run"]["test_run_id"] != first["test_run"]["test_run_id"]
+
+
+def test_the_probe_does_not_let_its_own_package_shadow_candidate_imports(tmp_path: Path) -> None:
+    # The probe runs as a script, so Python puts the installed hoh_control_plane
+    # directory first on sys.path; its mcp/ subpackage then hid the MCP SDK and
+    # every candidate test importing mcp failed (0.3.30-0.3.32 QA regression).
+    import json as _json
+    import subprocess as _subprocess
+    from hoh_control_plane import qa_runner as _qa_runner
+
+    probe = Path(_qa_runner.__file__).with_name("pytest_probe.py")
+    (tmp_path / "test_sdk_import.py").write_text(
+        "import mcp\n"
+        "import mcp.server.fastmcp as fastmcp\n"
+        "def test_mcp_is_the_sdk():\n"
+        "    assert 'hoh_control_plane' not in (mcp.__file__ or '')\n"
+        "    assert fastmcp.FastMCP\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "config.json"
+    config.write_text(_json.dumps({"modules": []}), encoding="utf-8")
+    report = tmp_path / "report.json"
+
+    completed = _subprocess.run(
+        [sys.executable, str(probe), str(report), str(config),
+         "-q", "-p", "no:cacheprovider", "test_sdk_import.py"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=300,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
