@@ -1012,6 +1012,8 @@ class IntegrationMixin:
                         self._frozen_ticket_closure(connection, job["ticket_id"])
                         if ticket_scoped else None
                     ),
+                    rework_ticket_id=job["ticket_id"] if regression_failure else None,
+                    resolved_by="system:gate-regression",
                 )
                 self._queue_ticket(connection, actor, job["project_id"], rework_ticket)
                 # A drifted candidate is a planning problem as much as a rework

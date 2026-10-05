@@ -101,3 +101,35 @@ def test_planner_resuming_the_ticket_records_the_reset(service, actors, seeded) 
     again = _reject_once(service, actors, ticket_id, 4)
     assert again["qa_rejections"] == 1
     assert _ticket(service, ticket_id)["status"] == "REWORK"
+
+
+def _reconciliations(service, planner, status: str) -> list[dict]:
+    return service.list_repository_reconciliations(
+        planner, "project-1", status=status
+    )["reconciliations"]
+
+
+def test_a_rejection_resolves_its_own_barrier_and_the_third_does_not(
+    service, actors, seeded, monkeypatch
+) -> None:
+    """Wave 7A: a rejection's ticket-scoped reconciliation is resolved by the server."""
+    ticket_id = seeded["ticket"]["ticket_id"]
+    # Record the pending state right after each verdict, before any Planner turn.
+    monkeypatch.setitem(globals(), "keep_open_tickets", lambda *a, **k: 0)
+
+    _reject_once(service, actors, ticket_id, 1)
+
+    assert _reconciliations(service, actors["planner"], "PENDING") == []
+    [resolved] = _reconciliations(service, actors["planner"], "RESOLVED")
+    assert resolved["resolved_by"] == "system:qa-rejection"
+    decisions = {d["ticket_id"]: d["disposition"] for d in resolved["decision_manifest"]["ticket_decisions"]}
+    assert decisions == {ticket_id: "rework"}
+    # The Developer can claim the rework at once.
+    assert _ticket(service, ticket_id)["status"] == "REWORK"
+
+    _reject_once(service, actors, ticket_id, 2)
+    _reject_once(service, actors, ticket_id, 3)
+
+    [pending] = _reconciliations(service, actors["planner"], "PENDING")
+    assert ticket_id in pending["ticket_versions"]
+    assert _ticket(service, ticket_id)["status"] == "BLOCKED"

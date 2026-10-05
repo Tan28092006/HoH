@@ -62,7 +62,8 @@ The service enforces these; [ARCHITECTURE.md](docs/ARCHITECTURE.md) says where.
   depends on it, and no docs/spec or root file changed. A successful merge opens
   the next reconciliation atomically with its result. QA rejection, integration
   regression and drift onto an already-observed `main` open a ticket-scoped one
-  instead: only that ticket and its transitive dependents freeze.
+  instead: only that ticket and its transitive dependents freeze. The server
+  resolves a rejection's or regression's itself, except a spent rework budget.
 - Planner sync fetches every remote head with prune but never checks out, pulls,
   merges or rebases the shared checkout. An obsolete ticket is retired through
   the pending reconciliation, which preserves its worktrees, candidates and
@@ -80,8 +81,8 @@ The service enforces these; [ARCHITECTURE.md](docs/ARCHITECTURE.md) says where.
   require the `context_snapshot_id` of a packet read just before the write.
 - Packets are bounded (4,000 estimated tokens by default; contract fields 600
   characters, contract 1,200 tokens). Older history is resolved by reference.
-- Planner synchronizes repository truth after bootstrap and before every idle
-  wait, and keeps at most three current priorities. Execution roles report one
+- Planner syncs repository truth after bootstrap and before every idle wait,
+  and keeps at most three current priorities. Execution roles report one
   unhandled failure through `work.report_failure` before going idle.
 
 ## Role skills

@@ -985,6 +985,9 @@ class QaMixin:
                     observation_ref=f"context:{known_failure_entry_id}",
                     branch=candidate.get("branch_ref"),
                     frozen_ticket_ids=self._frozen_ticket_closure(connection, ticket_id),
+                    # The rework budget's last rejection stays with Planner.
+                    rework_ticket_id=None if budget_exhausted else ticket_id,
+                    resolved_by="system:qa-rejection",
                 )
             if verdict in {"passed", "failed"}:
                 self._queue_ticket(connection, actor, project_id, verdict_ticket)

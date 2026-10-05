@@ -410,6 +410,8 @@ class RepositoryReconciliationMixin:
         merged_ticket_id: str | None = None,
         changed_paths: list[str] | None = None,
         frozen_ticket_ids: list[str] | None = None,
+        rework_ticket_id: str | None = None,
+        resolved_by: str | None = None,
     ) -> str:
         """Open the next Planner turn from a candidate or integration result.
 
@@ -420,6 +422,12 @@ class RepositoryReconciliationMixin:
         With ``frozen_ticket_ids`` the result left ``main`` unchanged, so only
         those tickets are captured and closed (scope ``tickets``); every other
         ticket keeps its offers and claims. Without it the whole project closes.
+
+        With ``rework_ticket_id`` as well (wave 7A) the server resolves the
+        ticket-scoped reconciliation in the same transaction: that ticket, already
+        REWORK or BLOCKED, gets ``rework`` and its dependents ``keep``, since the
+        dependency edges already hold them. It stays pending for Planner when an
+        older pending reconciliation captured one of the same tickets.
         """
         project = self._one(
             connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
@@ -497,6 +505,43 @@ class RepositoryReconciliationMixin:
                 WHERE reconciliation_id = ?
                 """,
                 (timestamp, json.dumps(manifest, sort_keys=True), reconciliation_id),
+            )
+        elif (
+            rework_ticket_id is not None
+            and frozen_ticket_ids is not None
+            and rework_ticket_id in ticket_versions
+            and ticket_versions[rework_ticket_id]["status"] in {
+                TicketStatus.REWORK.value, TicketStatus.BLOCKED.value
+            }
+            and self._older_overlapping_reconciliation(
+                connection, self._repository_reconciliation(connection.execute(
+                    "SELECT * FROM repository_reconciliations WHERE reconciliation_id = ?",
+                    (reconciliation_id,),
+                ).fetchone())
+            ) is None
+        ):
+            decided_by = resolved_by or "system:qa-rejection"
+            auto_reason = (
+                f"{subject}: {rework_ticket_id} is back for rework and its dependents wait on "
+                "their dependency edge; resolved by the server."
+            )
+            manifest = {
+                "summary": auto_reason,
+                "ticket_decisions": [
+                    {"ticket_id": ticket_id,
+                     "disposition": "rework" if ticket_id == rework_ticket_id else "keep",
+                     "reason": auto_reason, "decided_by": decided_by}
+                    for ticket_id in sorted(ticket_versions)
+                ],
+                "new_ticket_ids": [],
+            }
+            connection.execute(
+                """
+                UPDATE repository_reconciliations
+                SET status = 'RESOLVED', resolved_by = ?, resolved_at = ?, decision_manifest = ?
+                WHERE reconciliation_id = ?
+                """,
+                (decided_by, timestamp, json.dumps(manifest, sort_keys=True), reconciliation_id),
             )
         elif merged_ticket_id is not None and changed_paths is not None:
             # Shadow mode: record what the scope rule would have frozen, while

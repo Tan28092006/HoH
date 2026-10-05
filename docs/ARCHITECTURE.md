@@ -334,6 +334,17 @@ with the ordinary tools.
   `planner.configure_agent_capability_profile` stays for overrides, which a
   revocation leaves alone.
 
+- **A rejection resolves its own barrier.** `_open_commit_reconciliation`
+  takes `rework_ticket_id` and `resolved_by`. A QA rejection
+  (`submit_qa_verdict`, `system:qa-rejection`) and an integration gate
+  regression (`system:gate-regression`) pass the judged ticket, already REWORK
+  or BLOCKED, and the ticket-scoped reconciliation is resolved in the same
+  transaction: `rework` for that ticket, `keep` for its dependents, which their
+  dependency edge still holds. Offers are not withdrawn. It stays PENDING for
+  Planner when the rejection spent the rework budget (`MAX_QA_REJECTIONS`), for
+  drift, or when an older pending reconciliation captured one of the same
+  tickets (commit order). Planner kept having to restate exactly this.
+
 ## Change routing
 
 | When you change | Also |
