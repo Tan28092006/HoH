@@ -5,7 +5,9 @@ from hoh_control_plane.service._common import (
     Actor,
     Any,
     ConflictError,
+    InterventionSeverity,
     NotFoundError,
+    PlannerJobType,
     RETIRABLE_TICKET_STATUSES,
     Role,
     TicketStatus,
@@ -449,6 +451,12 @@ class TicketRetirementMixin:
                             *open_planner_jobs,
                         ),
                     )
+                rescue = self._rescue_dependents_of_retired(
+                    connection,
+                    Actor(request["requested_by"], Role.PLANNER, frozenset({request["project_id"]})),
+                    request["project_id"], ticket_id, request["target_status"],
+                    [request["replacement_ticket_id"]] if request.get("replacement_ticket_id") else [],
+                )
                 self._event(
                     connection,
                     actor,
@@ -462,6 +470,8 @@ class TicketRetirementMixin:
                         "target_status": request["target_status"],
                         "context_ref": f"ctx:entry:{entry_id}",
                         "resolved_planner_jobs": open_planner_jobs,
+                        "rewired_dependent_ticket_ids": rescue["rewired"],
+                        "escalated_dependent_ticket_ids": rescue["escalated"],
                     },
                 )
                 settled.append(self._one(
@@ -470,6 +480,109 @@ class TicketRetirementMixin:
                     (request["request_id"],),
                 ))
         return {"settled": settled, "count": len(settled)}
+
+    def _rescue_dependents_of_retired(
+        self,
+        connection: Connection,
+        actor: Actor,
+        project_id: str,
+        retired_ticket_id: str,
+        retired_status: str,
+        replacement_ticket_ids: list[str],
+    ) -> dict[str, list[str]]:
+        """Give every open dependent of retired work a way out, in the same transaction.
+
+        Only DONE satisfies a dependency, so a dependent of CANCELLED or
+        SUPERSEDED work could never be offered again (review R2). With a
+        replacement, the edge moves to it: the replacement carries the work the
+        dependent was waiting for. Without one, or when moving the edge would
+        close a cycle or point at retired work, the dependent gets its own
+        Planner job naming the retired dependency, so the decision is queued
+        instead of left to someone noticing a ticket that never moves.
+        """
+        closed = {
+            TicketStatus.DONE.value,
+            TicketStatus.CANCELLED.value,
+            TicketStatus.SUPERSEDED.value,
+        }
+        rows = connection.execute(
+            """
+            SELECT d.ticket_id FROM ticket_dependencies d
+            JOIN tickets t ON t.ticket_id = d.ticket_id
+            WHERE d.depends_on_ticket_id = ? ORDER BY d.ticket_id
+            """,
+            (retired_ticket_id,),
+        ).fetchall()
+        rewired: list[str] = []
+        escalated: list[str] = []
+        planner_job_ids: list[str] = []
+        for row in rows:
+            dependent = self._ticket(connection, str(row["ticket_id"]))
+            if dependent["status"] in closed:
+                continue
+            dependent_id = dependent["ticket_id"]
+            targets: list[str] = []
+            usable = bool(replacement_ticket_ids)
+            for replacement_id in replacement_ticket_ids:
+                replacement = _row(connection.execute(
+                    "SELECT status FROM tickets WHERE ticket_id = ?", (replacement_id,)
+                ).fetchone())
+                if (
+                    replacement is None
+                    or replacement_id == dependent_id
+                    or replacement["status"] in {
+                        TicketStatus.CANCELLED.value, TicketStatus.SUPERSEDED.value
+                    }
+                    or self._dependency_would_cycle(connection, dependent_id, replacement_id)
+                ):
+                    usable = False
+                    break
+                targets.append(replacement_id)
+            if usable:
+                connection.execute(
+                    "DELETE FROM ticket_dependencies WHERE ticket_id = ? AND depends_on_ticket_id = ?",
+                    (dependent_id, retired_ticket_id),
+                )
+                for target in targets:
+                    if connection.execute(
+                        "SELECT 1 FROM ticket_dependencies "
+                        "WHERE ticket_id = ? AND depends_on_ticket_id = ?",
+                        (dependent_id, target),
+                    ).fetchone() is None:
+                        connection.execute(
+                            "INSERT INTO ticket_dependencies (ticket_id, depends_on_ticket_id) "
+                            "VALUES (?, ?)",
+                            (dependent_id, target),
+                        )
+                self._event(
+                    connection, actor, project_id, "ticket.dependency_rewired", "ticket",
+                    dependent_id, dependent["version"],
+                    {"retired_ticket_id": retired_ticket_id, "retired_status": retired_status,
+                     "replacement_ticket_ids": targets},
+                )
+                rewired.append(dependent_id)
+                continue
+            job = self._open_planner_job(
+                connection, actor, project_id, dependent,
+                job_type=PlannerJobType.DEVELOPER_BLOCKER,
+                summary=(
+                    f"dependency_retired: {dependent_id} ({dependent['status']}) depends on "
+                    f"{retired_ticket_id}, which was {retired_status}"
+                    + (
+                        f" with replacement(s) {', '.join(replacement_ticket_ids)} that cannot "
+                        "carry the edge (retired, the dependent itself, or a cycle)"
+                        if replacement_ticket_ids else " with no replacement"
+                    )
+                    + ". Only DONE satisfies a dependency, so it will never be offered as is. "
+                    "Rewire it with planner.update_ticket_fields(dependency_ids=...) or "
+                    "retire it."
+                ),
+                evidence_refs=[f"ticket:{retired_ticket_id}", "dependency_retired"],
+                severity=InterventionSeverity.NORMAL,
+            )
+            escalated.append(dependent_id)
+            planner_job_ids.append(job["planner_job_id"])
+        return {"rewired": rewired, "escalated": escalated, "planner_job_ids": planner_job_ids}
 
     @staticmethod
     def _ticket_has_running_merge(connection: Connection, ticket_id: str) -> bool:
@@ -617,8 +730,6 @@ class TicketRetirementMixin:
                     timestamp,
                 ),
             )
-            # Dependents of retired work stay blocked until a Planner rewires them;
-            # naming them here keeps that consequence visible instead of silent.
             dependents = [
                 str(row["ticket_id"])
                 for row in connection.execute(
@@ -629,6 +740,10 @@ class TicketRetirementMixin:
                     (ticket_id,),
                 ).fetchall()
             ]
+            rescue = self._rescue_dependents_of_retired(
+                connection, actor, project_id, ticket_id, next_status.value,
+                [replacement_ticket_id] if replacement_ticket_id else [],
+            )
             self._event(
                 connection,
                 actor,
@@ -643,6 +758,8 @@ class TicketRetirementMixin:
                     "replacement_ticket_id": replacement_ticket_id,
                     "closed_offers": closed_offers,
                     "dependent_ticket_ids": dependents,
+                    "rewired_dependent_ticket_ids": rescue["rewired"],
+                    "escalated_dependent_ticket_ids": rescue["escalated"],
                 },
             )
             return {
@@ -650,6 +767,8 @@ class TicketRetirementMixin:
                 "replacement": replacement,
                 "closed_offers": closed_offers,
                 "dependent_ticket_ids": dependents,
+                "rewired_dependent_ticket_ids": rescue["rewired"],
+                "dependent_planner_job_ids": rescue["planner_job_ids"],
                 "context_entry": self._one(
                     connection, "SELECT * FROM context_entries WHERE entry_id = ?", (entry_id,)
                 ),

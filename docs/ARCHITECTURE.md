@@ -473,6 +473,23 @@ with the ordinary tools.
   to the current candidate, so a rework needs a fresh sign-off. The merge queue
   refuses with `adversarial_review_missing` or `high_risk_signoff_missing`.
 
+### Liveness: nothing waits silently (wave 8B)
+
+From the 2026-10-06 re-review: a ticket that can never move, or a Planner that
+is never woken, is a fault of the harness itself, so each case below is closed
+by a dependency edge, a job or a refusal rather than by prose.
+
+- **Dependents of retired work (R2).** Only DONE satisfies a dependency, so
+  retiring a ticket (cancel, supersede, split, or retirement through a
+  reconciliation) runs `_rescue_dependents_of_retired` in
+  `ticket_retirement.py` in the same transaction. With a replacement the
+  dependent's edge moves to it (every replacement, for a split) and
+  `ticket.dependency_rewired` is logged. Without one, or when the replacement is
+  retired, is the dependent itself or would close a cycle, the dependent gets a
+  `developer_blocker` Planner job whose summary starts `dependency_retired:`.
+  Closed dependents are left alone. The edge is not rewritten when it cannot be
+  moved: the Planner decides it with `planner.update_ticket_fields`.
+
 ## Change routing
 
 | When you change | Also |
