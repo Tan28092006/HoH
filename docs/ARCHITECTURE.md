@@ -181,6 +181,22 @@ a reconciliation follows what the result can have invalidated.
   reports agreement as `barrier_shadow`. Nothing admits work from the
   prediction; acting on it waits for the owner to judge the agreement record.
 
+### A merge lane beside the test slot (wave 6E)
+
+The supervisor runs one project suite at a time because more overran host
+memory (release 0.3.30). That slot is held by what runs a suite, not by job
+kind: a QA job, or a merge whose gate executes the suite. A merge whose gate
+reuses a passing QA run (`gate_mode: reused_qa_run`) needs only Git, so
+`Supervisor._lane` admits it to a separate merge lane and it no longer waits up
+to 2,100 s behind a QA suite. Merges stay one at a time; the repository lock
+serializes them anyway. The lane is decided before admission from
+`merge_gate_reuses_qa_run`, whose inputs are frozen (a candidate's test profile
+is written once; a completed passing QA run is never rewritten), so the answer
+can only turn from no to yes. The worker is still started with
+`--without-test-slot` and `execute_queued_merge(run_suite=False)` leaves the job
+QUEUED, untouched, if it would have to run the suite, so a misjudged lane can
+never put a second suite on the host.
+
 ## Change routing
 
 | When you change | Also |

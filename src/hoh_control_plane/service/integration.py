@@ -620,11 +620,19 @@ class IntegrationMixin:
                 "merge_job": self._merge_job(connection, merge_job_id),
             }
 
-    def execute_queued_merge(self, merge_job_id: str) -> dict[str, Any]:
-        """Serialize the Git/DB boundary with recovery using an OS-owned lock."""
+    def execute_queued_merge(self, merge_job_id: str, *, run_suite: bool = True) -> dict[str, Any]:
+        """Serialize the Git/DB boundary with recovery using an OS-owned lock.
+
+        ``run_suite=False`` is how the supervisor runs a merge it admitted outside
+        the host's single test slot because its gate reuses a passing QA run. If
+        that does not hold, the job is left QUEUED and untouched, so the next
+        supervisor tick admits it through the test slot instead.
+        """
         with self.store.connection() as connection:
             job = self._merge_job(connection, merge_job_id)
         if job['status'] != 'QUEUED':
+            return job
+        if not run_suite and not self.merge_gate_reuses_qa_run(merge_job_id):
             return job
         repository, _, _ = self._merge_git_inputs(merge_job_id)
         if repository is None:
@@ -729,6 +737,30 @@ class IntegrationMixin:
         return self._finish_gate_and_merge(
             merge_job_id, job, actor, candidate, repository, project, gate_run["test_run_id"],
             gate_mode="executed")
+
+    def merge_gate_reuses_qa_run(self, merge_job_id: str) -> bool:
+        """Whether this merge's gate will reuse a QA run rather than run the suite.
+
+        Read-only; the supervisor asks before admitting the job, so a merge that
+        needs only Git does not wait behind a QA suite for the host's single test
+        slot. The answer can only turn from False to True: a candidate's test
+        profile is written once at submission and a completed passing QA run is
+        never rewritten. An unknown job answers False, the conservative lane.
+        """
+        with self.store.connection() as connection:
+            job = _row(connection.execute(
+                "SELECT candidate_id FROM merge_jobs WHERE merge_job_id = ?", (merge_job_id,)
+            ).fetchone())
+            profile = None if job is None else _row(connection.execute(
+                "SELECT test_command, timeout_seconds FROM candidate_test_profiles "
+                "WHERE candidate_id = ?",
+                (job["candidate_id"],),
+            ).fetchone())
+        if profile is None:
+            return False
+        return self._reusable_qa_run(
+            job["candidate_id"], profile["test_command"], profile["timeout_seconds"]
+        ) is not None
 
     def _reusable_qa_run(self, candidate_id: str, command: list[str], timeout_seconds: int) -> str | None:
         """A passing QA run of the frozen command on this exact candidate commit.
