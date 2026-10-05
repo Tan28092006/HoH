@@ -178,6 +178,16 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
                 lambda: service.configure_test_command(actor, **arguments),
             )
 
+        @server.tool(name="planner.get_test_profile", structured_output=True)
+        def planner_get_test_profile(project_id: str) -> dict[str, Any]:
+            """Read the current test command, timeout and configured_at that new candidates freeze."""
+            arguments = {"project_id": project_id}
+            return invoke(
+                "planner.get_test_profile",
+                arguments,
+                lambda: service.get_test_profile(actor, project_id),
+            )
+
         @server.tool(name="planner.configure_skill_policy", structured_output=True)
         def planner_configure_skill_policy(
             project_id: str,

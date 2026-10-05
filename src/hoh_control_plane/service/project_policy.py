@@ -87,6 +87,30 @@ class ProjectPolicyMixin:
             )
         return profile
 
+    def get_test_profile(self, actor: Actor, project_id: str) -> dict[str, Any]:
+        """The project's current test command: what new candidates will freeze."""
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        require_project(actor, project_id)
+        with self.store.connection() as connection:
+            self._one(connection, "SELECT project_id FROM projects WHERE project_id = ?", (project_id,))
+            return self._test_profile(connection, project_id)
+
+    @staticmethod
+    def _test_profile(connection: Any, project_id: str) -> dict[str, Any]:
+        profile = _row(connection.execute(
+            "SELECT test_command, timeout_seconds, configured_at, configured_by "
+            "FROM project_test_profiles WHERE project_id = ?",
+            (project_id,),
+        ).fetchone())
+        return {
+            "project_id": project_id,
+            "configured": profile is not None,
+            "test_command": profile["test_command"] if profile else None,
+            "timeout_seconds": profile["timeout_seconds"] if profile else None,
+            "configured_at": profile["configured_at"] if profile else None,
+            "configured_by": profile["configured_by"] if profile else None,
+        }
+
     def configure_verification_profile(
         self,
         actor: Actor,

@@ -60,6 +60,9 @@ class SessionMixin:
                     waiting['state'] = 'disconnected'
                 result['event_wait'] = waiting
             if actor.role == Role.PLANNER:
+                # The command candidates will freeze, so Planner never has to
+                # read the database to learn what QA is going to run.
+                result["test_profile"] = self._test_profile(connection, selected_id)
                 result["planner_assignments"] = [_row(row) for row in connection.execute(
                     "SELECT j.planner_job_id, j.ticket_id, j.status, l.lease_id, l.expires_at "
                     "FROM planner_jobs j JOIN planner_job_leases l ON l.planner_job_id = j.planner_job_id "

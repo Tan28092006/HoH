@@ -516,6 +516,7 @@ Cấu hình project:
 - `planner.configure_repository` — kèm `workspace_model` (xem `docs/DEPLOYMENT.md`)
 - `planner.sync_repository` — fetch toàn bộ remote branch refs, ghi manifest main/shared-branch mà không checkout, pull, merge hoặc rebase integration checkout
 - `planner.configure_test_command`
+- `planner.get_test_profile` — đọc lệnh test hiện hành (command, timeout, `configured_at`) mà candidate mới sẽ đóng băng; cũng có trong `session.bootstrap` của Planner
 - `planner.configure_skill_policy`
 - `planner.configure_verification_profile`
 - `planner.configure_validation_contract`

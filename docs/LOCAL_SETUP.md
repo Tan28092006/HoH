@@ -99,6 +99,9 @@ argument list, not a shell string: `&&`, pipes and redirects are not executed.
 The command is snapshotted into each candidate at submission, so a later project
 configuration change cannot alter the test command used for an already-frozen
 candidate.
+The Planner reads the current command, timeout and `configured_at` from
+`planner.get_test_profile` or the `test_profile` field of its
+`session.bootstrap`; it never needs to open the database.
 
 Developer flow for a configured repository is now mandatory:
 
