@@ -98,6 +98,14 @@ health alerts and 2 when status cannot be obtained. Feed it into an independent
 monitor: a dead supervisor cannot monitor itself. No email/webhook/desktop
 notification is automatically sent.
 
+The scheduler also observes Git each minute for every project a Planner has
+observed, so a commit opens its reconciliation with no Planner chat open. A
+merge job still RUNNING after the worker timeout that recovery cannot settle no
+longer waits for `hoh-ops reconcile`: the scheduler gives Planner a
+`merge_job_stuck` job with the Git facts, and Planner closes it with
+`planner.close_stuck_merge_job`. A candidate fast-forwarded by hand becomes a
+`candidate_already_on_main` Planner job; the landing is never recorded for it.
+
 Pause stops admission of new worker jobs and lets active work drain. It does not
 revoke leases or stop external chats. Supervisor shutdown cancels its active
 process trees; execution records remain durable. Worker count is configurable

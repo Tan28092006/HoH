@@ -153,6 +153,26 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
                 idempotency_key,
             )
 
+        @server.tool(name="planner.close_stuck_merge_job", structured_output=True)
+        def planner_close_stuck_merge_job(
+            merge_job_id: str,
+            reason: str,
+            idempotency_key: str | None = None,
+        ) -> dict[str, Any]:
+            """End a merge job that outlived the worker timeout and recovery cannot settle.
+
+            Recovery runs once more first. The job ends FAILED with your reason and
+            the Git facts; its intent is kept and the ticket is untouched. Then
+            record the ungated landing or retire the ticket with its own tool.
+            """
+            arguments = {"merge_job_id": merge_job_id, "reason": reason}
+            return invoke(
+                "planner.close_stuck_merge_job",
+                arguments,
+                lambda: service.close_stuck_merge_job(actor, **arguments),
+                idempotency_key,
+            )
+
         @server.tool(name="planner.reconcile_delivery_report", structured_output=True)
         def planner_reconcile_delivery_report(merge_job_id: str) -> dict[str, Any]:
             """Recover exactly one missing Planner report for a completed merge."""

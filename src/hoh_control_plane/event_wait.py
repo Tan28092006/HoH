@@ -16,6 +16,7 @@ import time
 
 from hoh_control_plane.domain import Actor, Role, AuthorizationError, ConflictError, ValidationError
 from hoh_control_plane.service._common import (
+    REPOSITORY_OBSERVE_SECONDS,
     _id,
     _iso,
     _now,
@@ -44,7 +45,9 @@ SILENT_RESUME = (
 # told how long they have been waiting instead of sitting silent.
 BARRIER_ESCALATION_SECONDS = (1800, 7200, 28800, 86400)
 WAIT_PRESENCE_SECONDS = 90
-REPOSITORY_OBSERVE_SECONDS = 60
+# REPOSITORY_OBSERVE_SECONDS comes from the service kernel: the scheduler's
+# repository sweep observes on the same clock (project_repositories.observed_at).
+# The in-process map below only keeps this process's waits from racing each other.
 _REPOSITORY_OBSERVE_LOCK = threading.Lock()
 _REPOSITORY_OBSERVED_AT: dict[str, float] = {}
 JOBS = {
@@ -132,6 +135,10 @@ async def _repository_pending(service, actor, project):
         return []
     now = time.monotonic()
     if now - _REPOSITORY_OBSERVED_AT.get(project, 0) < REPOSITORY_OBSERVE_SECONDS:
+        return []
+    if not service.repository_observation_due(project):
+        # Observed within the window by another process (the scheduler sweep);
+        # any reconciliation it opened reaches this Planner through _pending.
         return []
     if not _REPOSITORY_OBSERVE_LOCK.acquire(blocking=False):
         return []

@@ -12,6 +12,7 @@ from hoh_control_plane.service._common import (
     CLOSED_TICKET_STATUSES,
     ConflictError,
     DomainError,
+    MERGE_JOB_STUCK_SECONDS,
     PlannerJobType,
     ReleasePolicyError,
     Role,
@@ -23,6 +24,7 @@ from hoh_control_plane.service._common import (
     _row,
     _transition_ticket,
     Path,
+    datetime,
     hashlib,
     re,
     require_project,
@@ -1129,6 +1131,166 @@ class IntegrationMixin:
                     artifact_commit=ticket.get("candidate_commit") or ticket.get("base_commit"),
                 )
             return self._merge_job(connection, merge_job_id)
+
+    @staticmethod
+    def _merge_job_is_stuck(job: dict[str, Any]) -> bool:
+        """RUNNING for longer than any live worker could still be running it."""
+        if job["status"] != "RUNNING":
+            return False
+        started = job.get("started_at") or job["created_at"]
+        try:
+            began = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        return _now() - began >= timedelta(seconds=MERGE_JOB_STUCK_SECONDS)
+
+    def _stuck_merge_git_facts(self, job: dict[str, Any]) -> dict[str, Any]:
+        """What Git says about a merge job's candidate, asked outside any transaction.
+
+        Read from the durable merge intent when there is one, which names the
+        repository, branch, base and candidate the job was authorized for.
+        """
+        with self.store.connection() as connection:
+            intent = _row(connection.execute(
+                "SELECT * FROM merge_intents WHERE merge_job_id = ?", (job["merge_job_id"],)
+            ).fetchone())
+            repository = _row(connection.execute(
+                "SELECT repository_path FROM project_repositories WHERE project_id = ?",
+                (job["project_id"],),
+            ).fetchone())
+            project = _row(connection.execute(
+                "SELECT default_branch FROM projects WHERE project_id = ?", (job["project_id"],)
+            ).fetchone())
+            candidate = _row(connection.execute(
+                "SELECT commit_sha, base_commit FROM candidates WHERE candidate_id = ?",
+                (job["candidate_id"],),
+            ).fetchone())
+        facts: dict[str, Any] = {
+            "merge_intent_recorded": intent is not None,
+            "default_branch": (intent or project or {}).get("default_branch"),
+            "candidate_commit": (intent or {}).get("candidate_commit")
+            or (candidate or {}).get("commit_sha"),
+            "base_commit": (intent or {}).get("base_commit") or (candidate or {}).get("base_commit"),
+            "default_branch_head": None,
+            "candidate_on_default_branch": None,
+            "recovery_message": job.get("error_message"),
+        }
+        repository_path = (intent or repository or {}).get("repository_path")
+        if not repository_path or not facts["default_branch"] or not facts["candidate_commit"]:
+            facts["git_error"] = "The repository, branch or candidate is not recorded"
+            return facts
+        try:
+            facts["default_branch_head"] = self.git_worktrees._resolve_commit(
+                Path(repository_path), f"refs/heads/{facts['default_branch']}"
+            )
+            facts["candidate_on_default_branch"] = self.git_worktrees.commit_is_on_branch(
+                repository_path=repository_path,
+                default_branch=facts["default_branch"],
+                commit=facts["candidate_commit"],
+            )
+        except (DomainError, OSError) as error:
+            facts["git_error"] = str(error)[:300]
+        return facts
+
+    def close_stuck_merge_job(
+        self, actor: Actor, merge_job_id: str, reason: str
+    ) -> dict[str, Any]:
+        """End a merge job that recovery cannot settle, so its ticket can be decided.
+
+        Without this, a job whose candidate reached Git while its ticket changed
+        stays RUNNING for good, ``record_external_landing`` refuses with
+        ``landing_job_active`` and only an administrator can clear it. Planner
+        may close the job once it has outlived the worker timeout and no live
+        operation holds the repository. Recovery runs once more first; if it
+        settles the job, nothing is closed. Otherwise the job ends FAILED with
+        Planner's reason and the Git facts, its merge intent stays, and its
+        lease is released. Nothing is recorded about the ticket: an ungated
+        landing, a retirement or a requeue is a separate, explicit call.
+        """
+        require_role(actor, Role.PLANNER, Role.ADMIN)
+        self._bounded_text(reason, "reason", 2000)
+        with self.store.connection() as connection:
+            job = self._merge_job(connection, merge_job_id)
+            require_project(actor, job["project_id"])
+            intent = _row(connection.execute(
+                "SELECT repository_path FROM merge_intents WHERE merge_job_id = ?", (merge_job_id,)
+            ).fetchone())
+            repository = _row(connection.execute(
+                "SELECT repository_path FROM project_repositories WHERE project_id = ?",
+                (job["project_id"],),
+            ).fetchone())
+        if job["status"] != "RUNNING":
+            raise ConflictError(
+                "Only a RUNNING merge job can be closed as stuck",
+                {"reason": "merge_job_not_running", "status": job["status"]},
+            )
+        if not self._merge_job_is_stuck(job):
+            raise ConflictError(
+                "The merge job has not outlived the worker timeout; recovery may still settle it",
+                {"reason": "merge_job_not_stuck", "stuck_after_seconds": MERGE_JOB_STUCK_SECONDS},
+            )
+        repository_path = (intent or repository or {}).get("repository_path")
+        if not repository_path:
+            raise ValidationError("Project repository is required to inspect the merge job")
+        lock = self.git_worktrees.repository_lock(repository_path)
+        try:
+            lock.__enter__()
+        except ConflictError as error:
+            raise ConflictError(
+                "A live operation holds the repository; the merge job is not abandoned",
+                {"reason": "merge_job_live"},
+            ) from error
+        try:
+            settled = self._reconcile_merge_locked(merge_job_id)
+            if settled["status"] != "RUNNING":
+                return {
+                    "merge_job": settled,
+                    "closed": False,
+                    "next_action": "Recovery settled the job; read the ticket again.",
+                }
+            facts = self._stuck_merge_git_facts(settled)
+            with self.store.connection(immediate=True) as connection:
+                job = self._merge_job(connection, merge_job_id)
+                if job["status"] != "RUNNING":
+                    return {"merge_job": job, "closed": False,
+                            "next_action": "The job settled meanwhile; read the ticket again."}
+                timestamp = _iso()
+                connection.execute(
+                    """UPDATE merge_jobs SET status = 'FAILED', error_message = ?, completed_at = ?
+                       WHERE merge_job_id = ? AND status = 'RUNNING'""",
+                    (
+                        f"Closed by Planner {actor.agent_id} after recovery could not decide: "
+                        f"{reason}"[:4000],
+                        timestamp,
+                        merge_job_id,
+                    ),
+                )
+                # The lease existed for this merge only; keeping it would refuse
+                # the landing Planner is about to record (landing_lease_active).
+                connection.execute("DELETE FROM leases WHERE lease_id = ?", (job["lease_id"],))
+                self._event(
+                    connection, actor, job["project_id"], "integration.merge_job_closed",
+                    "merge_job", merge_job_id, job["expected_version"],
+                    {"ticket_id": job["ticket_id"], "reason": reason[:500], **facts},
+                )
+                closed = self._merge_job(connection, merge_job_id)
+        finally:
+            lock.__exit__(None, None, None)
+        landed = facts.get("candidate_on_default_branch")
+        return {
+            "merge_job": closed,
+            "closed": True,
+            "git": facts,
+            "next_action": (
+                "The candidate is on the default branch: record it with "
+                "planner.record_external_landing (ungated) during the pending reconciliation."
+                if landed else
+                "The candidate is not on the default branch: retire, stop or requeue the "
+                "ticket through its own tool."
+                if landed is False else
+                "Git could not be read; inspect the repository before deciding the ticket."
+            ),
+        }
 
     def reconcile_delivery_report(self, actor: Actor, merge_job_id: str) -> dict[str, Any]:
         """Idempotently recover the Planner report for an already completed merge."""

@@ -18,6 +18,12 @@ def sweep_once(database_path: str | Path) -> dict[str, object]:
     service = ControlPlaneService(store)
     scheduler = Actor("hoh-scheduler", Role.ADMIN, frozenset({"*"}))
     recovered = service.sweep_expired_leases(scheduler)
+    # Git is observed here too, not only while a Planner waits: a commit opens
+    # its reconciliation, a candidate that landed outside HoH and a merge job
+    # recovery cannot settle each reach Planner as a job. Throttled per project
+    # by the same observed_at the Planner wait uses. Before dispatch, so work is
+    # not offered past a barrier this pass opened.
+    repositories = service.sweep_repositories(scheduler)
     dispatch = service.dispatch_pending_work(scheduler)
     # An urgent Planner problem should not wait for the next backlog scan; a
     # failed attempt simply leaves the request pending for the following sweep.
@@ -27,6 +33,7 @@ def sweep_once(database_path: str | Path) -> dict[str, object]:
     agent_wakeups = deliver_pending_offers(service, secret=os.getenv(SECRET_VARIABLE))
     return {
         **recovered,
+        "repositories": repositories,
         "dispatch": dispatch,
         "planner_wakeups": wakeups,
         "agent_wakeups": agent_wakeups,
@@ -51,6 +58,17 @@ def main() -> None:
         result = sweep_once(database_path)
         if result["count"]:
             print(f"Requeued {result['count']} expired lease(s).", flush=True)
+        repositories = result["repositories"]
+        landed = len(repositories["candidates_already_on_main"])
+        stuck = len(repositories["stuck_merge_jobs"])
+        if landed or stuck:
+            print(f"Raised {landed} candidate(s) already on the default branch and "
+                  f"{stuck} stuck merge job(s) for Planner.", flush=True)
+        if repositories["failed"]:
+            # Only the error type: a Git message can carry a remote URL.
+            kinds = sorted({item["error_type"] for item in repositories["failed"]})
+            print(f"Repository sweep failed {len(repositories['failed'])} step(s): "
+                  f"{', '.join(kinds)}.", flush=True)
         if result["dispatch"]["offered_count"]:
             print(f"Offered {result['dispatch']['offered_count']} queued hand-off(s).", flush=True)
         if result["agent_wakeups"]["delivered"]:

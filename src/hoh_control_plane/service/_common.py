@@ -98,6 +98,18 @@ _CONTRACT_TOKEN_BUDGET = contracts.CONTRACT_TOKEN_BUDGET
 MAX_QA_REJECTIONS = 3
 REWORK_BUDGET_EXHAUSTED = "rework_budget_exhausted"
 
+# How often one project's repository is observed (fetch and compare), whoever
+# asks: a waiting Planner (event_wait) or the scheduler's sweep. The throttle is
+# project_repositories.observed_at, so the two never fetch the same remote
+# twice within this window.
+REPOSITORY_OBSERVE_SECONDS = 60
+
+# A merge job RUNNING for longer than the supervisor's default worker timeout
+# (supervisor.py, 2100 s) has no live worker left: the worker was stopped and
+# recovery could not settle it. Only then may the sweep escalate it or Planner
+# close it.
+MERGE_JOB_STUCK_SECONDS = 2100
+
 # Retention policy for idempotency records: a replay is honored for this long,
 # after which purge_expired_idempotency_records may delete the row and the same
 # key behaves like a fresh request. Long enough to outlive any worker restart

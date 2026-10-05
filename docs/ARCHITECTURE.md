@@ -23,7 +23,9 @@ One host process (`deploy/desktop/hoh_desktop.py --host` locally) serves:
   `HOH_WORKER_MODE` defaults to `supervised`, so MCP only queues; the explicit
   opt-in `legacy` mode spawns unsupervised `*_worker.py` processes with no job
   lock, timeout or recovery. The desktop host and `local_agent` set `supervised`.
-- **Scheduler** — `scheduler.py` sweeps expired leases and dispatches offers.
+- **Scheduler** — `scheduler.py` sweeps expired leases, reconciles every
+  previously observed repository against Git (`sweep_repositories`), and
+  dispatches offers.
 
 State lives in one database (SQLite by default; PostgreSQL optional) and Git:
 ticket worktrees, candidates and evidence under the artifact root beside the
@@ -49,7 +51,7 @@ from `event_wait`; `service.discovery` uses the `agent_wakeup` vocabulary.
 
 ## The service
 
-`ControlPlaneService` (`service/__init__.py`) is one class assembled from 24
+`ControlPlaneService` (`service/__init__.py`) is one class assembled from 25
 mixins over a shared kernel, `service/_common.py`. Mixins import only `_common`,
 but they call each other through `self`. About 156 distinct cross-mixin method
 uses exist, and `validation` and `leases` act as a shared kernel for everything.
@@ -60,6 +62,7 @@ helper you are about to change across `service/`.
 | --- | --- |
 | `project_setup.py` | Project creation and repository configuration |
 | `repository_reconciliation.py` | Repository sync, reconciliations and the barrier (state from `ExecutionGate` in `_common.py`) |
+| `repository_sweep.py` | The scheduler's Git sweep: throttled observation, candidates already on main, stuck merge jobs |
 | `project_policy.py` | Test command, verification and capability profiles, validation contracts, skill policy |
 | `ticket_authoring.py` | Features and tickets: create, ready, write scope, fields, split |
 | `ticket_retirement.py` | Stop, cancel, supersede and retire tickets through a pending reconciliation |
@@ -143,6 +146,23 @@ helper you are about to change across `service/`.
   call only while `request_has_committed` is false. The claim keeps its 0.3.31
   post-commit tolerance on top, so it still returns its real lease when packet
   or brief compilation contends.
+- **Git is reconciled by state as well as by event.** Recovery settles one merge
+  job at a time from its intent; the scheduler's `sweep_repositories` also
+  compares every project a Planner has observed with Git, at most once per
+  `REPOSITORY_OBSERVE_SECONDS` per project (the stored `observed_at`, which the
+  Planner wait checks too, so the two processes never fetch twice in a window).
+  It runs the ordinary `sync_repository`, so a commit opens its reconciliation
+  with no Planner chat open; it never takes a project's first observation,
+  which opens the baseline and belongs to a Planner. It then gives Planner one
+  `integration_conflict` job per (ticket, candidate) whose candidate Git already
+  has (`candidate_already_on_main`, deduplicated by its audit event) and one per
+  merge job RUNNING past `MERGE_JOB_STUCK_SECONDS` that recovery leaves marked
+  for reconciliation (`merge_job_stuck`, with the Git facts). It records no
+  landing: that stays an explicit ungated record. Planner ends a stuck job with
+  `planner.close_stuck_merge_job`: recovery runs once more under the repository
+  lock (a live operation is never taken over), then the job ends FAILED, its
+  intent stays and its lease is released, so `record_external_landing` or a
+  retirement can follow. Git, as everywhere, runs outside write transactions.
 - Schema changes are additive (`ADDITIVE_COLUMNS`, `MIGRATED_INDEXES` in
   `store_migrations.py`) plus SQLite table rebuilds detected by schema text.
   `schema_meta` records `SCHEMA_VERSION` (`store_migrations.py`) on both
@@ -161,6 +181,7 @@ helper you are about to change across `service/`.
 | Consequential writes name a fresh packet | `require_fresh_context` in `context.py`; `require_snapshot_id` in `service/_common.py`, called by `submit_candidate`, `queue_candidate_submission`, `submit_qa_verdict` and `queue_merge_candidate`, so REST and MCP both require it | `test_context_snapshots.py`, `test_team_quality_gates.py` |
 | Candidate is one ordinary commit on the frozen base | Candidate verification in `candidates.py` / `git_worktrees.py` | `test_candidate_submission.py` |
 | Merge only the current candidate after a fresh QA pass and isolated gate | `integration.py` queued merge and `merge_intents` reconciliation | `test_integration_async_gate.py`, `test_integration_release_policy.py` |
+| Git is observed without a waiting Planner; a candidate already on main and a merge job recovery cannot settle each reach Planner once, and nothing is recorded for it | `sweep_repositories` in `repository_sweep.py`, called by `scheduler.sweep_once`; throttle `REPOSITORY_OBSERVE_SECONDS` on `project_repositories.observed_at`, shared with `event_wait`; `close_stuck_merge_job` in `integration.py` | `test_repository_sweep.py` |
 | Retried writes do not repeat effects | `service/idempotency.py` (payload-bound key stamped with the request's correlation id; a stale IN_PROGRESS key is settled from that id's audit events, committed → `status: committed` replay, otherwise re-run; complete and release by `record_id`; contention after a committed write returns the committed outcome); `_run_with_contention_retry` in `mcp/invoke.py` retries only while nothing the call wrote has committed | `test_idempotency.py` |
 | Validation contracts fit the packet | Limits in `contracts.py`, checked in `project_policy.py` and published in the MCP and REST schemas | `test_team_quality_gates.py`, `test_contract_parity.py` |
 | Advertised capabilities name only tools the role has | `CAPABILITY_TOOLS` and `capabilities()` in `discovery.py` | `test_contract_parity.py` |

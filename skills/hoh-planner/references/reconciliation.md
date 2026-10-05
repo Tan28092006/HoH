@@ -39,3 +39,12 @@ duplicate development and make a bounded adoption/review path that keeps the
 branch/SHA and still passes QA/integration. If it is on default branch, use
 `planner.record_external_landing` after Git verification. Neither path fabricates
 QA evidence or transfers evidence to a changed SHA.
+
+HoH also observes Git while no Planner is open: a new commit still opens its
+reconciliation. Two Planner jobs come from that sweep. One whose summary starts
+`candidate_already_on_main` means a ticket's candidate is already on the default
+branch and nothing was recorded for you: record the landing as above, or decide
+a revert or rework. One starting `merge_job_stuck` names a merge job that
+outlived the worker timeout and that recovery cannot settle. Close it with
+`planner.close_stuck_merge_job` (recovery runs once more; the ticket is
+untouched), then record the landing or retire the ticket as its Git facts say.
