@@ -52,6 +52,19 @@ hand-offs to every matching online agent (up to the current fan-out limit).
 Use `-Once` for a one-shot maintenance pass or `-IntervalSeconds 60` to change
 the interval.
 
+In a third PowerShell window, start the supervisor:
+
+```powershell
+cd D:\HoH
+.\scripts\start-supervisor.ps1
+```
+
+`HOH_WORKER_MODE` defaults to `supervised`: MCP only queues worktree
+provisioning, candidate submissions, QA test runs and merges, and the supervisor
+runs them. Without it every such job stays `QUEUED`. `-MaxWorkers` (default 2)
+and `-WorkerTimeoutSeconds` (default 2100) bound it; see
+[RUNTIME_OPERATIONS.md](RUNTIME_OPERATIONS.md).
+
 ## 3. Attach exactly one role to each agent
 
 Give each agent one identity and one role. Do not hand-write MCP configuration;

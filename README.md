@@ -48,6 +48,14 @@ dispatch queued work to live agents:
 .\scripts\start-scheduler.ps1
 ```
 
+In a third window, start the supervisor. Workers run in supervised mode by
+default, so without it queued worktree provisioning, candidate submissions, QA
+test runs and merges stay `QUEUED`:
+
+```powershell
+.\scripts\start-supervisor.ps1
+```
+
 Open <http://127.0.0.1:8775>. These scripts start a development instance on its own database, `D:\HoH\tmp\dev\control-plane.db`, and refuse the real one under `D:\HoH\data` and the installed host's ports; they enable local identity headers and seed a demo project into the dev database. To attach the role-scoped MCP to separate Codex or Claude agents, follow [docs/LOCAL_SETUP.md](./docs/LOCAL_SETUP.md).
 
 For how a long-lived Codex or Claude Code role worker waits for hand-offs,

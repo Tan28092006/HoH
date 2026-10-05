@@ -43,7 +43,7 @@ def _command(command: str, environment: dict[str, str] | None = None):
 
 
 @windows_only
-@pytest.mark.parametrize("script", ["start-dashboard.ps1", "start-scheduler.ps1"])
+@pytest.mark.parametrize("script", ["start-dashboard.ps1", "start-scheduler.ps1", "start-supervisor.ps1"])
 @pytest.mark.parametrize("database", [
     r"D:\HoH\data\control-plane.db",
     r"D:\HOH\Data\control-plane.db",
@@ -97,7 +97,15 @@ def test_the_dev_defaults_are_not_the_installed_hosts() -> None:
 
     assert '$HohDevDefaultDatabase = "D:\\HoH\\tmp\\dev\\control-plane.db"' in helper
     assert "[int]$Port = 8775" in dashboard
-    for script in ("start-dashboard.ps1", "start-scheduler.ps1"):
+    for script in ("start-dashboard.ps1", "start-scheduler.ps1", "start-supervisor.ps1"):
         text = (SCRIPTS / script).read_text(encoding="utf-8")
         assert "Resolve-HohDevDatabase" in text, script
         assert "data\\control-plane.db" not in text, script
+
+
+def test_the_quick_starts_start_the_supervisor() -> None:
+    """Workers default to supervised mode: without a supervisor, queued jobs never run."""
+    supervisor = (SCRIPTS / "start-supervisor.ps1").read_text(encoding="utf-8")
+    assert "-m hoh_control_plane.supervisor" in supervisor
+    for document in (ROOT / "README.md", ROOT / "docs" / "LOCAL_SETUP.md"):
+        assert ".\\scripts\\start-supervisor.ps1" in document.read_text(encoding="utf-8"), document.name
