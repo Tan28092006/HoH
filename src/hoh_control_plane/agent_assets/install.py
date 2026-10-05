@@ -43,6 +43,15 @@ def install(kit: Path, home: Path, client: str) -> None:
         if old is not None and old != manifest["codex"]:
             raise ValueError("Existing HoH MCP configuration differs; review before replacing it")
         new_text = text if old is not None else text.rstrip() + "\n\n" + (kit / "codex.toml").read_text(encoding="utf-8")
+        profile = manifest.get("codex_profile")
+        if profile is not None:
+            # A model is pinned through a profile named after the server.
+            existing = parsed.get("profiles", {}).get(profile["name"])
+            if existing is None:
+                new_text = (new_text.rstrip() + f'\n\n[profiles.{profile["name"]}]\n'
+                            + f'model = {json.dumps(profile["model"])}\n')
+            elif existing != {"model": profile["model"]}:
+                raise ValueError("Existing Codex profile differs; review before replacing it")
     else:
         parsed = json.loads(text or "{}")
         supplied = json.loads((kit / "mcp.json").read_text(encoding="utf-8"))["mcpServers"][name]
@@ -66,6 +75,15 @@ def install(kit: Path, home: Path, client: str) -> None:
             raise ValueError("Existing HoH MCP configuration differs; review before replacing it")
         parsed["mcpServers"][name] = supplied
         new_text = json.dumps(parsed, indent=2) + "\n"
+    agent = manifest.get("claude_agent")
+    agent_destination = None
+    if agent is not None:
+        # A Claude Code worker subagent pins the model a role's tickets run on.
+        if not agent.startswith("agents/") or not (kit / agent).resolve().is_relative_to(kit.resolve()):
+            raise ValueError("Kit agent path is invalid")
+        agent_destination = home / ".claude" / agent
+        if agent_destination.exists() and agent_destination.read_bytes() != (kit / agent).read_bytes():
+            raise ValueError(f"Existing agent differs: {agent_destination.name}; review before replacing it")
     sources = list((kit / "skills").iterdir())
     for source in sources:
         destination = skill_root / source.name
@@ -79,6 +97,9 @@ def install(kit: Path, home: Path, client: str) -> None:
         destination = skill_root / source.name
         if not destination.exists():
             shutil.copytree(source, destination)
+    if agent_destination is not None and not agent_destination.exists():
+        agent_destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(kit / agent, agent_destination)
     config.parent.mkdir(parents=True, exist_ok=True)
     if new_text != original_text:
         if config.exists():

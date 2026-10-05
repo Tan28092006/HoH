@@ -429,3 +429,39 @@ def test_execution_prompts_make_the_chat_a_dispatcher(desktop):
         assert "worker_brief" in prompts[role], role
         assert "spawn_agent" in prompts[role] and "new session per ticket" in prompts[role]
     assert "worker_brief" not in prompts["planner"]
+
+
+def test_setup_pins_a_model_where_the_client_has_a_setting(desktop, tmp_path):
+    """Codex gets a profile model; Claude Code gets a worker subagent with one."""
+    import tomllib
+    from hoh_control_plane.local_agent import install_profile
+
+    client, root = desktop
+    client.post('/local/projects', json={'project_id': 'shop', 'name': 'Shop'}, headers=headers(client))
+
+    codex_home = tmp_path / 'codex-home'
+    codex = install_profile(root, 'shop', 'planner', 'primary', 'codex', codex_home, model='strong-model')
+    config = tomllib.loads((codex_home / '.codex/config.toml').read_text())
+    assert config['profiles'][codex['server_name']] == {'model': 'strong-model'}
+    assert codex['codex_profile'] == codex['server_name']
+    # An identical rerun is a no-op; a different model is refused, not overwritten.
+    install_profile(root, 'shop', 'planner', 'primary', 'codex', codex_home, model='strong-model')
+    with pytest.raises(ValueError, match='profile differs'):
+        install_profile(root, 'shop', 'planner', 'primary', 'codex', codex_home, model='other-model')
+
+    claude_home = tmp_path / 'claude-home'
+    qa = install_profile(root, 'shop', 'qa', 'primary', 'claude-code', claude_home, model='checker-model')
+    agent = claude_home / '.claude/agents' / f"{qa['server_name']}-worker.md"
+    text = agent.read_text(encoding='utf-8')
+    assert text.startswith('---\nname: ' + qa['claude_agent'] + '\n')
+    assert '\nmodel: checker-model\n' in text
+    assert qa['server_name'] in text and 'worker_brief' in text
+    planner = install_profile(root, 'shop', 'planner', 'primary', 'claude-code', claude_home, model='strong-model')
+    assert 'model_note' in planner and 'claude_agent' not in planner
+    assert sorted(path.name for path in (claude_home / '.claude/agents').iterdir()) == [agent.name]
+
+    with pytest.raises(ValueError, match='plain model identifier'):
+        install_profile(root, 'shop', 'qa', 'primary', 'codex', tmp_path / 'x', model='bad model; rm')
+    plain = install_profile(root, 'shop', 'developer', 'primary', 'codex', tmp_path / 'plain')
+    assert 'model' not in plain
+    assert 'profiles' not in tomllib.loads((tmp_path / 'plain/.codex/config.toml').read_text())

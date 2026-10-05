@@ -63,6 +63,34 @@ or reload the client afterwards so it loads the new MCP server.
 For a client on another machine, or one other than Codex and Claude Code, build
 a portable kit with `hoh-agent-kit` instead; see [AGENT_KIT.md](AGENT_KIT.md).
 
+### Model per role
+
+`--model <id>` pins the model a role runs on, where the client has a setting
+for it:
+
+- **Codex**: setup writes a `[profiles.<server-name>]` table with `model`. It
+  applies when Codex is started with `--profile <server-name>`; the setup result
+  names the server.
+- **Claude Code**: there is no per-MCP-server model. For Developer, QA and
+  Integrator, setup installs a worker subagent,
+  `~/.claude/agents/<server-name>-worker.md`, whose `model` field applies to
+  every ticket the dispatcher delegates to it; the dispatcher chat itself stays
+  on whatever model it was started with. For Planner it writes nothing and says
+  so in the result (`model_note`): pick the Planner chat's model with `/model`
+  or `claude --model`.
+
+Setup refuses to overwrite a different existing profile or worker file; review
+and remove it first. Recommendations:
+
+- Give **Planner the strongest model** available. A weak planner is the
+  bottleneck of the whole team (Plan-and-Act): every execution role inherits its
+  tickets, contracts and routing decisions.
+- Give **QA a different model from Developer**. A checker that shares the
+  maker's model shares its blind spots; generator/evaluator independence is
+  the point of a separate QA role.
+- Developer and Integrator can use a faster model: the contract, the frozen
+  candidate and QA bound what they can get wrong.
+
 ## 4. Smoke test each agent
 
 Ask each agent to call `session.bootstrap` first. Each Developer and QA

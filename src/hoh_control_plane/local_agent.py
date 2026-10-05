@@ -19,6 +19,25 @@ import time
 from hoh_control_plane.domain import Actor, Role, NotFoundError
 
 ROLES = ('planner', 'developer', 'qa', 'integrator')
+MODEL_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,99}')
+
+
+def worker_agent_text(server, role, model):
+    """A Claude Code subagent that works one claimed ticket on its own model.
+
+    Claude Code has no model setting per MCP server, so the model a role's work
+    runs on is pinned on the subagent the dispatcher delegates each ticket to.
+    """
+    return (
+        f"---\nname: {server}-worker\n"
+        f"description: Works one claimed HoH {role} ticket from the claim's worker_brief "
+        f"and returns only the brief's result fields. Use when the hoh-{role} dispatcher "
+        f"delegates a claimed ticket.\nmodel: {model}\n---\n\n"
+        f"You are a fresh HoH {role} worker for exactly one ticket. Load the skills the "
+        f"brief names, use only MCP server `{server}`, and start with the brief's "
+        f"`next_calls`. Work only that ticket and lease. Finish by returning only the "
+        f"brief's `returns` fields plus any blockers, nothing from your transcript.\n"
+    )
 
 
 def profile_actor(project, role, instance, salt=None):
@@ -72,12 +91,15 @@ def checked_project(root, project):
     return config
 
 
-def install_profile(root, project, role, instance, client, home, upgrade_skills=False, transport='stdio'):
+def install_profile(root, project, role, instance, client, home, upgrade_skills=False, transport='stdio',
+                    model=None):
     from hoh_control_plane.agent_kit import build_kit
     from hoh_control_plane.agent_assets.install import install
     config = checked_project(root, project)
     if transport not in {'stdio', 'shared-http'}:
         raise ValueError('Unknown local MCP transport')
+    if model is not None and not MODEL_ID.fullmatch(model):
+        raise ValueError('Model must be a plain model identifier')
     actor = installed_profile_actor(root, config, project, role, instance)
     server = 'hoh-' + actor.agent_id
     command = str(root / '.venv/Scripts/python.exe')
@@ -105,6 +127,19 @@ def install_profile(root, project, role, instance, client, home, upgrade_skills=
         (kit / 'mcp.json').write_text(json.dumps({'mcpServers': {server: claude}}), encoding='utf-8')
         manifest = json.loads((kit / 'manifest.json').read_text(encoding='utf-8'))
         manifest['server_name'], manifest['codex'] = server, codex
+        model_note = None
+        if model and client == 'codex':
+            # A Codex profile carries a model; it applies when Codex starts with
+            # --profile <server>.
+            manifest['codex_profile'] = {'name': server, 'model': model}
+        elif model and role != 'planner':
+            agent = f'agents/{server}-worker.md'
+            (kit / 'agents').mkdir()
+            (kit / agent).write_text(worker_agent_text(server, role, model), encoding='utf-8')
+            manifest['claude_agent'] = agent
+        elif model:
+            model_note = ('Claude Code has no per-server model setting; choose the Planner '
+                          'chat model with /model or claude --model.')
         if transport == 'shared-http':
             manifest['upgrade_from'] = previous
         manifest['files'] = {p.relative_to(kit).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
@@ -133,8 +168,17 @@ def install_profile(root, project, role, instance, client, home, upgrade_skills=
                 if not destination.exists():
                     shutil.move(str(backup), destination)
             raise
-    return {'server_name': server, 'agent_id': actor.agent_id, 'role': role, 'project_id': project, 'transport': transport,
-            'skill_backups': [str(backup) for _, backup in moved]}
+    result = {'server_name': server, 'agent_id': actor.agent_id, 'role': role, 'project_id': project, 'transport': transport,
+              'skill_backups': [str(backup) for _, backup in moved]}
+    if model:
+        result['model'] = model
+        if client == 'codex':
+            result['codex_profile'] = server
+        elif role != 'planner':
+            result['claude_agent'] = f'{server}-worker'
+        else:
+            result['model_note'] = model_note
+    return result
 
 
 def make_prompts(root, project, instance='primary'):
@@ -223,12 +267,14 @@ def main():
     parser.add_argument('--home', type=Path, default=Path.home())
     parser.add_argument('--upgrade-skills', action='store_true')
     parser.add_argument('--transport', choices=['stdio', 'shared-http'], default='shared-http')
+    parser.add_argument('--model', help='Model this role runs on, where the client supports it')
     args = parser.parse_args()
     root = args.root.resolve()
     config = checked_project(root, args.project)
     actor = installed_profile_actor(root, config, args.project, args.role, args.instance)
     if args.action == 'setup':
-        print(json.dumps(install_profile(root, args.project, args.role, args.instance, args.client, args.home, args.upgrade_skills, args.transport)))
+        print(json.dumps(install_profile(root, args.project, args.role, args.instance, args.client, args.home, args.upgrade_skills, args.transport,
+                                         args.model)))
         return
     if any((root / 'config' / name).exists() for name in ('stop.request', 'shutdown.request')):
         raise SystemExit('HoH was stopped by the operator. Open the HoH desktop icon before reconnecting.')
