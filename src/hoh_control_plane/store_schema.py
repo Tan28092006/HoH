@@ -250,7 +250,9 @@ CREATE TABLE IF NOT EXISTS candidates (
     developer_claims TEXT NOT NULL,
     submitted_by TEXT NOT NULL,
     submitted_at TEXT NOT NULL,
-    frozen_at TEXT NOT NULL
+    frozen_at TEXT NOT NULL,
+    derived_from TEXT,
+    qa_evidence_from TEXT
 );
 
 -- Changed paths are derived from immutable Git commits, rather than supplied

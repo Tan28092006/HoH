@@ -44,7 +44,9 @@ class SchemaVersionError(SchemaMigrationError):
 #        the merge shadow partition (repository_reconciliations.scope,
 #        frozen_ticket_ids, shadow_*), agent_presence.session_started_at and
 #        ticket_usage_reports.
-SCHEMA_VERSION = 2
+#   3 -- candidates.derived_from and candidates.qa_evidence_from: the
+#        candidate a queued merge rebased onto a moved main (wave 7B).
+SCHEMA_VERSION = 3
 
 
 def read_schema_version(connection: Any, columns_of: Any) -> int:
@@ -178,6 +180,11 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # before the column: its session start is unknown, so no ticket count and
     # no restart advice is derived from it.
     ("agent_presence", "session_started_at", "TEXT"),
+    # Wave 7B auto-rebase: a server-derived candidate names the candidate it
+    # was rebased from, and the candidate whose QA verdict it carries over
+    # (NULL when the derived candidate must be assessed by QA again).
+    ("candidates", "derived_from", "TEXT"),
+    ("candidates", "qa_evidence_from", "TEXT"),
 )
 
 

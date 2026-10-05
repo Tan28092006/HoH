@@ -98,6 +98,10 @@ _CONTRACT_TOKEN_BUDGET = contracts.CONTRACT_TOKEN_BUDGET
 # split it, revise its contract or cancel it. Only a recorded Planner decision
 # starts a new count (event ticket.rework_budget_reset).
 MAX_QA_REJECTIONS = 3
+#: Server-side rebases a queued merge may make for one ticket when main moved
+#: under its candidate (counted from derived candidate rows, not events). The
+#: next drift blocks the ticket for Planner as ``drift_budget_exhausted``.
+MAX_AUTO_REBASES = 3
 REWORK_BUDGET_EXHAUSTED = "rework_budget_exhausted"
 
 # How often one project's repository is observed (fetch and compare), whoever

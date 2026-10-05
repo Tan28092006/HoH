@@ -68,8 +68,10 @@ The service enforces these; [ARCHITECTURE.md](docs/ARCHITECTURE.md) says where.
   evidence.
 - Every open ticket has an explicit validation contract. A candidate is exactly
   one ordinary commit whose parent is the frozen base or the prior assessed
-  candidate. QA independently executes the declared scenarios on that frozen
-  candidate and attaches every required evidence type. A gated merge or ungated
+  candidate; a derived candidate (server rebase on drift) is that patch on
+  current main, landing only after the frozen suite passes on it. QA
+  independently executes the declared scenarios on the frozen candidate and
+  attaches every required evidence type. A gated merge or ungated
   landing creates one durable `delivery_completed` Planner report.
 - QA claim authority is the intersection of live declared capabilities and a
   Planner-approved profile backed by host-observed preflight evidence from the
