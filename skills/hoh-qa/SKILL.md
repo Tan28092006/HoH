@@ -25,6 +25,8 @@ own equipment, or transfers evidence to another SHA.
    returns the passing run (`reused=true`); pass `rerun=true` only for suspected flakiness.
 5. Execute every `validation_contract` scenario with claim → observe → assess.
    Attach the declared evidence types and record the result for every criterion.
+   Record your own observations before resolving the Developer's claims
+   (`ctx:candidate:<id>:developer_claims`); then compare, never adopt them.
 6. Submit a verdict only from evidence on this exact SHA, passing the
    `context_snapshot_id` of a packet read after your claim, or the claim's
    `current_context_snapshot_id` (refused without one). The verdict

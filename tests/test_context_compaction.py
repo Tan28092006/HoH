@@ -493,8 +493,15 @@ def test_qa_packet_keeps_everything_section_7_3_makes_its_own(
     evidence = packet["known_failures"][0]["evidence"][0]
     assert evidence["storage_ref"]
     assert "environment_digest" in evidence and "storage_checksum" in evidence
-    # 6. Developer evidence, kept for reference rather than trusted.
-    assert packet["candidate"]["developer_claims"]
+    # 6. Developer evidence, kept for reference rather than trusted: QA gets
+    # only the reference, so it observes before it reads the maker's claims.
+    claims_ref = f"ctx:candidate:{candidate['candidate']['candidate_id']}:developer_claims"
+    assert packet["candidate"]["developer_claims"] == []
+    assert any(
+        claims_ref in item["references"] for item in packet["omitted_sections"]
+    )
+    resolved = service.resolve_context_reference(actors["qa"], claims_ref)
+    assert resolved["developer_claims"] == ["Retry implementation is ready for QA."]
 
 
 def test_packets_drop_repeated_identity_and_machine_local_paths(

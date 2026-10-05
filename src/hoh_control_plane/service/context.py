@@ -1107,8 +1107,11 @@ class ContextMixin:
                         ],
                     }
                 )
+        # QA is the evaluator of the Developer's work, so it gets the claims only
+        # by reference: it observes first and compares afterwards, instead of
+        # reading the maker's conclusions before running a single scenario.
         drop_claims = payload.get("role") in {
-            Role.DEVELOPER.value, Role.INTEGRATOR.value
+            Role.DEVELOPER.value, Role.QA.value, Role.INTEGRATOR.value
         } or _estimate_tokens(payload) > token_budget
         if candidate and candidate.get("developer_claims") and drop_claims:
             omitted.append(
