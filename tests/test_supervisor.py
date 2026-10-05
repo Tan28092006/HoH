@@ -167,28 +167,67 @@ def test_revoked_lease_stops_running_qa(service, actors, seeded, tmp_path):
         assert service._qa_test_job(db, job['test_run_id'])['status'] == 'FAILED'
 
 
+def _wait_for_exit(pid: int, timeout: float) -> bool:
+    """Block until process ``pid`` has exited, or ``timeout`` seconds pass."""
+    if os.name == 'nt':
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x00100000 | 0x1000, False, pid)  # SYNCHRONIZE | QUERY_LIMITED
+        if not handle:
+            return True  # no such process any more
+        try:
+            return kernel32.WaitForSingleObject(handle, int(timeout * 1000)) == 0
+        finally:
+            kernel32.CloseHandle(handle)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
 def test_supervisor_crash_is_recovered_from_durable_execution_record(service, actors, seeded, tmp_path):
+    """Killing the supervisor kills its job's process tree; a new one recovers the job.
+
+    No step depends on how fast the machine is. The test child would sleep far
+    longer than any wait here, so "escaped" can only appear if the child was not
+    killed; the child reports its pid, and the test waits for that process to
+    exit instead of assuming it has. Every deadline below only bounds how long a
+    real failure takes to report.
+    """
     from hoh_control_plane.supervisor import Supervisor
     ready, escaped = tmp_path / 'ready', tmp_path / 'escaped'
-    command = [sys.executable, '-c', f"from pathlib import Path;import time;Path({str(ready)!r}).touch();time.sleep(4);Path({str(escaped)!r}).touch()"]
+    staged = tmp_path / 'ready.tmp'
+    command = [sys.executable, '-c', (
+        "import os,time;from pathlib import Path;"
+        f"Path({str(staged)!r}).write_text(str(os.getpid()));"
+        f"Path({str(staged)!r}).replace({str(ready)!r});"
+        f"time.sleep(600);Path({str(escaped)!r}).touch()"
+    )]
     job = make_job(service, actors, seeded, tmp_path, command)
     environment = {key: value for key, value in os.environ.items() if not key.startswith('HOH_')}
     environment['HOH_DATABASE_PATH'] = str(service.store.path)
     process = subprocess.Popen([sys.executable, '-m', 'hoh_control_plane.supervisor', '--max-workers', '1'],
                                env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    child_pid = None
     try:
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 120
         while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
             time.sleep(0.05)
-        assert ready.exists()
+        assert ready.exists(), 'the supervised test command never started'
+        child_pid = int(ready.read_text())
         with service.store.connection() as db:
             owner_pid = int(db.execute("SELECT state_value FROM runtime_state WHERE state_key = 'supervisor_pid'").fetchone()[0])
         os.kill(owner_pid, signal.SIGTERM)
-        process.wait(timeout=5)
+        process.wait(timeout=60)
+        assert _wait_for_exit(child_pid, 120), 'the job process outlived its supervisor'
         from contextlib import ExitStack
         from hoh_control_plane.domain import ConflictError
         with ExitStack() as stack:
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 60
             while True:
                 try:
                     supervisor = stack.enter_context(Supervisor(service, max_workers=1))
@@ -197,7 +236,7 @@ def test_supervisor_crash_is_recovered_from_durable_execution_record(service, ac
                     if time.monotonic() >= deadline:
                         raise
                     time.sleep(0.05)
-            deadline = time.monotonic() + 8
+            deadline = time.monotonic() + 60
             while time.monotonic() < deadline:
                 supervisor.recover()
                 with service.store.connection() as db:
@@ -210,7 +249,12 @@ def test_supervisor_crash_is_recovered_from_durable_execution_record(service, ac
     finally:
         if process.poll() is None:
             process.kill()
-        process.wait(timeout=5)
+        process.wait(timeout=60)
+        if child_pid is not None and not _wait_for_exit(child_pid, 0):
+            try:
+                os.kill(child_pid, signal.SIGTERM)
+            except OSError:
+                pass
 
 
 def test_operations_check_reports_missing_supervisor(service):

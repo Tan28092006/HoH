@@ -43,6 +43,21 @@ from hoh_control_plane.service import ControlPlaneService
 from hoh_control_plane.store import SQLiteStore
 
 
+@pytest.fixture(autouse=True)
+def _git_has_no_wall_clock_budget_in_tests(monkeypatch):
+    """Tests assert what Git did, not how fast this machine ran it.
+
+    Production stops any Git command after 15 seconds. A test repository's
+    commands take well under a second, but on a loaded machine (parallel
+    workers, a second suite, a paging file under pressure) one can exceed 15
+    seconds and the test fails with "Git operation timed out" although nothing
+    it asserts is wrong. That made test_repository_sync and test_workspace_models
+    fail under load and pass serially. The budget is raised here; a test that is
+    about the timeout itself sets its own value, which overrides this one.
+    """
+    monkeypatch.setattr("hoh_control_plane.git_worktrees._GIT_COMMAND_TIMEOUT_SECONDS", 600)
+
+
 @pytest.fixture
 def store(tmp_path: Path) -> SQLiteStore:
     database = SQLiteStore(tmp_path / "control-plane.db")
