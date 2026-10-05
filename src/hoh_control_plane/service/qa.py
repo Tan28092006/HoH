@@ -9,6 +9,16 @@ _INFRASTRUCTURE_OUTCOMES = frozenset({
 })
 
 from hoh_control_plane import contracts
+
+_MIN_DIGEST_PREFIX = 12
+
+
+def _digest_matches(supplied: str, actual: str) -> bool:
+    """A full digest, or the 12+ character prefix agents are shown, of ``actual``."""
+    supplied = supplied.strip().lower()
+    return supplied == actual or (
+        len(supplied) >= _MIN_DIGEST_PREFIX and actual.lower().startswith(supplied)
+    )
 from hoh_control_plane.service._common import (
     require_snapshot_id,
     CHECKSUM_ARTIFACT,
@@ -89,9 +99,9 @@ class QaMixin:
         the evidence came from. Otherwise this records the environment the
         observation was filed in, which is a weaker but honest statement.
         """
-        if supplied is not None and str(supplied).strip():
-            self._bounded_text(str(supplied), "evidence.environment_digest", contracts.DIGEST_CHARS)
-            return str(supplied)
+        supplied_text = str(supplied).strip() if supplied is not None else ""
+        if supplied_text:
+            self._bounded_text(supplied_text, "evidence.environment_digest", contracts.DIGEST_CHARS)
         recorded = _row(
             connection.execute(
                 """
@@ -102,8 +112,17 @@ class QaMixin:
                 (candidate_id,),
             ).fetchone()
         )
-        if recorded is not None and recorded["environment_digest"]:
-            return str(recorded["environment_digest"])
+        recorded_digest = (
+            str(recorded["environment_digest"])
+            if recorded is not None and recorded["environment_digest"] else None
+        )
+        if supplied_text:
+            # An echoed 12-character digest of the real run means that run.
+            if recorded_digest and _digest_matches(supplied_text, recorded_digest):
+                return recorded_digest
+            return supplied_text
+        if recorded_digest:
+            return recorded_digest
         profile = _row(
             connection.execute(
                 "SELECT * FROM candidate_test_profiles WHERE candidate_id = ?", (candidate_id,)
@@ -193,7 +212,9 @@ class QaMixin:
             # QA agent's own claim about an artifact it holds elsewhere.
             return recorded_content_digest(), CHECKSUM_CLAIMED
         actual = hashlib.sha256(artifact.read_bytes()).hexdigest()
-        if supplied is not None and str(supplied) != actual:
+        # Agents read digests shortened to 12 characters, so an echoed value may be
+        # a prefix; it still has to identify these bytes, and the full one is kept.
+        if supplied is not None and not _digest_matches(str(supplied), actual):
             raise ValidationError(
                 "Evidence checksum does not match the stored artifact",
                 {"reason": "evidence_checksum_mismatch", "storage_ref": storage_ref},

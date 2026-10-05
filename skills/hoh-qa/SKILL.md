@@ -24,7 +24,9 @@ own equipment, or transfers evidence to another SHA.
    imports, environment and HEAD identify the frozen candidate. A repeat call
    returns the passing run (`reused=true`); pass `rerun=true` only for suspected flakiness.
 5. Execute every `validation_contract` scenario with claim → observe → assess.
-   Attach the declared evidence types and record the result for every criterion.
+   Attach the declared evidence types and record the result for every criterion;
+   each evidence item needs `type`, `observation` and `storage_ref`; only
+   `scenario_ref`, `storage_checksum` and `environment_digest` may be added.
    Record your own observations before resolving the Developer's claims
    (`ctx:candidate:<id>:developer_claims`); then compare, never adopt them.
 6. Submit a verdict only from evidence on this exact SHA, passing the

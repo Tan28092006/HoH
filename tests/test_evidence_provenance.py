@@ -570,3 +570,53 @@ def test_the_metric_shows_how_much_evidence_is_actually_backed(
     assert evidence["artifact_backed_items"] + evidence["claimed_items"] == (
         evidence["evidence_items"]
     ), "every item is one or the other"
+
+
+def test_an_echoed_short_checksum_of_the_artifact_is_accepted_and_stored_in_full(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    """Agents are shown 12-character digests; echoing one back must not fail the verdict."""
+    ticket, candidate, qa_claim = _candidate_waiting_for_qa(service, actors, seeded, tmp_path)
+    run = service.run_project_tests(
+        actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"]
+    )["test_run"]
+    full = hashlib.sha256(Path(run["report_path"]).read_bytes()).hexdigest()
+
+    _verdict(
+        service, actors, ticket, candidate, qa_claim,
+        {
+            "type": "test_result",
+            "observation": "regression suite completed",
+            "storage_ref": run["storage_ref"],
+            "storage_checksum": full[:12],
+        },
+    )
+
+    stored = _stored_evidence(service, candidate["candidate"]["candidate_id"])[0]
+    assert stored["storage_checksum"] == full
+
+
+def test_a_short_prefix_of_another_digest_still_fails_closed(
+    service, actors, seeded, tmp_path: Path
+) -> None:
+    ticket, candidate, qa_claim = _candidate_waiting_for_qa(service, actors, seeded, tmp_path)
+    candidate_id = candidate["candidate"]["candidate_id"]
+    artifact = service.project_tests.evidence_root / candidate_id / "run.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text('{"result": "passed"}', encoding="utf-8")
+    full = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    wrong = ("0" if full[0] != "0" else "1") + full[1:12]
+
+    for supplied in (wrong, full[:8]):
+        with pytest.raises(ValidationError) as excinfo:
+            _verdict(
+                service, actors, ticket, candidate, qa_claim,
+                {
+                    "type": "test_result",
+                    "observation": "seen",
+                    "storage_ref": f"evidence://local/{candidate_id}/run.json",
+                    "storage_checksum": supplied,
+                },
+            )
+        assert excinfo.value.details["reason"] == "evidence_checksum_mismatch"
+    assert _stored_evidence(service, candidate_id) == []
