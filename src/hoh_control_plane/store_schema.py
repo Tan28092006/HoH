@@ -575,6 +575,9 @@ CREATE INDEX IF NOT EXISTS work_offers_queue_status
 -- instead of creating a second lease, candidate, verdict or event. Only the
 -- request digest is retained, never the raw payload, and project_id is stored
 -- as '' rather than NULL so the uniqueness scope holds for unscoped commands.
+-- The request's correlation id names its audit events, so a retry of a
+-- reservation that never recorded its outcome can tell whether its effect
+-- committed.
 CREATE TABLE IF NOT EXISTS idempotency_records (
     record_id TEXT PRIMARY KEY,
     idempotency_key TEXT NOT NULL,
@@ -587,7 +590,8 @@ CREATE TABLE IF NOT EXISTS idempotency_records (
     response TEXT,
     created_at TEXT NOT NULL,
     completed_at TEXT,
-    expires_at TEXT NOT NULL
+    expires_at TEXT NOT NULL,
+    correlation_id TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idempotency_records_scope
     ON idempotency_records(actor_id, project_id, operation, idempotency_key);

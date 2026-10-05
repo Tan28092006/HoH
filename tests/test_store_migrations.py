@@ -445,7 +445,11 @@ def test_upgrading_a_database_written_before_event_tracing_succeeds(tmp_path) ->
     import sqlite3
 
     database = tmp_path / "before-tracing.db"
-    older = SCHEMA.replace("    correlation_id TEXT,\n    causation_id TEXT,\n", "")
+    # Idempotency reservations learned their correlation id later still, so a
+    # database from before tracing has neither column.
+    older = SCHEMA.replace("    correlation_id TEXT,\n    causation_id TEXT,\n", "").replace(
+        "    expires_at TEXT NOT NULL,\n    correlation_id TEXT\n", "    expires_at TEXT NOT NULL\n"
+    )
     assert "correlation_id" not in older, "the fixture must really predate the columns"
     raw = sqlite3.connect(database)
     raw.executescript(older)

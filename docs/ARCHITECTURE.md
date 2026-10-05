@@ -107,6 +107,30 @@ helper you are about to change across `service/`.
 - Every state change records an `audit_events` row in the same transaction
   (`_event` in `validation.py`). Events are an audit trail, not an event-sourced
   log: current state cannot be rebuilt from them.
+- **Whether a request's effect committed is read from the audit trail.** Each
+  call runs under one correlation id (`mcp/invoke.py` and the REST middleware
+  open one; `run_idempotent` opens one when none is active), and every event the
+  request writes carries it. `run_idempotent` stores that id on the idempotency
+  reservation. A retry that finds the reservation IN_PROGRESS past
+  `IDEMPOTENCY_STALE_SECONDS` asks whether the reserving actor wrote an event
+  under it: if so, the record is completed with a reconstructed
+  `status: committed` outcome (the committed events' ids, versions and
+  payloads) and the command does not run; if not, the key is reserved afresh
+  and the command runs. Only a legacy row with no correlation id still answers
+  `idempotency_unknown`. Complete and release update by `record_id` and only an
+  IN_PROGRESS row, so a request that finishes after its key was reclaimed cannot
+  overwrite or delete the newer reservation. Events written under the same id by
+  internal identities (`lease-recovery`, `retirement-finalizer`) are housekeeping,
+  not the request's effect.
+- **Multi-transaction commands are covered by idempotency, not by the
+  transport.** A `ContentionError` means one transaction never began, not that
+  the call did nothing. When a command raises after its own event committed,
+  `run_idempotent` binds the key to the committed outcome; a `ContentionError`
+  there is answered with that outcome (keyed or not), any other error is raised
+  and a keyed retry replays the outcome. The MCP transport retries a contended
+  call only while `request_has_committed` is false. The claim keeps its 0.3.31
+  post-commit tolerance on top, so it still returns its real lease when packet
+  or brief compilation contends.
 - Schema changes are additive (`ADDITIVE_COLUMNS`, `MIGRATED_INDEXES` in
   `store_migrations.py`) plus SQLite table rebuilds detected by schema text.
   `schema_meta` records `SCHEMA_VERSION` (`store_migrations.py`) on both
@@ -125,7 +149,7 @@ helper you are about to change across `service/`.
 | Consequential writes name a fresh packet | `require_fresh_context` in `context.py`; `require_snapshot_id` in `service/_common.py`, called by `submit_candidate`, `queue_candidate_submission`, `submit_qa_verdict` and `queue_merge_candidate`, so REST and MCP both require it | `test_context_snapshots.py`, `test_team_quality_gates.py` |
 | Candidate is one ordinary commit on the frozen base | Candidate verification in `candidates.py` / `git_worktrees.py` | `test_candidate_submission.py` |
 | Merge only the current candidate after a fresh QA pass and isolated gate | `integration.py` queued merge and `merge_intents` reconciliation | `test_integration_async_gate.py`, `test_integration_release_policy.py` |
-| Retried writes do not repeat effects | `service/idempotency.py` (payload-bound key; completion and release retry contention and never mask a committed effect; a stale IN_PROGRESS key is reclaimed as `idempotency_unknown`) | `test_idempotency.py` |
+| Retried writes do not repeat effects | `service/idempotency.py` (payload-bound key stamped with the request's correlation id; a stale IN_PROGRESS key is settled from that id's audit events, committed → `status: committed` replay, otherwise re-run; complete and release by `record_id`; contention after a committed write returns the committed outcome); `_run_with_contention_retry` in `mcp/invoke.py` retries only while nothing the call wrote has committed | `test_idempotency.py` |
 | Validation contracts fit the packet | Limits in `contracts.py`, checked in `project_policy.py` and published in the MCP and REST schemas | `test_team_quality_gates.py`, `test_contract_parity.py` |
 | Advertised capabilities name only tools the role has | `CAPABILITY_TOOLS` and `capabilities()` in `discovery.py` | `test_contract_parity.py` |
 | The third QA rejection blocks the ticket for Planner; only a recorded resume resets the count | `MAX_QA_REJECTIONS` in `_common.py`; `submit_qa_verdict` in `qa.py`; `resume_ticket_after_failure` in `planner_jobs.py` | `test_rework_budget.py` |

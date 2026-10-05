@@ -32,8 +32,10 @@ class ContentionError(DomainError):
 
     This is the one documented, retryable error a caller sees instead of a raw
     SQLite "database is locked"/"database is busy" message: no statement in the
-    attempted transaction ran, so retrying the same request from scratch is safe
-    and is expected to succeed once the competing writer finishes.
+    attempted transaction ran, so retrying that transaction is safe and is
+    expected to succeed once the competing writer finishes. It says nothing about
+    the request's earlier transactions; whether the whole request may be retried
+    is decided by ``run_idempotent`` and the MCP transport from the audit trail.
     """
 
     code = "database_contention"

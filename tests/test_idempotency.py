@@ -355,19 +355,43 @@ class _SimulatedCrash(BaseException):
     """Stands in for the process dying between the command and its completion."""
 
 
-def test_a_crash_before_completion_is_reclaimed_as_unknown_after_the_stale_age(
-    service, actors, seeded, monkeypatch
-) -> None:
+def _crash(*_args, **_kwargs):
+    raise _SimulatedCrash()
+
+
+def _age_reservation(service, key: str) -> None:
+    """Make a reservation older than the stale age, as a dead request's would be."""
     from hoh_control_plane.service import idempotency
 
+    assert idempotency.IDEMPOTENCY_STALE_SECONDS < 10**9
+    with service.store.connection(immediate=True) as connection:
+        connection.execute(
+            "UPDATE idempotency_records SET created_at = ? WHERE idempotency_key = ?",
+            ("2000-01-01T00:00:00Z", key),
+        )
+
+
+def _record(service, key: str) -> dict:
+    with service.store.connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM idempotency_records WHERE idempotency_key = ?", (key,)
+        ).fetchone()
+    return dict(row) if row is not None else {}
+
+
+def _must_not_run():
+    pytest.fail("A retry must not re-run a command whose effect already committed")
+
+
+def test_a_crash_after_the_commit_is_answered_as_committed_without_a_second_effect(
+    service, actors, seeded, monkeypatch
+) -> None:
+    """The claim committed, then the process died before recording completion."""
     ticket = seeded["ticket"]
     payload = _claim_payload(ticket)
     developer = actors["developer"]
 
-    def crash(*_args, **_kwargs):
-        raise _SimulatedCrash()
-
-    monkeypatch.setattr(type(service), "_complete_idempotency_record", crash)
+    monkeypatch.setattr(type(service), "_complete_idempotency_record", _crash)
     with pytest.raises(_SimulatedCrash):
         service.run_idempotent(
             developer,
@@ -378,33 +402,252 @@ def test_a_crash_before_completion_is_reclaimed_as_unknown_after_the_stale_age(
         )
     monkeypatch.undo()
     assert _count(service, "leases") == 1
-
-    def must_not_run():
-        pytest.fail("A retry must not re-run a command whose outcome is unknown")
+    reservation = _record(service, "crash-key")
+    assert reservation["status"] == "IN_PROGRESS"
+    assert reservation["correlation_id"], "the reservation names its request"
 
     # A fresh reservation is still treated as in flight.
     with pytest.raises(IdempotencyConflictError) as fresh:
         service.run_idempotent(
             developer, operation="work.claim", idempotency_key="crash-key",
-            payload=payload, run=must_not_run,
+            payload=payload, run=_must_not_run,
         )
     assert fresh.value.details["reason"] == "in_progress"
 
-    old = "2000-01-01T00:00:00Z"
-    assert idempotency.IDEMPOTENCY_STALE_SECONDS < 10**9
+    _age_reservation(service, "crash-key")
+    outcome = service.run_idempotent(
+        developer, operation="work.claim", idempotency_key="crash-key",
+        payload=payload, run=_must_not_run,
+    )
+
+    with service.store.connection() as connection:
+        lease_id = connection.execute("SELECT lease_id FROM leases").fetchone()[0]
+    assert outcome["status"] == "committed"
+    assert outcome["correlation_id"] == reservation["correlation_id"]
+    claimed = [effect for effect in outcome["effects"] if effect["event_type"] == "ticket.claimed"]
+    assert claimed and claimed[0]["aggregate_id"] == ticket["ticket_id"]
+    assert claimed[0]["payload"]["lease_id"] == lease_id, "enough to continue with the lease"
+    assert _count(service, "leases") == 1
+    settled = _record(service, "crash-key")
+    assert settled["record_id"] == reservation["record_id"]
+    assert settled["status"] == "COMPLETED"
+    # From now on the key replays the same answer.
+    assert service.run_idempotent(
+        developer, operation="work.claim", idempotency_key="crash-key",
+        payload=payload, run=_must_not_run,
+    ) == outcome
+
+
+def test_a_crash_before_the_commit_runs_the_command_again_after_the_stale_age(
+    service, actors, seeded, monkeypatch
+) -> None:
+    """The process died before the command wrote anything, and before releasing."""
+    ticket = seeded["ticket"]
+    payload = _claim_payload(ticket)
+    developer = actors["developer"]
+
+    monkeypatch.setattr(type(service), "_release_idempotency_record", _crash)
+    with pytest.raises(_SimulatedCrash):
+        service.run_idempotent(
+            developer, operation="work.claim", idempotency_key="early-crash",
+            payload=payload, run=_crash,
+        )
+    monkeypatch.undo()
+    stale = _record(service, "early-crash")
+    assert stale["status"] == "IN_PROGRESS"
+    assert _count(service, "leases") == 0
+
+    _age_reservation(service, "early-crash")
+    result = service.run_idempotent(
+        developer, operation="work.claim", idempotency_key="early-crash",
+        payload=payload, run=lambda: service.claim_ticket(developer, **payload),
+    )
+
+    assert result["ticket"]["status"] == "DEV_IN_PROGRESS"
+    assert _count(service, "leases") == 1
+    settled = _record(service, "early-crash")
+    assert settled["record_id"] != stale["record_id"], "the stale reservation was replaced"
+    assert settled["status"] == "COMPLETED"
+
+
+def test_a_late_completion_never_overwrites_a_newer_reservation(
+    service, actors, seeded, monkeypatch
+) -> None:
+    """ABA: the first request was only slow, and finishes while a retry holds the key."""
+    ticket = seeded["ticket"]
+    payload = _claim_payload(ticket)
+    developer = actors["developer"]
+
+    monkeypatch.setattr(type(service), "_release_idempotency_record", _crash)
+    with pytest.raises(_SimulatedCrash):
+        service.run_idempotent(
+            developer, operation="work.claim", idempotency_key="aba-key",
+            payload=payload, run=_crash,
+        )
+    monkeypatch.undo()
+    first = _record(service, "aba-key")["record_id"]
+    _age_reservation(service, "aba-key")
+
+    def retry_while_the_first_finishes_late():
+        service._complete_idempotency_record(first, {"late": True})
+        service._release_idempotency_record(first)
+        newer = _record(service, "aba-key")
+        assert newer["record_id"] != first
+        assert newer["status"] == "IN_PROGRESS", "the late finish left the newer key alone"
+        return service.claim_ticket(developer, **payload)
+
+    result = service.run_idempotent(
+        developer, operation="work.claim", idempotency_key="aba-key",
+        payload=payload, run=retry_while_the_first_finishes_late,
+    )
+    replay = service.run_idempotent(
+        developer, operation="work.claim", idempotency_key="aba-key",
+        payload=payload, run=_must_not_run,
+    )
+
+    assert replay == result
+    assert "late" not in replay
+    assert _count(service, "leases") == 1
+
+
+def test_a_stale_reservation_without_a_correlation_id_is_still_unknown(
+    service, actors, seeded, monkeypatch
+) -> None:
+    """A row written before reservations recorded their request cannot be settled."""
+    ticket = seeded["ticket"]
+    payload = _claim_payload(ticket)
+    developer = actors["developer"]
+
+    monkeypatch.setattr(type(service), "_complete_idempotency_record", _crash)
+    with pytest.raises(_SimulatedCrash):
+        service.run_idempotent(
+            developer, operation="work.claim", idempotency_key="legacy-key",
+            payload=payload, run=lambda: service.claim_ticket(developer, **payload),
+        )
+    monkeypatch.undo()
     with service.store.connection(immediate=True) as connection:
         connection.execute(
-            "UPDATE idempotency_records SET created_at = ? WHERE idempotency_key = ?",
-            (old, "crash-key"),
+            "UPDATE idempotency_records SET correlation_id = NULL WHERE idempotency_key = ?",
+            ("legacy-key",),
         )
+    _age_reservation(service, "legacy-key")
+
     with pytest.raises(IdempotencyConflictError) as unknown:
         service.run_idempotent(
-            developer, operation="work.claim", idempotency_key="crash-key",
-            payload=payload, run=must_not_run,
+            developer, operation="work.claim", idempotency_key="legacy-key",
+            payload=payload, run=_must_not_run,
         )
     assert unknown.value.details["reason"] == "idempotency_unknown"
     assert _count(service, "idempotency_records") == 0
     assert _count(service, "leases") == 1
+
+
+def test_housekeeping_under_another_identity_is_not_the_requests_effect(
+    service, actors, seeded, monkeypatch
+) -> None:
+    """Lease recovery writes under the caller's correlation id but its own actor."""
+    from hoh_control_plane.store import ContentionError
+
+    developer = actors["developer"]
+    recovery = Actor("lease-recovery", Role.ADMIN, frozenset({"*"}))
+
+    def sweep_then_contend():
+        with service.store.connection(immediate=True) as connection:
+            service._event(
+                connection, recovery, "project-1", "lease.expired_requeued", "ticket",
+                "DEV-142", 1, {},
+            )
+        raise ContentionError("busy")
+
+    with pytest.raises(ContentionError):
+        service.run_idempotent(
+            developer, operation="work.inbox", idempotency_key="inbox-key",
+            payload={"project_id": "project-1"}, run=sweep_then_contend,
+        )
+    assert _count(service, "idempotency_records") == 0, "released: nothing of its own committed"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("idempotency_key", [None, "update-key"])
+async def test_contention_after_a_committed_write_is_not_retried_by_the_transport(
+    service, actors, seeded, monkeypatch, idempotency_key
+) -> None:
+    """A command whose effect committed and whose later transaction met contention.
+
+    Before, the MCP layer retried the whole call because ContentionError was
+    assumed to mean nothing had happened; the retry then ran the effect again or
+    reported a conflict for work the caller had already done.
+    """
+    from hoh_control_plane.mcp import invoke as invoke_module
+    from hoh_control_plane.store import ContentionError
+
+    monkeypatch.setattr(invoke_module, "_CONTENTION_RETRY_BASE_SECONDS", 0)
+    ticket = seeded["ticket"]
+    real_update = service.update_ticket_fields
+    calls: list[int] = []
+
+    def update_then_contend(*args, **kwargs):
+        calls.append(1)
+        real_update(*args, **kwargs)
+        raise ContentionError("busy")  # a later transaction of the same command
+
+    monkeypatch.setattr(service, "update_ticket_fields", update_then_contend)
+    server = create_mcp_server(service, actors["planner"])
+    arguments = {
+        "ticket_id": ticket["ticket_id"],
+        "expected_version": ticket["version"],
+        "reason": "Sharpen the title",
+        "title": "Repair checkout retry behaviour",
+    }
+    if idempotency_key:
+        arguments["idempotency_key"] = idempotency_key
+
+    _, outcome = await server.call_tool("planner.update_ticket", arguments)
+
+    assert outcome["status"] == "committed"
+    assert any(effect["event_type"] == "ticket.fields_updated" for effect in outcome["effects"])
+    assert len(calls) == 1, "the committed effect was not run a second time"
+    with service.store.connection() as connection:
+        current = service._ticket(connection, ticket["ticket_id"])
+    assert current["version"] == ticket["version"] + 1
+    assert current["title"] == "Repair checkout retry behaviour"
+    if idempotency_key:
+        _, replay = await server.call_tool("planner.update_ticket", arguments)
+        assert replay == outcome
+        assert len(calls) == 1
+
+
+@pytest.mark.anyio
+async def test_contention_before_anything_committed_is_still_retried(
+    service, actors, seeded, monkeypatch
+) -> None:
+    from hoh_control_plane.mcp import invoke as invoke_module
+    from hoh_control_plane.store import ContentionError
+
+    monkeypatch.setattr(invoke_module, "_CONTENTION_RETRY_BASE_SECONDS", 0)
+    ticket = seeded["ticket"]
+    real_update = service.update_ticket_fields
+    calls: list[int] = []
+
+    def contend_once(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ContentionError("busy")
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(service, "update_ticket_fields", contend_once)
+    server = create_mcp_server(service, actors["planner"])
+
+    _, result = await server.call_tool("planner.update_ticket", {
+        "ticket_id": ticket["ticket_id"],
+        "expected_version": ticket["version"],
+        "reason": "Sharpen the title",
+        "title": "Repair checkout retry behaviour",
+        "idempotency_key": "retried-key",
+    })
+
+    assert len(calls) == 2
+    assert result["ticket"]["version"] == ticket["version"] + 1
 
 
 def test_contention_on_completion_never_hides_a_committed_effect(
@@ -455,6 +698,4 @@ def test_contention_on_completion_never_hides_a_committed_effect(
         service.store, "connection",
         lambda *a, **k: (_ for _ in ()).throw(ContentionError("busy")),
     )
-    assert service._complete_idempotency_record(
-        (developer.agent_id, "", "x", "y"), {"ok": True}
-    ) is None
+    assert service._complete_idempotency_record("idem_9999", {"ok": True}) is None

@@ -40,7 +40,8 @@ class SchemaVersionError(SchemaMigrationError):
 # Bump it whenever a release changes the schema, so an older binary started on
 # the upgraded file refuses rather than guessing.
 #   1 -- first recorded version (after 0.3.30): schema_meta, tickets.status CHECK.
-SCHEMA_VERSION = 1
+#   2 -- idempotency_records.correlation_id.
+SCHEMA_VERSION = 2
 
 
 def read_schema_version(connection: Any, columns_of: Any) -> int:
@@ -129,6 +130,9 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # than as an event that belonged to no request.
     ("audit_events", "correlation_id", "TEXT"),
     ("audit_events", "causation_id", "TEXT"),
+    # A reservation written before this column cannot say which request it
+    # belongs to; NULL keeps such a stale row answering idempotency_unknown.
+    ("idempotency_records", "correlation_id", "TEXT"),
     # An existing project was necessarily co-located, because that was the only
     # model the service could serve, so the default states the truth about it.
     ("project_repositories", "workspace_model", "TEXT NOT NULL DEFAULT 'colocated'"),

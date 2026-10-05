@@ -18,21 +18,30 @@ from hoh_control_plane.store import ContentionError
 
 Result = TypeVar("Result")
 
-# ContentionError only ever comes from a transaction that never began (the write
-# lock was never acquired), so no partial mutation exists to duplicate; retrying
-# the whole call from scratch is safe. store.py already retries lock acquisition
-# internally before raising it, so this is a second, coarser bounded layer.
+# A ContentionError means one transaction never began (its write lock was never
+# acquired), so that transaction left nothing to duplicate. It says nothing about
+# the call's earlier transactions: a command such as a claim commits its effect
+# and then writes again, and contention on the later write must not re-run the
+# effect. So the whole call is retried only while nothing it wrote has
+# committed, which the audit trail answers (`request_has_committed`). In practice
+# `run_idempotent` already turns contention after a committed effect into the
+# committed outcome, so a ContentionError reaching this layer is normally one
+# with nothing committed; the check here keeps the rule true on its own.
+# store.py already retries lock acquisition internally before raising, so this is
+# a second, coarser bounded layer.
 _CONTENTION_RETRY_ATTEMPTS = 3
 _CONTENTION_RETRY_BASE_SECONDS = 0.1
 
 
-def _run_with_contention_retry(operation: Callable[[], Result]) -> Result:
+def _run_with_contention_retry(
+    operation: Callable[[], Result], committed: Callable[[], bool] = lambda: False
+) -> Result:
     delay = _CONTENTION_RETRY_BASE_SECONDS
     for attempt in range(_CONTENTION_RETRY_ATTEMPTS):
         try:
             return operation()
         except ContentionError:
-            if attempt == _CONTENTION_RETRY_ATTEMPTS - 1:
+            if attempt == _CONTENTION_RETRY_ATTEMPTS - 1 or committed():
                 raise
             time.sleep(delay)
             delay *= 2
@@ -87,8 +96,10 @@ def make_invoke(service: ControlPlaneService, actor: Actor) -> Callable[..., Any
             )
 
         try:
-            with correlation_scope():
-                result = _run_with_contention_retry(run)
+            with correlation_scope() as correlation_id:
+                result = _run_with_contention_retry(
+                    run, lambda: service.request_has_committed(actor, correlation_id)
+                )
         except DomainError as error:
             service.record_tool_call(
                 actor,
