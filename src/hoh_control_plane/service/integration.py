@@ -802,6 +802,7 @@ class IntegrationMixin:
         """
         repository_path = repository["repository_path"]
         with self.store.connection() as connection:
+            ticket_scope = list(self._ticket(connection, job["ticket_id"]).get("file_scope") or [])
             rebases = connection.execute(
                 "SELECT COUNT(*) AS n FROM candidates WHERE ticket_id = ? AND derived_from IS NOT NULL",
                 (job["ticket_id"],),
@@ -842,8 +843,13 @@ class IntegrationMixin:
                               "new QA candidate."))
         shared = [path for path in main_paths
                   if "/" not in path or path.lower().startswith(self._SHARED_PATH_PREFIXES)]
-        carry_qa = not shared and not any(
-            self._scope_roots_overlap(left, right) for left in main_paths for right in candidate_paths)
+        # Disjoint means main's paths miss the candidate's paths and the ticket's
+        # write-scope roots: another file under the same root can still change
+        # what the candidate's code does, so it is re-verified by QA. An
+        # unscoped ticket reaches everything.
+        carry_qa = bool(ticket_scope) and not shared and not any(
+            self._scope_roots_overlap(left, right)
+            for left in main_paths for right in [*candidate_paths, *ticket_scope])
         try:
             return self._record_rebased_candidate(
                 merge_job_id, job, actor, candidate, current_main, rebased, rebased_paths,
@@ -924,8 +930,10 @@ class IntegrationMixin:
             self._event(connection, actor, job["project_id"], "candidate.rebased", "ticket",
                         job["ticket_id"], next_version, payload)
             connection.execute("DELETE FROM leases WHERE lease_id = ?", (job["lease_id"],))
+            # merge_status keeps its schema CHECK ('merged' | 'base_drift'): this job
+            # ended because main drifted; candidate.rebased records the rebase.
             connection.execute(
-                """UPDATE merge_jobs SET status = 'COMPLETED', merge_status = 'rebased_for_qa',
+                """UPDATE merge_jobs SET status = 'COMPLETED', merge_status = 'base_drift',
                    mainline_commit = ?, completed_at = ? WHERE merge_job_id = ?""",
                 (current_main, timestamp, merge_job_id))
             self._queue_ticket(connection, actor, job["project_id"], self._ticket(connection, job["ticket_id"]))
