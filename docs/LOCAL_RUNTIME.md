@@ -81,9 +81,19 @@ desktop icon; the validation record describes it.
 
 ## Development environment traps
 
-- `D:/HoH/.venv-hoh` is the working interpreter. Its editable install points at
-  an old worktree (`tmp/planner-merge-handoff`), so tests must run with
-  `PYTHONPATH` naming the checkout under test. `scripts/test.ps1` does this, and
-  `tests/conftest.py` refuses to run against any other source tree.
+- `D:/HoH/.venv-hoh` is the working interpreter, shared by every session. Its
+  editable install may point at an old worktree (it pointed at
+  `tmp/planner-merge-handoff`, running 0.3.11 code, until reinstalled), so tests
+  must run with `PYTHONPATH` naming the checkout under test. `scripts/test.ps1`
+  does this, and `tests/conftest.py` refuses to run against any other source tree.
+  The venv's `hoh-*` console scripts still run whatever the install points at.
+  Check with `D:/HoH/.venv-hoh/Scripts/python.exe -c "import hoh_control_plane; print(hoh_control_plane.__file__)"`.
+- `scripts/bootstrap-local.ps1` refuses to run from any checkout other than
+  `D:/HoH` on branch `main`. To repoint the venv: make sure no HoH process or
+  test run is using `.venv-hoh` (the installed service uses its own
+  `D:/HoH-service/.venv`), then from `D:/HoH` on `main` run
+  `.\scripts\bootstrap-local.ps1`. It reruns `pip install -e "D:\HoH[dev]"`; the
+  check above should then print a path under `D:\HoH\src`. Never run it from a
+  ticket worktree.
 - `D:/HoH/.venv` and a bare `python` resolve to an msys interpreter without
   pytest; the system Python lacks `pytest-cov`. Neither can run the suite.

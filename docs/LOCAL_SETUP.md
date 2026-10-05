@@ -21,7 +21,10 @@ cd D:\HoH
 ```
 
 This creates `.venv-hoh` and installs the local package. It does not add credentials
-or modify any agent configuration.
+or modify any agent configuration. It runs only from `D:\HoH` on branch `main`,
+because the venv is shared and an editable install from a worktree would point
+every session's `hoh-*` scripts at that worktree; see
+[LOCAL_RUNTIME.md](LOCAL_RUNTIME.md#development-environment-traps).
 
 ## 2. Start the read-only dashboard
 
