@@ -29,6 +29,7 @@ introduced it. The "Guards" column says what change should trigger that read.
 | [0.3.30](RELEASE_0.3.30.md) | Large modules split (mcp package, planning mixins, store schema/migrations), ExecutionGate | Module layout |
 | [0.3.31](RELEASE_0.3.31.md) | Role agents as subagents (worker brief, QA independence, rework budget, model per role, provenance, short SHAs); guarded transitions, schema version, shared contracts | Claim results, ticket transitions, MCP schemas |
 | [0.3.32](RELEASE_0.3.32.md) | Scoped barrier, merge shadow mode and lane, idempotency from audit, replayable transitions, Git sweep, latency and usage metrics | Reconciliation scope, idempotency, merge admission |
+| [0.3.33](RELEASE_0.3.33.md) | Hotfix: the pytest probe no longer shadows the MCP SDK for candidates | QA runner import path |
 
 Releases before 0.3.14 are described in
 [RUNTIME_OPERATIONS](../RUNTIME_OPERATIONS.md),
