@@ -57,3 +57,11 @@ def test_installer_rejects_tampered_asset_before_mutating_home(tmp_path):
     with pytest.raises(ValueError, match="checksum"):
         installer.install(output, home, "codex")
     assert not home.exists()
+
+
+def test_start_here_tells_an_execution_session_to_dispatch(tmp_path):
+    build_kit(tmp_path / "kit", "qa", "http://127.0.0.1:8931/mcp")
+    start = (tmp_path / "kit" / "START_HERE.md").read_text(encoding="utf-8")
+
+    assert "worker_brief" in start
+    assert "new session per ticket" in start

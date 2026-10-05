@@ -164,6 +164,12 @@ def make_prompts(root, project, instance='primary'):
             'the actual mainline SHA after completion and stop for Planner reconciliation.'
         ),
     }
+    dispatch = (
+        " This chat is a thin dispatcher: after each claim, pass the claim's "
+        '`worker_brief` verbatim to a fresh subagent (Claude Code Agent/Task tool, '
+        'Codex `spawn_agent`) and keep only its structured result, never its '
+        'transcript. Without subagents, start a new session per ticket.'
+    )
     prompts = {}
     for role in ROLES:
         actor = installed_profile_actor(root, checked_project(Path(root), project), project, role, instance)
@@ -193,7 +199,7 @@ Role: {role}; project: {project}; instance: {instance}.
    assignment. QA uses the stable host name as `machine_id` and declares only
    equipment it has actually verified. Keep this same instance after restart;
    bootstrap and use `resume_wait_id` instead of creating a duplicate instance.
-5. {focus[role]}
+5. {focus[role]}{dispatch if role != 'planner' else ''}
 6. Use current server packet and exposed tools only. Never use direct SQL, another
    worker's worktree, hidden evaluator material or credentials in chat. Before
    idle wait, report one unhandled durable failure only if no role tool already

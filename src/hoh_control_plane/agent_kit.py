@@ -64,6 +64,10 @@ host; the client needs no HoH Python package or database access for HTTP MCP.
 3. Start any capable agent session with: "Use $hoh-control-plane and $hoh-{role}.
    Call session.bootstrap and continue my authorized project work. Resume any
    current lease/job before discovering or claiming another ticket."
+   For Developer, QA and Integrator the session is a dispatcher: after each
+   claim, pass the claim's `worker_brief` verbatim to a fresh subagent (Claude
+   Code Agent/Task tool, Codex `spawn_agent`) and keep only its structured
+   result. Without subagents, start a new session per ticket.
 
 The authenticated role must match `{role}`. Each concurrently running worker
 needs a distinct identity. Reuse an identity to resume only after its previous

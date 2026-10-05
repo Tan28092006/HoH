@@ -412,3 +412,20 @@ def test_the_card_and_every_setup_prompt_point_at_the_wait_tool(desktop):
     for role, prompt in make_prompts(root, "shop", instance="codex-1").items():
         assert "as its tool" in prompt and "description says" in prompt, role
         assert "resume_wait_id" in prompt, role
+
+
+def test_execution_prompts_make_the_chat_a_dispatcher(desktop):
+    """Each ticket goes to a fresh worker, so no transcript reaches the next ticket."""
+    from hoh_control_plane.local_agent import make_prompts
+
+    client, root = desktop
+    client.post(
+        "/local/projects", json={"project_id": "shop", "name": "Shop"},
+        headers=headers(client),
+    )
+    prompts = make_prompts(root, "shop", instance="codex-1")
+
+    for role in ("developer", "qa", "integrator"):
+        assert "worker_brief" in prompts[role], role
+        assert "spawn_agent" in prompts[role] and "new session per ticket" in prompts[role]
+    assert "worker_brief" not in prompts["planner"]

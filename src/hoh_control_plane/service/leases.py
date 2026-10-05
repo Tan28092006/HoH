@@ -348,7 +348,92 @@ class LeaseMixin:
         result["current_context_snapshot_id"] = self.get_ticket_context(
             actor, ticket_id
         )["context_snapshot_id"]
+        result["worker_brief"] = self._worker_brief(
+            actor, result["ticket"], result["lease"], result["current_context_snapshot_id"]
+        )
         return result
+
+    def _worker_brief(
+        self,
+        actor: Actor,
+        ticket: dict[str, Any],
+        lease: dict[str, Any],
+        snapshot_id: str,
+    ) -> dict[str, Any]:
+        """A self-contained hand-off for a fresh subagent that works this one ticket.
+
+        The waiting chat is a dispatcher: it passes this verbatim to a new agent
+        and keeps only the structured result, so no ticket's transcript reaches
+        the next ticket. Everything the worker needs to start is named here, and
+        everything else it resolves from the packet itself.
+        """
+        ticket_id, lease_id = ticket["ticket_id"], lease["lease_id"]
+        version = ticket["version"]
+        with self.store.connection() as connection:
+            worktree = _row(connection.execute(
+                "SELECT worktree_path, branch_ref FROM worktrees WHERE ticket_id = ?",
+                (ticket_id,),
+            ).fetchone())
+            candidate = _row(connection.execute(
+                "SELECT candidate_id FROM candidates WHERE ticket_id = ? "
+                "ORDER BY submitted_at DESC LIMIT 1",
+                (ticket_id,),
+            ).fetchone())
+            repository = _row(connection.execute(
+                "SELECT workspace_model FROM project_repositories WHERE project_id = ?",
+                (self._project_for_ticket(connection, ticket_id),),
+            ).fetchone())
+        ids = f'ticket_id="{ticket_id}", lease_id="{lease_id}"'
+        # The claimed status names the work, whoever holds the lease (an Admin may).
+        role = {
+            TicketStatus.DEV_IN_PROGRESS.value: Role.DEVELOPER,
+            TicketStatus.QA_IN_PROGRESS.value: Role.QA,
+        }.get(ticket["status"], Role.INTEGRATOR)
+        calls: list[str] = []
+        if role is Role.DEVELOPER:
+            if (repository or {}).get("workspace_model", "colocated") == "colocated":
+                calls += [
+                    f"dev.prepare_worktree({ids}, expected_version={version})",
+                    f"dev.get_worktree_provision({ids}, provision_id=<provision_id>) until terminal",
+                ]
+            calls += [
+                f'ticket.get_context(ticket_ref="{ticket_id}") immediately before submit',
+                f"dev.submit_candidate({ids}, expected_version=<packet version>, "
+                "commit_sha=<sha>, base_commit=<base>, branch_ref=<branch>, "
+                "developer_claims=[...], context_snapshot_id=<fresh packet>)",
+                f"dev.get_candidate_submission({ids}, submission_id=<submission_id>) until terminal",
+            ]
+            returns = ["submission_id", "commit_sha", "status", "blockers"]
+        elif role is Role.QA:
+            candidate_id = candidate["candidate_id"] if candidate else "<candidate_id>"
+            calls += [
+                f"qa.run_project_tests({ids})",
+                f"qa.get_project_test_run({ids}, test_run_id=<test_run_id>) until terminal",
+                f'qa.submit_verdict({ids}, candidate_id="{candidate_id}", '
+                f'expected_version={version}, verdict=<passed|failed>, findings=[...], '
+                f'context_snapshot_id="{snapshot_id}")',
+            ]
+            returns = ["verdict", "evidence_bundle.candidate_id", "planner_job_id", "blockers"]
+        else:
+            calls += [
+                f"integrator.merge_candidate({ids}, expected_version={version}, "
+                f'context_snapshot_id="{snapshot_id}")',
+                f"integrator.get_merge_candidate({ids}, merge_job_id=<merge_job_id>) until terminal",
+            ]
+            returns = ["merge_job_id", "status", "mainline_sha", "blockers"]
+        brief: dict[str, Any] = {
+            "ticket_id": ticket_id,
+            "role": role.value,
+            "lease_id": lease_id,
+            "context_snapshot_id": snapshot_id,
+            "skills": ["hoh-control-plane", f"hoh-{role.value}"],
+            "next_calls": calls,
+            "returns": returns,
+        }
+        if worktree is not None:
+            brief["worktree_path"] = worktree["worktree_path"]
+            brief["branch_ref"] = worktree["branch_ref"]
+        return brief
 
     def _authorized_ticket(
         self, connection: Connection, actor: Actor, ticket_id: str
