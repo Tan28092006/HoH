@@ -389,7 +389,7 @@ def test_compacted_history_preserves_actionable_identity_and_reference(
     for entry in bounded["context_entries"]:
         source = original[entry["entry_id"]]
         assert entry["entry_type"] == source["entry_type"]
-        assert entry["actor_role"] == source["actor_role"]
+        assert entry["source"] == source["source"]
         assert entry["source_ref"] == source["source_ref"]
         assert entry["artifact_commit"] == source["artifact_commit"]
         assert source["content"].startswith(entry["content"].removesuffix("..."))

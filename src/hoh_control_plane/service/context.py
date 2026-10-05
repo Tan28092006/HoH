@@ -65,8 +65,47 @@ _TICKET_SUMMARY_FIELDS = (
     "version", "dependency_ids",
 )
 _VERSION_TOKEN = re.compile(r"v[0-9]+")
+
+# Who wrote each section, so a reader can tell direction from evidence. Planner
+# text sets the work; developer, qa and integrator text is advisory, a claim or
+# an observation to check rather than an instruction; system is server state.
+# Context entries and lessons carry their own `source`, taken from the role
+# that wrote them. The packet lists only the sections it actually carries.
+_SECTION_SOURCES: dict[str, str] = {
+    "repository_state": "system",
+    "planning_barrier": "system",
+    "retirement": "planner",
+    "verification_profile": "planner",
+    "feature": "planner",
+    "ticket": "planner",
+    "tickets": "planner",
+    "dependencies": "planner",
+    "candidate": "developer",
+    "worktree": "system",
+    "test_runs": "qa",
+    "known_failures": "qa",
+    "evidence_bundle": "qa",
+    "inherited_constraints": "system",
+    "verified_behaviors": "system",
+}
+_AUTHOR_ROLES = frozenset({"planner", "developer", "qa", "integrator"})
+
+
+def _source(role: Any) -> str:
+    """The author label for a stored actor role; anything else is the server."""
+    return str(role) if role in _AUTHOR_ROLES else "system"
+
+
+def _section_sources(payload: dict[str, Any]) -> dict[str, list[str]]:
+    """Group the carried, non-empty sections by author, in a fixed order."""
+    grouped: dict[str, list[str]] = {}
+    for section, source in _SECTION_SOURCES.items():
+        if payload.get(section):
+            grouped.setdefault(source, []).append(section)
+    return grouped
 _PACKET_ENVELOPE_KEYS = frozenset(
-    {"context_snapshot_id", "estimated_tokens", "token_budget", "generated_at", "omitted_sections"}
+    {"context_snapshot_id", "estimated_tokens", "token_budget", "generated_at", "omitted_sections",
+     "sources"}
 )
 
 # Section 7.2 gives a Developer known failures and their reproduction evidence,
@@ -971,6 +1010,10 @@ class ContextMixin:
             if isinstance(entry, dict):
                 entry.pop("feature_id", None)
                 entry.pop("ticket_id", None)
+                entry["source"] = _source(entry.pop("actor_role", None))
+        for note in payload.get("experience") or []:
+            if isinstance(note, dict) and "recorded_by" in note:
+                note["source"] = _source(note.pop("recorded_by"))
 
         if actor.role is not Role.PLANNER and isinstance(payload.get("feature"), dict):
             payload["feature"] = {
@@ -1017,6 +1060,7 @@ class ContextMixin:
         # packet has already been fitted to its budget.
         payload["estimated_tokens"] = token_budget
         payload["context_snapshot_id"] = _SNAPSHOT_PLACEHOLDER
+        payload["sources"] = _section_sources(payload)
 
         # These compactors remove duplicated narration and attach typed refs;
         # they are semantic projections, not merely overflow recovery.
@@ -1045,6 +1089,8 @@ class ContextMixin:
             payload[section] = [] if isinstance(value, list) else None
 
         omitted.sort(key=lambda entry: (entry["section"], entry["reason"]))
+        # A section dropped for the budget loses its label too; this only shrinks.
+        payload["sources"] = _section_sources(payload)
         payload["estimated_tokens"] = _estimate_tokens(payload)
         return payload
 
