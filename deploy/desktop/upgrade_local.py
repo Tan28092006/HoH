@@ -75,6 +75,12 @@ def main():
                    env=environment, check=True)
     shutil.copy2(bundle / 'hoh_desktop.py', root / 'hoh_desktop.py')
     shutil.copy2(bundle / 'start-host.ps1', root / 'start-host.ps1')
+    # The new host refuses a database older than its schema, so the upgrade is
+    # applied here, explicitly, by the new build: hoh-ops migrate writes its own
+    # sqlite3.backup() copy into this upgrade's backup folder before changing it.
+    subprocess.run([str(python), '-I', '-m', 'hoh_control_plane.operations', 'migrate',
+                    '--database', str(database), '--backup-dir', str(backup)],
+                   env=environment, check=True)
     subprocess.run([str(python), '-I', str(root / 'hoh_desktop.py'), '--no-browser'], env=environment, check=True)
     with urlopen(base + '/__local_installation', timeout=5) as response:
         state = json.load(response)

@@ -43,7 +43,7 @@ def test_a_url_chooses_the_server_backend(monkeypatch) -> None:
 
     # Constructed without connecting: initialize would need a live server, and
     # what this asserts is the choice, not the connection.
-    monkeypatch.setattr(PostgresStore, "initialize", lambda self: None)
+    monkeypatch.setattr(PostgresStore, "initialize", lambda self, **_: None)
     store = store_from_environment("data/ignored.db")
 
     assert isinstance(store, PostgresStore)
@@ -57,7 +57,7 @@ def test_a_url_wins_over_a_path(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv(DATABASE_PATH_VARIABLE, str(tmp_path / "local.db"))
     from hoh_control_plane.postgres_store import PostgresStore
 
-    monkeypatch.setattr(PostgresStore, "initialize", lambda self: None)
+    monkeypatch.setattr(PostgresStore, "initialize", lambda self, **_: None)
 
     assert isinstance(store_from_environment(), PostgresStore)
     assert not (tmp_path / "local.db").exists()

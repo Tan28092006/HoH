@@ -24,6 +24,7 @@ from hoh_control_plane.store import (
     apply_additive_columns,
     read_schema_version,
     record_schema_version,
+    require_current_schema_version,
     require_supported_schema_version,
 )
 
@@ -112,17 +113,19 @@ class PostgresStore:
 
         return psycopg.connect(self.dsn, autocommit=False, row_factory=_row_factory)
 
-    def initialize(self) -> None:
+    def initialize(self, *, allow_migration: bool = True) -> None:
         connection = self._connect()
         try:
             connection.execute(f"SET LOCAL lock_timeout = '{int(self.lock_timeout_seconds * 1000)}ms'")
             connection.execute("SELECT pg_advisory_xact_lock(684643, hashtext(current_schema()))")
             seam = StoreConnection(connection, self.dialect)
-            # Refuse a database a newer release upgraded before changing it.
-            require_supported_schema_version(
-                read_schema_version(seam, self._existing_columns(connection)),
-                "(PostgreSQL, current schema)",
-            )
+            columns_of = self._existing_columns(connection)
+            found = read_schema_version(seam, columns_of)
+            # Refuse a database a newer release upgraded before changing it, and
+            # one an older release wrote when this caller may not migrate it.
+            require_supported_schema_version(found, "(PostgreSQL, current schema)")
+            if not allow_migration and columns_of("tickets"):
+                require_current_schema_version(found, "(PostgreSQL, current schema)")
             connection.execute(translate_schema())
             # The schema script creates anything missing whole, but it cannot
             # add a column to a table that already exists, so a database from an

@@ -36,7 +36,7 @@ from hoh_control_plane.contracts import (  # noqa: F401  (FindingInput etc. re-e
 )
 from hoh_control_plane.seed import seed_demo as seed_demo_data
 from hoh_control_plane.service import ControlPlaneService
-from hoh_control_plane.store_factory import store_from_environment
+from hoh_control_plane.store_factory import database_path_from_environment, store_from_environment
 
 
 class StrictModel(BaseModel):
@@ -136,7 +136,9 @@ def create_app(
     event_stream_retry_seconds: float = _EVENT_STREAM_RETRY_SECONDS,
     event_stream_max_idle_polls: int | None = None,
 ) -> FastAPI:
-    db_path = Path(database_path or os.getenv("HOH_DATABASE_PATH", "data/control-plane.db"))
+    # No relative default: without HOH_DATABASE_PATH (or a URL) this refuses to
+    # start rather than create a stray database under the working directory.
+    db_path = database_path_from_environment(database_path)
     is_local = (
         local_mode
         if local_mode is not None

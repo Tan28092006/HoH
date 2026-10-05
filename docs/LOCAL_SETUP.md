@@ -2,7 +2,14 @@
 
 This setup runs one shared control-plane database on a trusted local machine. Each
 Planner, Developer or QA client connects to the shared HTTP MCP endpoint, and all use the
-same SQLite database at `D:\HoH\data\control-plane.db`.
+same SQLite database. On this machine that database is `D:\HoH\data\control-plane.db`,
+served by the installed host in `D:\HoH-service` ([LOCAL_RUNTIME.md](LOCAL_RUNTIME.md)).
+
+The scripts in steps 1 and 2 start a separate **development instance**. It uses
+`D:\HoH\tmp\dev\control-plane.db` (override with `-DatabasePath` or
+`HOH_DEV_DATABASE_PATH`) and port 8775, and refuses any path under `D:\HoH\data`
+or `D:\HoH-service` and the installed host's ports 8765 and 8931. It never
+touches the real database.
 
 ## 1. Bootstrap once
 
@@ -23,8 +30,8 @@ cd D:\HoH
 .\scripts\start-dashboard.ps1
 ```
 
-Open <http://127.0.0.1:8765>. The dashboard remains local (`127.0.0.1`), seeds
-the `demo` project when empty, and shows Jira-like ticket progress plus redacted
+Open <http://127.0.0.1:8775>. The dashboard remains local (`127.0.0.1`), seeds
+the `demo` project into the dev database when empty, and shows Jira-like ticket progress plus redacted
 Agent activity. Keep this terminal running while you want the dashboard.
 
 Use `-NoSeedDemo` only when a Planner will create the first project itself.

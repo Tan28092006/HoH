@@ -9,10 +9,10 @@ from hoh_control_plane.agent_wakeup import SECRET_VARIABLE, deliver_pending_offe
 from hoh_control_plane.domain import Actor, Role
 from hoh_control_plane.planner_wakeup import deliver_pending
 from hoh_control_plane.service import ControlPlaneService
-from hoh_control_plane.store_factory import store_from_environment
+from hoh_control_plane.store_factory import database_path_from_environment, store_from_environment
 
 
-def sweep_once(database_path: str | Path) -> dict[str, object]:
+def sweep_once(database_path: str | Path | None) -> dict[str, object]:
     """Run one trusted-local maintenance pass and return its public summary."""
     store = store_from_environment(database_path)
     service = ControlPlaneService(store)
@@ -53,7 +53,8 @@ def main() -> None:
     arguments = parser.parse_args()
     if not 5 <= arguments.interval_seconds <= 3600:
         raise SystemExit("--interval-seconds must be between 5 and 3600")
-    database_path = Path(os.getenv("HOH_DATABASE_PATH", "data/control-plane.db"))
+    # No relative default: refuse to start without HOH_DATABASE_PATH (or a URL).
+    database_path = database_path_from_environment()
 
     while True:
         result = sweep_once(database_path)

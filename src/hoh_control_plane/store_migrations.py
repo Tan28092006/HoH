@@ -81,6 +81,32 @@ def require_supported_schema_version(found: int, location: str) -> None:
         )
 
 
+class SchemaUpgradeRequired(SchemaVersionError):
+    """The database is older than this build and the caller may not upgrade it.
+
+    A serving process (MCP endpoint, REST API, scheduler, supervisor, desktop
+    host) never migrates the database it was pointed at: an upgrade it applied
+    silently would leave the installed, older service unable to start, with no
+    backup taken. Upgrading is the operator's explicit step, ``hoh-ops migrate``,
+    which writes a backup first.
+    """
+
+    code = "schema_upgrade_required"
+
+
+def require_current_schema_version(found: int, location: str) -> None:
+    """Refuse a database older than this build, for a caller that may not migrate."""
+    if found < SCHEMA_VERSION:
+        raise SchemaUpgradeRequired(
+            f"Database {location} has schema version {found}, older than the version "
+            f"{SCHEMA_VERSION} this HoH build requires. Serving processes do not upgrade "
+            "a database. Stop every HoH process using it, then run `hoh-ops migrate` "
+            "(it writes a backup first), or point this build at a different database. "
+            "Nothing was changed.",
+            {"database_schema_version": found, "supported_schema_version": SCHEMA_VERSION},
+        )
+
+
 def record_schema_version(connection: Any) -> None:
     connection.execute(
         "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?) "

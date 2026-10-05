@@ -21,12 +21,41 @@ ARTIFACT_ROOT_VARIABLE = "HOH_ARTIFACT_ROOT"
 _POSTGRES_SCHEMES = ("postgresql://", "postgres://")
 
 
-def store_from_environment(database_path: str | Path | None = None) -> Any:
+def database_path_from_environment(database_path: str | Path | None = None) -> Path | None:
+    """The SQLite file this process should open, or None when a URL is configured.
+
+    There is deliberately no default. A relative ``data/control-plane.db`` used
+    to be the fallback, so a process started without the host's environment
+    quietly created a stray, empty database under whatever directory it was
+    launched from, which looks like an empty board rather than an error.
+    """
+    if database_path:
+        return Path(database_path)
+    configured = (os.getenv(DATABASE_PATH_VARIABLE) or "").strip()
+    if configured:
+        return Path(configured)
+    if (os.getenv(DATABASE_URL_VARIABLE) or "").strip():
+        return None
+    raise SystemExit(
+        f"{DATABASE_PATH_VARIABLE} is not set. Set it to the database this process "
+        f"should use (or set {DATABASE_URL_VARIABLE} for PostgreSQL); HoH no longer "
+        "falls back to a relative data/control-plane.db."
+    )
+
+
+def store_from_environment(
+    database_path: str | Path | None = None, *, allow_migration: bool = False
+) -> Any:
     """The store this process should use, initialized and ready.
 
     HOH_DATABASE_URL wins when set: a deployment that has moved to PostgreSQL
     must not silently fall back to a local file when a path is also configured,
     because that failure looks like an empty board rather than an error.
+
+    Every serving process opens its store through here, so by default a
+    database older than this build is refused rather than upgraded (see
+    ``SQLiteStore.initialize``). ``hoh-ops migrate`` is the one caller that
+    passes ``allow_migration=True``, after taking a backup.
     """
     url = (os.getenv(DATABASE_URL_VARIABLE) or "").strip()
     if url:
@@ -45,7 +74,8 @@ def store_from_environment(database_path: str | Path | None = None) -> Any:
     else:
         from hoh_control_plane.store import SQLiteStore
 
-        path = database_path or os.getenv(DATABASE_PATH_VARIABLE, "data/control-plane.db")
-        store = SQLiteStore(Path(path))
-    store.initialize()
+        path = database_path_from_environment(database_path)
+        assert path is not None  # no URL is set, so a path was found or this exited
+        store = SQLiteStore(path)
+    store.initialize(allow_migration=allow_migration)
     return store

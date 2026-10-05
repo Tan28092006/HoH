@@ -27,9 +27,16 @@ neither are the `accidental-diagnostic-*` and `*-before-*` files in
 - **Never reset, recreate or migrate the authoritative database** as part of an
   upgrade or a test. Use the service's supported lifecycle for state changes.
   Upgrades back up configuration under `D:/HoH-service/config/upgrade-*`.
+  Serving processes (`hoh-mcp`, `hoh-api`, scheduler, supervisor, desktop host)
+  refuse a database older than their schema instead of upgrading it; the only
+  upgrade path is `hoh-ops migrate`, which `upgrade_local.py` runs after taking
+  its backup.
 - **Never run a component without the host environment.** With no
-  `HOH_DATABASE_PATH` a component creates a stray database relative to its
-  working directory, and agents then read an empty board.
+  `HOH_DATABASE_PATH` (or `HOH_DATABASE_URL`) a component now refuses to start;
+  older builds created a stray database relative to the working directory.
+- **Never point a dev script at the real database.** `scripts/start-*.ps1` use
+  `D:/HoH/tmp/dev/control-plane.db` and port 8775 by default, and refuse paths
+  under `D:/HoH/data` or `D:/HoH-service` and the installed ports 8765 and 8931.
 - **Never put installation or client credentials** in source, logs, release
   archives or this repository.
 - **Never delete candidate worktrees, evidence or historical records**, including
@@ -66,7 +73,10 @@ acting; earlier chat context is historical.
 Changing source does not update the installed service. Build and upgrade from an
 isolated branch or worktree based on the deployed commit, with
 `deploy/desktop/package_local.py` and `deploy/desktop/upgrade_local.py`. The
-0.3.23 upgrade restart once failed with no captured cause and succeeded from the
+upgrade backs up the database, installs the wheel, then runs
+`python -m hoh_control_plane.operations migrate --database <db> --backup-dir <upgrade folder>`
+(`hoh-ops migrate`), which writes a second `sqlite3.backup()` copy before raising
+the schema version. The 0.3.23 upgrade restart once failed with no captured cause and succeeded from the
 desktop icon; the validation record describes it.
 
 ## Development environment traps

@@ -48,7 +48,7 @@ dispatch queued work to live agents:
 .\scripts\start-scheduler.ps1
 ```
 
-Open <http://127.0.0.1:8765>. The local runner enables local identity headers and seeds a demo project. To attach the role-scoped MCP to separate Codex or Claude agents, follow [docs/LOCAL_SETUP.md](./docs/LOCAL_SETUP.md).
+Open <http://127.0.0.1:8775>. These scripts start a development instance on its own database, `D:\HoH\tmp\dev\control-plane.db`, and refuse the real one under `D:\HoH\data` and the installed host's ports; they enable local identity headers and seed a demo project into the dev database. To attach the role-scoped MCP to separate Codex or Claude agents, follow [docs/LOCAL_SETUP.md](./docs/LOCAL_SETUP.md).
 
 For how a long-lived Codex or Claude Code role worker waits for hand-offs,
 see [docs/ROLE_WAKEUPS.md](./docs/ROLE_WAKEUPS.md).
@@ -70,7 +70,7 @@ Start with the [documentation map](docs/README.md) and the
 Each agent gets its own stdio MCP process and role identity. Example environment for a Developer:
 
 ```text
-HOH_DATABASE_PATH=D:\HoH\data\control-plane.db
+HOH_DATABASE_PATH=D:\HoH\tmp\dev\control-plane.db
 HOH_AGENT_ID=dev-agent-03
 HOH_AGENT_ROLE=developer
 HOH_PROJECT_IDS=demo
@@ -99,7 +99,7 @@ See [deployment](docs/DEPLOYMENT.md).
 
 ## REST API
 
-Interactive API documentation is available at <http://127.0.0.1:8765/docs>.
+Interactive API documentation is available at <http://127.0.0.1:8775/docs> on the development instance.
 
 Local mode accepts `X-HOH-Agent-Id` and `X-HOH-Role` headers. Never expose local mode on a network interface.
 
