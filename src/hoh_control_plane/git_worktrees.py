@@ -782,6 +782,68 @@ class GitWorktreeManager:
             return False
         return self._is_ancestor(repository, resolved, f"refs/heads/{default_branch}")
 
+    def equivalent_landing(
+        self,
+        *,
+        repository_path: str,
+        default_branch: str,
+        base_commit: str,
+        candidate_commit: str,
+        limit: int = 200,
+    ) -> str | None:
+        """The default-branch commit whose own diff equals the candidate's, or None.
+
+        Work applied as a diff or cherry-picked lands under a different commit, so
+        ancestry misses it. ``git diff base candidate`` is compared, by stable
+        patch-id, with each recent non-merge commit's diff against its parent.
+        Any Git failure answers None: not proven is not landed.
+        """
+        try:
+            repository = Path(self.validate_repository(repository_path))
+            base = self._resolve_commit(repository, base_commit)
+            candidate = self._resolve_commit(repository, candidate_commit)
+            wanted = self._patch_ids(
+                repository,
+                self._git(repository, "diff", "--no-color", "--no-ext-diff", base, candidate).stdout,
+            )
+            if not wanted:
+                return None
+            target = wanted[0][0]
+            history = self._git(
+                repository, "log", "-p", "--no-color", "--no-ext-diff", "--no-merges",
+                f"-n{int(limit)}", "--format=commit %H",
+                f"{base}..refs/heads/{default_branch}",
+                check=False,
+            )
+            if history.returncode != 0:
+                return None
+            for patch_id, commit in self._patch_ids(repository, history.stdout):
+                if patch_id == target and commit != candidate:
+                    return commit
+        except (ValidationError, OSError, subprocess.SubprocessError):
+            return None
+        return None
+
+    @staticmethod
+    def _patch_ids(repository: Path, patch_text: str) -> list[tuple[str, str]]:
+        if not patch_text.strip():
+            return []
+        result = subprocess.run(
+            ["git", "-C", str(repository), "patch-id", "--stable"],
+            input=patch_text.encode("utf-8", errors="replace"),
+            capture_output=True,
+            timeout=_GIT_COMMAND_TIMEOUT_SECONDS * 2,
+            check=False,
+        )
+        if result.returncode != 0:
+            return []
+        pairs = []
+        for line in result.stdout.decode("utf-8", errors="replace").splitlines():
+            parts = line.split()
+            if len(parts) == 2:
+                pairs.append((parts[0], parts[1]))
+        return pairs
+
     def _worktree_path(self, project_id: str, ticket_id: str, agent_id: str) -> Path:
         segments = [self._safe_segment(value, field) for value, field in (
             (project_id, "project_id"),

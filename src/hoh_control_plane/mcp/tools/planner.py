@@ -175,6 +175,46 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
                 idempotency_key,
             )
 
+        @server.tool(name="planner.configure_run_guardrails", structured_output=True)
+        def planner_configure_run_guardrails(
+            project_id: str, max_merges_per_hour: int = 12, max_consecutive_failures: int = 3
+        ) -> dict[str, Any]:
+            """Set the project's merge budgets; exceeding one pauses its merge queue."""
+            arguments = {
+                "project_id": project_id,
+                "max_merges_per_hour": max_merges_per_hour,
+                "max_consecutive_failures": max_consecutive_failures,
+            }
+            return invoke(
+                "planner.configure_run_guardrails", arguments,
+                lambda: service.configure_run_guardrails(actor, **arguments),
+            )
+
+        @server.tool(name="planner.get_run_guardrails", structured_output=True)
+        def planner_get_run_guardrails(project_id: str) -> dict[str, Any]:
+            """Read merge budgets, the merge-queue pause and the latest check of main."""
+            arguments = {"project_id": project_id}
+            return invoke(
+                "planner.get_run_guardrails", arguments,
+                lambda: service.get_run_guardrails(actor, **arguments),
+            )
+
+        @server.tool(name="planner.resume_merge_queue", structured_output=True)
+        def planner_resume_merge_queue(
+            project_id: str, reason: str, idempotency_key: str | None = None
+        ) -> dict[str, Any]:
+            """Lift a merge-queue pause (red main or failure budget) after deciding on it.
+
+            Resets the consecutive-failure count. A red main's revert ticket stays
+            open; resume once it is readied or main is green again.
+            """
+            arguments = {"project_id": project_id, "reason": reason}
+            return invoke(
+                "planner.resume_merge_queue", arguments,
+                lambda: service.resume_merge_queue(actor, **arguments),
+                idempotency_key,
+            )
+
         @server.tool(name="planner.reconcile_delivery_report", structured_output=True)
         def planner_reconcile_delivery_report(merge_job_id: str) -> dict[str, Any]:
             """Recover exactly one missing Planner report for a completed merge."""

@@ -142,10 +142,23 @@ def test_one_projects_failure_does_not_stop_the_sweep(
     assert swept["candidates_already_on_main"] == [] and swept["stuck_merge_jobs"] == []
 
 
-def test_a_candidate_landed_by_hand_reaches_planner_once_and_is_not_recorded(
+def _landing_events(service) -> list[dict]:
+    import json
+
+    with service.store.connection() as connection:
+        return [
+            {"actor_id": row["actor_id"], **json.loads(row["payload"])}
+            for row in connection.execute(
+                "SELECT actor_id, payload FROM audit_events "
+                "WHERE event_type = 'integration.landed_ungated'"
+            ).fetchall()
+        ]
+
+
+def test_a_candidate_landed_by_hand_is_recorded_ungated_by_the_sweep(
     service, actors, seeded, tmp_path
 ) -> None:
-    repository, ticket, candidate, verified = _candidate_ready_for_integration(
+    repository, ticket, candidate, _verified = _candidate_ready_for_integration(
         service, actors, seeded, tmp_path
     )
     _observed_baseline(service, actors, repository, tmp_path)
@@ -156,37 +169,39 @@ def test_a_candidate_landed_by_hand_reaches_planner_once_and_is_not_recorded(
     swept = service.sweep_repositories(SCHEDULER)
 
     flagged = swept["candidates_already_on_main"]
-    assert [(item["ticket_id"], item["candidate_commit"]) for item in flagged] == [
-        (ticket["ticket_id"], commit)
-    ]
-    current = _ticket(service, ticket["ticket_id"])
-    assert current["status"] == "VERIFIED", "landing stays an explicit, ungated record"
-    assert current["version"] == verified["ticket"]["version"]
-    jobs = service.discover_planner_jobs(actors["planner"], "project-1")
-    assert len(jobs) == 1
-    assert jobs[0]["planner_job_id"] == flagged[0]["planner_job_id"]
-    assert jobs[0]["job_type"] == "integration_conflict"
-    assert jobs[0]["summary"].startswith("candidate_already_on_main:")
-    assert f"candidate:{candidate['candidate']['candidate_id']}" in jobs[0]["evidence_refs"]
-    interventions = service.list_planner_interventions(actors["planner"], "project-1")
-    assert [item["planner_job_id"] for item in interventions] == [jobs[0]["planner_job_id"]]
-
-    # Idempotent per ticket and candidate.
+    assert [(item["ticket_id"], item["landed_commit"], item["match"], item["recorded"])
+            for item in flagged] == [(ticket["ticket_id"], commit, "ancestry", True)]
+    assert _ticket(service, ticket["ticket_id"])["status"] == "DONE"
+    [event] = _landing_events(service)
+    assert event["actor_id"] == "system:sweep"
+    assert event["gated"] is False and event["qa_verified"] is False
+    # Idempotent: a DONE ticket is not swept again.
     _age_observation(service)
     assert service.sweep_repositories(SCHEDULER)["candidates_already_on_main"] == []
-    with service.store.connection() as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM audit_events WHERE event_type = "
-            "'repository.candidate_already_on_main'"
-        ).fetchone()[0] == 1
 
-    # Planner records it, during the reconciliation the sweep's observation opened.
-    assert _pending_reconciliations(service, actors["planner"])
-    landed = service.record_external_landing(
-        actors["planner"], ticket["ticket_id"], current["version"], commit,
-        "Fast-forwarded by the operator after QA passed.",
+
+def test_a_cherry_picked_candidate_is_found_by_patch_id(
+    service, actors, seeded, tmp_path
+) -> None:
+    repository, ticket, candidate, _verified = _candidate_ready_for_integration(
+        service, actors, seeded, tmp_path
     )
-    assert landed["ticket"]["status"] == "DONE" and landed["gated"] is False
+    _observed_baseline(service, actors, repository, tmp_path)
+    commit = candidate["candidate"]["commit_sha"]
+    _external_commit(repository, "unrelated.txt")
+    _git(repository, "cherry-pick", commit)
+    picked = _git(repository, "rev-parse", "HEAD")
+    assert picked != commit
+    _age_observation(service)
+
+    flagged = service.sweep_repositories(SCHEDULER)["candidates_already_on_main"]
+
+    assert [(item["landed_commit"], item["match"], item["recorded"]) for item in flagged] == [
+        (picked, "patch_id", True)
+    ]
+    assert _ticket(service, ticket["ticket_id"])["status"] == "DONE"
+    [event] = _landing_events(service)
+    assert event["landed_commit"] == picked and event["gated"] is False
 
 
 def _stuck_merge(service, actors, seeded, tmp_path, monkeypatch) -> tuple[Path, dict, dict]:

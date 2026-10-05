@@ -44,7 +44,8 @@ class SchemaVersionError(SchemaMigrationError):
 #        the merge shadow partition (repository_reconciliations.scope,
 #        frozen_ticket_ids, shadow_*), agent_presence.session_started_at and
 #        ticket_usage_reports.
-SCHEMA_VERSION = 2
+#   3 -- project_run_guardrails and mainline_checks (wave 7C part 2).
+SCHEMA_VERSION = 3
 
 
 def read_schema_version(connection: Any, columns_of: Any) -> int:

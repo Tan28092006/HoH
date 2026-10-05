@@ -66,6 +66,7 @@ from hoh_control_plane.service._common import (
 from hoh_control_plane.service.project_setup import ProjectSetupMixin
 from hoh_control_plane.service.repository_reconciliation import RepositoryReconciliationMixin
 from hoh_control_plane.service.repository_sweep import RepositorySweepMixin
+from hoh_control_plane.service.run_guardrails import RunGuardrailsMixin
 from hoh_control_plane.service.project_policy import ProjectPolicyMixin
 from hoh_control_plane.service.ticket_authoring import TicketAuthoringMixin
 from hoh_control_plane.service.ticket_retirement import TicketRetirementMixin
@@ -97,6 +98,7 @@ class ControlPlaneService(
     ProjectSetupMixin,
     RepositoryReconciliationMixin,
     RepositorySweepMixin,
+    RunGuardrailsMixin,
     ProjectPolicyMixin,
     TicketAuthoringMixin,
     TicketRetirementMixin,

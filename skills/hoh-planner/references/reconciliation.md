@@ -44,10 +44,18 @@ branch/SHA and still passes QA/integration. If it is on default branch, use
 QA evidence or transfers evidence to a changed SHA.
 
 HoH also observes Git while no Planner is open: a new commit still opens its
-reconciliation. Two Planner jobs come from that sweep. One whose summary starts
-`candidate_already_on_main` means a ticket's candidate is already on the default
-branch and nothing was recorded for you: record the landing as above, or decide
-a revert or rework. One starting `merge_job_stuck` names a merge job that
+reconciliation. A ticket whose candidate is already on the default branch (or
+whose diff landed as a cherry-pick) is recorded for you as an ungated landing by
+`system:sweep`: classify it `complete`. A job whose summary starts
+`candidate_already_on_main` means that record was refused: record the landing
+as above, or decide a revert or rework. One starting `merge_job_stuck` names a merge job that
 outlived the worker timeout and that recovery cannot settle. Close it with
 `planner.close_stuck_merge_job` (recovery runs once more; the ticket is
 untouched), then record the landing or retire the ticket as its Git facts say.
+
+After every landing HoH checks `main` with the project test command. A job
+starting `merge_queue_paused` means no merge starts in the project: a red main
+(a revert ticket names the commit; complete its contract and ready it), too
+many consecutive failures, or the hourly merge budget (clears itself). Decide,
+then `planner.resume_merge_queue`; set limits with
+`planner.configure_run_guardrails`.

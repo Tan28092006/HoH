@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from hoh_control_plane.service.qa import _INFRASTRUCTURE_OUTCOMES
+from hoh_control_plane.service.run_guardrails import MergeQueueGuard
 from hoh_control_plane.service._common import (
     _audit_event_has_field,
     require_snapshot_id,
@@ -32,6 +33,18 @@ from hoh_control_plane.service._common import (
     Connection,
     timedelta,
 )
+
+
+def candidate_commit_of(payload: Any) -> str | None:
+    """The candidate commit an ``integration.gate_passed`` payload names."""
+    import json
+
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except ValueError:
+            return None
+    return payload.get("candidate_commit") if isinstance(payload, dict) else None
 
 
 class IntegrationMixin:
@@ -97,6 +110,8 @@ class IntegrationMixin:
         expected_version: int,
         landed_commit: str,
         reason: str,
+        *,
+        detection: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Record that a ticket's work is already on the default branch.
 
@@ -213,7 +228,8 @@ class IntegrationMixin:
                 # A distinct event type, so no consumer can count this as a gated
                 # merge by reading integration.merged.
                 "integration.landed_ungated", "ticket", ticket_id, next_version,
-                {"landed_commit": landed_commit, "gated": False, "qa_verified": False},
+                {"landed_commit": landed_commit, "gated": False, "qa_verified": False,
+                 **({"detection": detection} if detection else {})},
             )
             self._close_ticket_dispatch(connection, ticket_id, timestamp)
             # An expired lease is no longer an owner. Leaving it behind lets an
@@ -229,7 +245,13 @@ class IntegrationMixin:
                 mainline_commit=landed_commit,
                 gated=False,
             )
+            # Main moved without the gate's suite: check it like any landing.
+            mainline_check_id = self._queue_mainline_check(
+                connection, project_id, mainline_commit=landed_commit,
+                trigger_ref=f"landing:{ticket_id}", trigger_ticket_id=ticket_id,
+            )
             return {
+                "mainline_check_id": mainline_check_id,
                 "ticket": completed_ticket,
                 "merge_status": "landed_ungated",
                 "gated": False,
@@ -529,6 +551,7 @@ class IntegrationMixin:
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             self._require_repository_reconciled(connection, project_id, ticket_id)
+            MergeQueueGuard.require_open(connection, project_id)
             self._expect_version(ticket, expected_version)
             self.require_fresh_context(connection, ticket_id, context_snapshot_id)
             if ticket["status"] != TicketStatus.MERGE_READY.value:
@@ -633,6 +656,10 @@ class IntegrationMixin:
         with self.store.connection() as connection:
             job = self._merge_job(connection, merge_job_id)
         if job['status'] != 'QUEUED':
+            return job
+        # A paused merge queue (red main, failure or hourly budget) holds the job
+        # QUEUED and untouched; it starts once the queue is open again.
+        if not self.merge_queue_admits(merge_job_id):
             return job
         if not run_suite and not self.merge_gate_reuses_qa_run(merge_job_id):
             return job
@@ -1030,6 +1057,11 @@ class IntegrationMixin:
                     candidate_id=job["candidate_id"],
                     artifact_commit=mainline_commit,
                 )
+                if regression_failure:
+                    self._record_run_outcome(
+                        connection, job["project_id"], succeeded=False, ticket=rework_ticket,
+                        evidence_ref=f"merge_job:{merge_job_id}",
+                    )
                 connection.execute(
                     """UPDATE merge_jobs
                        SET status = ?, merge_status = ?, mainline_commit = ?,
@@ -1085,6 +1117,21 @@ class IntegrationMixin:
                    WHERE merge_job_id = ?""",
                 (mainline_commit, timestamp, merge_job_id),
             )
+            self._record_run_outcome(connection, job["project_id"], succeeded=True)
+            # A fast-forward makes main exactly the tree the gate just tested with
+            # the frozen command, so that run is the check of main: recorded as
+            # covered, not run twice in the one test slot. Anything else is queued.
+            gate_covers_main = connection.execute(
+                "SELECT payload FROM audit_events WHERE event_type = 'integration.gate_passed' "
+                "AND aggregate_id = ? ORDER BY sequence DESC LIMIT 1",
+                (merge_job_id,),
+            ).fetchone()
+            self._queue_mainline_check(
+                connection, job["project_id"], mainline_commit=mainline_commit,
+                trigger_ref=f"merge_job:{merge_job_id}", trigger_ticket_id=job["ticket_id"],
+                covered_by_gate=bool(gate_covers_main) and mainline_commit == candidate_commit_of(
+                    gate_covers_main["payload"]),
+            )
             return self._merge_job(connection, merge_job_id)
 
     def fail_queued_merge(self, merge_job_id: str, error_message: str) -> dict[str, Any]:
@@ -1110,6 +1157,12 @@ class IntegrationMixin:
                 connection, actor, job["project_id"], "integration.merge_failed", "ticket",
                 job["ticket_id"], ticket["version"], {"merge_job_id": merge_job_id},
             )
+            # A merge that settles as "already on main" is not a failure of the run.
+            if not error_message.startswith("candidate_already_on_main"):
+                self._record_run_outcome(
+                    connection, job["project_id"], succeeded=False, ticket=ticket,
+                    evidence_ref=f"merge_job:{merge_job_id}",
+                )
             if not retirement_pending and ticket["status"] not in {
                 TicketStatus.DONE.value,
                 TicketStatus.CANCELLED.value,

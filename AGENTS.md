@@ -41,8 +41,8 @@ ticket state here; `tests/test_repo_docs.py` caps it at 900 words.
 3. **Credentials** never go into source, logs, release archives or prompts.
 4. **Candidates are frozen.** Never edit a submitted candidate. Agents of a
    managed project never patch HoH; HoH defects become HoH tickets.
-5. **History is not relabelled.** Operator landings are recorded as ungated
-   (`planner.record_external_landing`), never as QA approval.
+5. **History is not relabelled.** Operator or external landings are recorded
+   as ungated (Planner, or the sweep as `system:sweep`), never as QA approval.
 6. **Encode constraints in the platform.** A prerequisite becomes a dependency
    edge, a transition or a tool call, not prose in a context entry.
 7. **Read before relaxing.** Before weakening a rule below, read the release note
@@ -70,7 +70,8 @@ The service enforces these; [ARCHITECTURE.md](docs/ARCHITECTURE.md) says where.
   one ordinary commit whose parent is the frozen base or the prior assessed
   candidate. QA independently executes the declared scenarios on that frozen
   candidate and attaches every required evidence type. A gated merge or ungated
-  landing creates one durable `delivery_completed` Planner report.
+  landing creates one durable `delivery_completed` Planner report and a check
+  of `main`; a red check or an exceeded budget pauses the merge queue.
 - QA claim authority is the intersection of live declared capabilities and a
   Planner-approved profile backed by host-observed preflight evidence from the
   same machine (QA registers a stable hostname as `machine_id`). Missing
