@@ -87,6 +87,13 @@ _CHECKPOINT_CHARS = 200
 _CONTRACT_TEXT_CHARS = 600
 _CONTRACT_TOKEN_BUDGET = 1_200
 
+# A maker and a checker can disagree forever. The third QA rejection of one
+# ticket stops the loop: the ticket is BLOCKED and Planner decides whether to
+# split it, revise its contract or cancel it. Only a recorded Planner decision
+# starts a new count (event ticket.rework_budget_reset).
+MAX_QA_REJECTIONS = 3
+REWORK_BUDGET_EXHAUSTED = "rework_budget_exhausted"
+
 # Retention policy for idempotency records: a replay is honored for this long,
 # after which purge_expired_idempotency_records may delete the row and the same
 # key behaves like a fresh request. Long enough to outlive any worker restart

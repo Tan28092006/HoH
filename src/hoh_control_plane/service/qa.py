@@ -18,7 +18,9 @@ from hoh_control_plane.service._common import (
     ConflictError,
     DomainError,
     InterventionSeverity,
+    MAX_QA_REJECTIONS,
     PlannerJobType,
+    REWORK_BUDGET_EXHAUSTED,
     Path,
     Role,
     TestExecution,
@@ -688,6 +690,21 @@ class QaMixin:
             })
         return job
 
+    @staticmethod
+    def _qa_rejections_since_reset(connection: Connection, ticket_id: str) -> int:
+        """Failed QA verdicts that sent this ticket back, since Planner last reset the budget."""
+        reset = connection.execute(
+            "SELECT MAX(sequence) FROM audit_events WHERE aggregate_type = 'ticket' "
+            "AND aggregate_id = ? AND event_type = 'ticket.rework_budget_reset'",
+            (ticket_id,),
+        ).fetchone()[0]
+        return int(connection.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE aggregate_type = 'ticket' "
+            "AND aggregate_id = ? AND sequence > ? AND event_type IN "
+            "('ticket.rework_requested', 'ticket.rework_budget_exhausted')",
+            (ticket_id, reset or 0),
+        ).fetchone()[0])
+
     def submit_qa_verdict(
         self,
         actor: Actor,
@@ -849,6 +866,8 @@ class QaMixin:
                         else f"criterion:{criterion}"
                     ),
                 })
+            rejections: int | None = None
+            budget_exhausted = False
             if verdict == "passed":
                 missing = set(ticket["acceptance_criteria"]) - verified_criteria
                 if missing:
@@ -860,7 +879,17 @@ class QaMixin:
             else:
                 evidence_gap = any(f.get("status") == "insufficient_evidence" for f in findings) and all(
                     f.get("status") in {"verified", "insufficient_evidence"} for f in findings)
-                next_status = TicketStatus.BLOCKED if evidence_gap else TicketStatus.REWORK
+                # Only a rejection of the source counts against the budget; an
+                # evidence gap is an infrastructure question, not a maker's miss.
+                rejections = (
+                    None if evidence_gap
+                    else self._qa_rejections_since_reset(connection, ticket_id) + 1
+                )
+                budget_exhausted = rejections is not None and rejections >= MAX_QA_REJECTIONS
+                next_status = (
+                    TicketStatus.BLOCKED if evidence_gap or budget_exhausted
+                    else TicketStatus.REWORK
+                )
                 known_failure_entry_id = _id(connection, "ctx")
                 connection.execute(
                     """
@@ -875,7 +904,10 @@ class QaMixin:
                         ticket["feature_id"],
                         ticket_id,
                         ("QA evidence is insufficient; infrastructure owner must record readiness before retry. No source rework is requested."
-                         if evidence_gap else "QA rejected candidate; inspect linked findings and evidence"),
+                         if evidence_gap else
+                         f"QA rejected candidate {MAX_QA_REJECTIONS} times; rework budget exhausted. "
+                         "Planner decides whether to split the ticket, revise its contract or cancel it."
+                         if budget_exhausted else "QA rejected candidate; inspect linked findings and evidence"),
                         f"candidate:{candidate_id}",
                         candidate["commit_sha"],
                         actor.agent_id,
@@ -891,18 +923,23 @@ class QaMixin:
             connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease_id,))
             if next_status == TicketStatus.BLOCKED:
                 connection.execute("UPDATE tickets SET blocked_reason = ? WHERE ticket_id = ?",
-                                   ("qa.infrastructure/insufficient_evidence", ticket_id))
+                                   (REWORK_BUDGET_EXHAUSTED if budget_exhausted
+                                    else "qa.infrastructure/insufficient_evidence", ticket_id))
                 self._close_ticket_dispatch(connection, ticket_id, timestamp)
+            event_payload: dict[str, Any] = {"candidate_id": candidate_id, "verdict": verdict}
+            if rejections is not None:
+                event_payload.update(qa_rejections=rejections, max_qa_rejections=MAX_QA_REJECTIONS)
             self._event(
                 connection,
                 actor,
                 project_id,
                 ("ticket.verified" if verdict == "passed" else
+                 "ticket.rework_budget_exhausted" if budget_exhausted else
                  "qa.infrastructure_blocked" if next_status == TicketStatus.BLOCKED else "ticket.rework_requested"),
                 "ticket",
                 ticket_id,
                 next_version,
-                {"candidate_id": candidate_id, "verdict": verdict},
+                event_payload,
             )
             verdict_ticket = self._ticket(connection, ticket_id)
             reconciliation_id = None
@@ -938,7 +975,12 @@ class QaMixin:
                     project_id,
                     verdict_ticket,
                     job_type=PlannerJobType.QA_FAILURE,
-                    summary="QA rejected the frozen candidate; inspect the linked findings.",
+                    summary=(
+                        f"{REWORK_BUDGET_EXHAUSTED}: QA rejected this ticket {rejections} times; "
+                        "split it, revise its contract or cancel it."
+                        if budget_exhausted else
+                        "QA rejected the frozen candidate; inspect the linked findings."
+                    ),
                     evidence_refs=[
                         f"candidate:{candidate_id}",
                         f"context:{known_failure_entry_id}",
@@ -950,7 +992,7 @@ class QaMixin:
                     # evidence is a slower question about how to test it.
                     severity=(
                         InterventionSeverity.HIGH
-                        if any(
+                        if budget_exhausted or any(
                             str(finding.get("status")) == "failed" for finding in findings
                         )
                         else InterventionSeverity.NORMAL
@@ -963,6 +1005,8 @@ class QaMixin:
                 "verdict": verdict,
                 "planner_job": planner_job,
                 "reconciliation_id": reconciliation_id,
+                "qa_rejections": rejections,
+                "rework_budget_exhausted": budget_exhausted,
                 "evidence_bundle": {
                     "schema_version": "1",
                     "candidate_id": candidate_id,

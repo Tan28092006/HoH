@@ -12,6 +12,7 @@ from hoh_control_plane.service._common import (
     InterventionStatus,
     PlannerJobStatus,
     PlannerJobType,
+    REWORK_BUDGET_EXHAUSTED,
     Role,
     TicketStatus,
     ValidationError,
@@ -481,6 +482,9 @@ class PlannerJobMixin:
 
             timestamp = _iso()
             next_version = int(ticket["version"]) + 1
+            # Resuming past an exhausted rework budget starts a new count, and
+            # that is a Planner decision on the record, never a silent reset.
+            budget_reset = ticket.get("blocked_reason") == REWORK_BUDGET_EXHAUSTED
             entry_id = _id(connection, "ctx")
             connection.execute(
                 """
@@ -495,8 +499,9 @@ class PlannerJobMixin:
                     ticket["feature_id"],
                     ticket["ticket_id"],
                     (
-                        f"Planner resumed ticket for {target_role.value} after failure review: "
-                        f"{resolution}"
+                        f"Planner resumed ticket for {target_role.value} after failure review"
+                        + (" and reset the exhausted QA rework budget" if budget_reset else "")
+                        + f": {resolution}"
                     ),
                     f"planner_job:{planner_job_id}",
                     ticket.get("candidate_commit") or ticket.get("base_commit"),
@@ -537,6 +542,23 @@ class PlannerJobMixin:
                     "context_ref": f"ctx:entry:{entry_id}",
                 },
             )
+            if budget_reset:
+                self._event(
+                    connection,
+                    actor,
+                    job["project_id"],
+                    "ticket.rework_budget_reset",
+                    "ticket",
+                    ticket["ticket_id"],
+                    next_version,
+                    {
+                        "planner_job_id": planner_job_id,
+                        "qa_rejections": self._qa_rejections_since_reset(
+                            connection, ticket["ticket_id"]
+                        ),
+                        "context_ref": f"ctx:entry:{entry_id}",
+                    },
+                )
             resumed = self._ticket(connection, ticket["ticket_id"])
             self._queue_ticket(connection, actor, job["project_id"], resumed)
             return {
@@ -544,6 +566,7 @@ class PlannerJobMixin:
                 "planner_job": self._planner_job(connection, planner_job_id),
                 "context_ref": f"ctx:entry:{entry_id}",
                 "resume_role": target_role.value,
+                "rework_budget_reset": budget_reset,
             }
 
     def _report_delivery_completed(
