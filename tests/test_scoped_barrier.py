@@ -235,6 +235,28 @@ def test_execution_roles_are_not_woken_by_a_ticket_scoped_barrier(
     assert planner_event["frozen_ticket_ids"] == ["DEV-142"]
 
 
+def test_a_ticket_scoped_planner_event_names_only_the_frozen_tickets(
+    service, actors, seeded
+) -> None:
+    from hoh_control_plane.event_wait import _pending as wait_candidates
+
+    _board(service, actors)
+    _reject(service, actors)
+
+    [(_key, planner_event)] = wait_candidates(service, actors["planner"], "project-1")
+
+    assert planner_event["scope"] == "tickets"
+    frozen = planner_event["frozen_ticket_ids"]
+    assert "DEV-142" in frozen and "DEV-B" not in frozen
+    next_action = planner_event["next_action"]
+    assert "every previously-open ticket" not in next_action
+    assert "frozen tickets" in next_action
+    for ticket_id in frozen:
+        assert ticket_id in next_action
+    assert "DEV-B" not in next_action
+    assert next_action.endswith("planner.resolve_repository_reconciliation")
+
+
 def _gate_regression(service, actors, seeded, tmp_path: Path) -> dict:
     from test_integration_gate import _FAILING_REGRESSION, _gate_ready_candidate, _merge
 

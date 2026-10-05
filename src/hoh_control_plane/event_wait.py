@@ -270,6 +270,15 @@ def _pending(service, actor, project, kind=None, identifier=None):
             }
             if first['scope'] != 'project':
                 payload['frozen_ticket_ids'] = (first.get('frozen_ticket_ids') or [])[:20]
+                if planner:
+                    # A ticket-scoped barrier froze only these tickets; the
+                    # rest of the board keeps working and needs no audit.
+                    payload['next_action'] = (
+                        'resolve the observation, audit only the frozen tickets ('
+                        + (', '.join(payload['frozen_ticket_ids']) or 'none listed')
+                        + '), apply lifecycle changes, then call '
+                        'planner.resolve_repository_reconciliation'
+                    )
             if level:
                 payload['escalation'] = 'barrier_stale'
                 payload['next_action'] = (
