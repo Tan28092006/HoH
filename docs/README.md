@@ -30,6 +30,7 @@ its tests win.
 | [DEPLOYMENT.md](DEPLOYMENT.md) | Network deployment, TLS, bearer identities, PostgreSQL | current |
 | [AGENT_KIT.md](AGENT_KIT.md) | Building or installing a portable role kit for a client | current |
 | [ANTIGRAVITY_SETUP.md](ANTIGRAVITY_SETUP.md) | Connecting Antigravity role workers | current |
+| [FIRSTMATE.md](FIRSTMATE.md) | Running HoH from one `/firstmate` session that claims tickets and hands each `worker_brief` to a fresh subagent | current |
 | [ROLE_WAKEUPS.md](ROLE_WAKEUPS.md) | Configuring unattended Codex or Claude Code role loops (skills link here) | current |
 | [GUI_EVENT_WAIT.md](GUI_EVENT_WAIT.md) | Changing the long-poll wait that GUI chats hold | current |
 | [DOGFOOD_HOH.md](DOGFOOD_HOH.md) | Running HoH on its own repository | snapshot 2026-09-09 |
