@@ -219,6 +219,7 @@ class CandidateMixin:
                 (candidate_id, ticket_id, base_commit, commit_sha, branch_ref, developer_claims, submitted_by, submitted_at, frozen_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (candidate_id, job["ticket_id"], base_commit, commit_sha, job["branch_ref"], json.dumps(job["developer_claims"]), actor.agent_id, timestamp, timestamp))
+            self._stamp_candidate_maker(connection, candidate_id, actor.agent_id)
             for path in changed_paths:
                 connection.execute("INSERT INTO candidate_changed_paths (candidate_id, path) VALUES (?, ?)", (candidate_id, path))
             profile = _row(connection.execute("SELECT * FROM project_test_profiles WHERE project_id = ?", (job["project_id"],)).fetchone())
@@ -408,6 +409,7 @@ class CandidateMixin:
                     timestamp,
                 ),
             )
+            self._stamp_candidate_maker(connection, candidate_id, actor.agent_id)
             for path in changed_paths:
                 connection.execute(
                     "INSERT INTO candidate_changed_paths (candidate_id, path) VALUES (?, ?)",

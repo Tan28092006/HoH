@@ -802,6 +802,11 @@ class QaMixin:
             )
             if candidate["commit_sha"] != ticket["candidate_commit"]:
                 raise ConflictError("Candidate does not match the frozen ticket artifact")
+            # Re-checked at the write: a re-registration under another family
+            # after the claim must not let a same-family verdict through.
+            family_check = self._maker_checker_family_check(
+                connection, actor, project_id, ticket_id
+            )
             contract = {
                 item["criterion"]: item for item in (ticket.get("validation_contract") or [])
             }
@@ -1020,7 +1025,10 @@ class QaMixin:
             connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease_id,))
             if next_status == TicketStatus.BLOCKED:
                 self._close_ticket_dispatch(connection, ticket_id, timestamp)
-            event_payload: dict[str, Any] = {"candidate_id": candidate_id, "verdict": verdict}
+            event_payload: dict[str, Any] = {
+                "candidate_id": candidate_id, "verdict": verdict,
+                "family_check": family_check["status"],
+            }
             if rejections is not None:
                 event_payload.update(qa_rejections=rejections, max_qa_rejections=MAX_QA_REJECTIONS)
             self._event(
@@ -1116,6 +1124,8 @@ class QaMixin:
                     "schema_version": "1",
                     "candidate_id": candidate_id,
                     "candidate_commit": candidate["commit_sha"],
+                    # distinct | family_unverified | disabled (wave 7C3).
+                    "family_check": family_check["status"],
                     "verified_records": [
                         record for record in evidence_records if record["status"] == "verified"
                     ],

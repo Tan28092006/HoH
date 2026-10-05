@@ -91,6 +91,7 @@ from hoh_control_plane.service.idempotency import IdempotencyMixin
 from hoh_control_plane.service.planner_jobs import PlannerJobMixin
 from hoh_control_plane.service.leases import LeaseMixin
 from hoh_control_plane.service.validation import ValidationMixin
+from hoh_control_plane.service.risk_policy import RiskPolicyMixin
 
 
 class ControlPlaneService(
@@ -121,6 +122,7 @@ class ControlPlaneService(
     PlannerJobMixin,
     LeaseMixin,
     ValidationMixin,
+    RiskPolicyMixin,
 ):
     """Application service enforcing workflow, context and role invariants."""
 

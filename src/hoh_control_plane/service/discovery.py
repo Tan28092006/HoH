@@ -63,6 +63,8 @@ CAPABILITY_TOOLS: dict[str, str] = {
     "agent_capabilities:approve": "planner.configure_agent_capability_profile",
     "validation_contract:configure": "planner.configure_validation_contract",
     "skill_policy:configure": "planner.configure_skill_policy",
+    "risk_policy:configure": "planner.configure_risk_policy",
+    "risk:approve_high": "policy.approve_high_risk",
     "ticket:claim:developer": "work.claim",
     "worktree:prepare": "dev.prepare_worktree",
     "progress:append": "dev.append_progress",
@@ -563,6 +565,8 @@ class DiscoveryMixin:
                 "agent_capabilities:approve",
                 "validation_contract:configure",
                 "skill_policy:configure",
+                "risk_policy:configure",
+                "risk:approve_high",
                 "experience:list",
                 "experience:retire",
             ],
@@ -596,8 +600,14 @@ class DiscoveryMixin:
         skill_manifest: list[dict[str, Any]] | None = None,
         protocol_version: str | None = None,
         endpoint: str | None = None,
+        model_family: str | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         """Publish a short-lived, authenticated availability record for dispatch.
+
+        model_family (anthropic, openai, google, other) and model name the model
+        this session runs. They feed the checker-distinct-from-maker policy:
+        a QA claim on a candidate whose maker has the same family is refused.
 
         An endpoint is optional. Registering none is not a degraded mode: the
         agent polls, which remains a complete path. Registering one that is not
@@ -636,6 +646,10 @@ class DiscoveryMixin:
             except EndpointNotAllowed as error:
                 raise ValidationError(str(error), {"reason": "endpoint_not_allowed"}) from error
         normalized_manifest = self._validate_skill_manifest(skill_manifest or [])
+        model_family = self._normalized_model_family(model_family)
+        if model is not None:
+            self._bounded_text(model, "model", 120)
+            model = model.strip() or None
         timestamp = _now()
         with self.store.connection(immediate=True) as connection:
             existing = _row(
@@ -667,8 +681,8 @@ class DiscoveryMixin:
                      capacity, machine_id,
                      last_seen_at, expires_at, created_at, updated_at,
                      skill_manifest, protocol_version, skill_compatibility, endpoint,
-                     session_started_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     session_started_at, model_family, model)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_id) DO UPDATE SET
                     project_ids = excluded.project_ids,
                     skills = excluded.skills,
@@ -682,7 +696,9 @@ class DiscoveryMixin:
                     protocol_version = excluded.protocol_version,
                     skill_compatibility = excluded.skill_compatibility,
                     endpoint = excluded.endpoint,
-                    session_started_at = excluded.session_started_at
+                    session_started_at = excluded.session_started_at,
+                    model_family = excluded.model_family,
+                    model = excluded.model
                 """,
                 (
                     actor.agent_id,
@@ -703,6 +719,8 @@ class DiscoveryMixin:
                     # A chat registers once when it starts (control-plane skill),
                     # so this marks the session the dispatcher ticket count uses.
                     _iso(timestamp),
+                    model_family,
+                    model,
                 ),
             )
             registered = self._presence(connection, actor.agent_id)

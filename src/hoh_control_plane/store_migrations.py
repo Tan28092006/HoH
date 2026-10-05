@@ -192,6 +192,12 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # NULL for every older ticket: none was planned against a moved base the
     # flag could describe.
     ("tickets", "planning_base_stale", "TEXT"),
+    # Model families (wave 7C3). NULL is "unknown", which is the truth about
+    # every session and candidate recorded before the column.
+    ("agent_presence", "model_family", "TEXT"),
+    ("agent_presence", "model", "TEXT"),
+    ("candidates", "maker_model_family", "TEXT"),
+    ("candidates", "maker_model", "TEXT"),
 )
 
 

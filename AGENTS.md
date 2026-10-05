@@ -83,6 +83,9 @@ The service enforces these; [ARCHITECTURE.md](docs/ARCHITECTURE.md) says where.
   host preflight proved on the same machine (QA registers a stable hostname as
   `machine_id`); the server approves it, Planner may override. Missing
   capability is an infrastructure gap, never a reason to weaken acceptance.
+  QA's registered `model_family` must differ from the maker's
+  (`checker_distinct_from_maker`). Merge needs `adversarial_review` evidence at
+  medium risk, plus `policy.approve_high_risk` at high.
 - `dev.submit_candidate`, `qa.submit_verdict` and `integrator.merge_candidate`
   require the `context_snapshot_id` of a packet read just before the write.
 - Packets are bounded (4,000 estimated tokens by default; contract fields 600

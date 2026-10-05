@@ -273,6 +273,10 @@ class LeaseMixin:
             self.require_fresh_context(connection, ticket_id, context_snapshot_id)
             self._require_skill_compatible(connection, actor, project_id)
             self._require_qa_execution_capabilities(connection, actor, project_id, ticket)
+            family_check = (
+                self._maker_checker_family_check(connection, actor, project_id, ticket_id)
+                if actor.role is Role.QA else None
+            )
             existing = connection.execute(
                 "SELECT * FROM leases WHERE ticket_id = ?", (ticket_id,)
             ).fetchone()
@@ -330,7 +334,9 @@ class LeaseMixin:
                 "ticket",
                 ticket_id,
                 next_version,
-                {"lease_id": lease_id},
+                {"lease_id": lease_id, **(
+                    {"family_check": family_check} if family_check is not None else {}
+                )},
             )
             self._mark_queue_claimed(connection, ticket_id, actor.agent_id, timestamp)
             result = {
@@ -340,6 +346,8 @@ class LeaseMixin:
                 # inventing one here would name a packet nobody ever read.
                 "context_snapshot_id": context_snapshot_id,
             }
+            if family_check is not None:
+                result["family_check"] = family_check
         # The packet ticket.get_context returns right now, compiled and recorded
         # after the claim committed: an agent can write from it without spending
         # a round trip and a full packet on re-reading.
@@ -388,10 +396,12 @@ class LeaseMixin:
                 "ORDER BY submitted_at DESC LIMIT 1",
                 (ticket_id,),
             ).fetchone())
+            project_id = self._project_for_ticket(connection, ticket_id)
             repository = _row(connection.execute(
                 "SELECT workspace_model FROM project_repositories WHERE project_id = ?",
-                (self._project_for_ticket(connection, ticket_id),),
+                (project_id,),
             ).fetchone())
+            risk = self._ticket_risk(connection, project_id, ticket)
         ids = f'ticket_id="{ticket_id}", lease_id="{lease_id}"'
         # The claimed status names the work, whoever holds the lease (an Admin may).
         role = {
@@ -438,6 +448,9 @@ class LeaseMixin:
             "skills": ["hoh-control-plane", f"hoh-{role.value}"],
             "next_calls": calls,
             "returns": returns,
+            # What this ticket's risk tier requires before merge (wave 7C3).
+            "risk_tier": risk["tier"],
+            "risk_requires": risk["requires"],
         }
         if worktree is not None:
             brief["worktree_path"] = worktree["worktree_path"]
