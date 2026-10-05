@@ -245,6 +245,44 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
                 lambda: service.configure_verification_profile(actor, **arguments),
             )
 
+        @server.tool(name="planner.configure_risk_policy", structured_output=True)
+        def planner_configure_risk_policy(
+            project_id: str,
+            checker_distinct_from_maker: bool = True,
+            high_risk_patterns: list[str] | None = None,
+            medium_risk_patterns: list[str] | None = None,
+            medium_max_files: int = 10,
+        ) -> dict[str, Any]:
+            """Set maker/checker distinctness and the path patterns that make a candidate medium or high risk.
+
+            Omitted pattern lists keep the built-in defaults. Medium needs an
+            adversarial_review evidence item before merge; high also waits for
+            policy.approve_high_risk.
+            """
+            arguments = {
+                "project_id": project_id,
+                "checker_distinct_from_maker": checker_distinct_from_maker,
+                "high_risk_patterns": high_risk_patterns,
+                "medium_risk_patterns": medium_risk_patterns,
+                "medium_max_files": medium_max_files,
+            }
+            return invoke(
+                "planner.configure_risk_policy", arguments,
+                lambda: service.configure_risk_policy(actor, **arguments),
+            )
+
+        @server.tool(name="policy.approve_high_risk", structured_output=True)
+        def policy_approve_high_risk(ticket_id: str, reason: str) -> dict[str, Any]:
+            """Record the policy sign-off that lets this ticket's current high-risk candidate merge.
+
+            Bound to the frozen candidate: a rework needs a new sign-off.
+            """
+            arguments = {"ticket_id": ticket_id, "reason": reason}
+            return invoke(
+                "policy.approve_high_risk", arguments,
+                lambda: service.approve_high_risk(actor, **arguments),
+            )
+
         @server.tool(name="planner.configure_agent_capability_profile", structured_output=True)
         def planner_configure_agent_capability_profile(
             project_id: str,

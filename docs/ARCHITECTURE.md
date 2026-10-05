@@ -191,6 +191,8 @@ helper you are about to change across `service/`.
 | Agents read 12-character SHAs; the store keeps full ones; a commit input is resolved before comparison | `agent_facing` in `_common.py` (packets in `context.py`, results in `mcp/invoke.py`); `_full_commit` in `validation.py` | `test_short_shas.py` |
 | A claim hands the dispatcher a self-contained brief; QA sees Developer claims only by reference; packets name each author | `_worker_brief` in `leases.py`; `_compact_artifacts` and `_SECTION_SOURCES` in `context.py` | `test_worker_brief.py`, `test_context_provenance.py` |
 | Skill text names real tools and stays small | `tests/test_skill_assets.py` | — |
+| QA's model family differs from the maker's while `checker_distinct_from_maker` is on; unknown is allowed and marked `family_unverified` | `_maker_checker_family_check` in `service/risk_policy.py`, called by `_claim` (QA) in `leases.py` and `submit_qa_verdict` in `qa.py`; the maker's family is stamped on `candidates` at freeze | `test_risk_policy.py` |
+| A medium-risk candidate merges only with `adversarial_review` evidence, a high-risk one also only after `policy.approve_high_risk` on that candidate | `_require_risk_tier_cleared` in `service/risk_policy.py`, called by `queue_merge_candidate` in `integration.py` | `test_risk_policy.py` |
 
 ## Design decisions
 
@@ -292,6 +294,34 @@ deliberately not enforced: the server cannot see whether a chat delegated.
   result (not a wait on the agent's own job) carries `advice:
   start_new_session`. The server never refuses a claim over it, and a presence
   from before the column has no session and gets no advice.
+
+### Maker/checker families and risk tiers (wave 7C3)
+
+- **Families.** `agent.register(model_family, model?)` stores the family on
+  `agent_presence`; `local_agent setup --model` derives it (`--model-family`
+  overrides) and a stdio server registers it when the agent omits it. The
+  maker's family is copied onto `candidates.maker_model_family` at freeze, so a
+  later re-registration cannot change who made it; a candidate without one falls
+  back to its submitter's presence.
+- **Checker distinct from maker** is a project policy
+  (`project_risk_policies.checker_distinct_from_maker`, default on, set with
+  `planner.configure_risk_policy`). A QA claim, and the verdict write, are
+  refused when the families are equal. An unknown family, or `other` on either
+  side, is allowed and recorded as `family_unverified` on the claim event, the
+  verdict event and the evidence bundle: refusing it would lock out every agent
+  that predates the field. The intent-check reviewer is a QA claim, so it is
+  bound by the same rule.
+- **Risk tier** is computed, never declared: from the candidate's changed paths
+  once one exists, else from the write scope. `high` matches the project's high
+  patterns (default: store schema and migrations, auth, credentials, `deploy/`,
+  `skills/`, `docs/spec/`); `medium` matches the medium patterns (shared core
+  modules) or changes more than `medium_max_files` (10) files; the rest is
+  `low`. The tier is in every packet as `ticket.risk` and in `worker_brief`.
+- **Gate.** Low needs the suite and scenarios. Medium also needs an evidence
+  item of type `adversarial_review` on the candidate. High needs that and a
+  `policy.approve_high_risk(ticket_id, reason)` record (Planner or Admin) bound
+  to the current candidate, so a rework needs a fresh sign-off. The merge queue
+  refuses with `adversarial_review_missing` or `high_risk_signoff_missing`.
 
 ## Change routing
 

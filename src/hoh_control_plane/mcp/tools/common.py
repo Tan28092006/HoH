@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import anyio
+import os
 import time
 from collections.abc import Callable
 from typing import Any
@@ -48,8 +49,15 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
         presence_seconds: int = 120,
         skill_manifest: list[dict[str, Any]] | None = None,
         protocol_version: str | None = None,
+        model_family: str | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         """Register this authenticated agent as available for durable work dispatch.
+
+        model_family (anthropic, openai, google or other) and the optional model
+        name say which model runs this session. QA cannot claim a candidate made
+        by the same family while the project's checker_distinct_from_maker
+        policy is on; an unknown family is allowed but marked family_unverified.
 
         execution_capabilities lists only observable project equipment this
         session has checked it can use. Strict QA work is offered and claimable
@@ -62,6 +70,12 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
         as incompatible before it can claim work, without ever granting it any
         role permission it does not already hold.
         """
+        # A stdio profile set up with --model carries its family in the
+        # environment; an explicit argument always wins.
+        if model_family is None:
+            model_family = os.environ.get("HOH_AGENT_MODEL_FAMILY") or None
+            if model is None:
+                model = os.environ.get("HOH_AGENT_MODEL") or None
         arguments = {
             "skills": skills,
             "execution_capabilities": execution_capabilities,
@@ -70,6 +84,8 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
             "presence_seconds": presence_seconds,
             "skill_manifest": skill_manifest,
             "protocol_version": protocol_version,
+            "model_family": model_family,
+            "model": model,
         }
         return invoke(
             "agent.register",

@@ -20,9 +20,32 @@ from hoh_control_plane.domain import Actor, Role, NotFoundError
 
 ROLES = ('planner', 'developer', 'qa', 'integrator')
 MODEL_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,99}')
+MODEL_FAMILIES = ('anthropic', 'openai', 'google', 'other')
 
 
-def worker_agent_text(server, role, model):
+def model_family_of(model):
+    """The provider family of a model id, for agent.register(model_family=...).
+
+    Checker/maker distinctness compares families, so an unrecognised id is
+    'other', which the server treats as unverified rather than as distinct.
+    """
+    name = (model or '').lower().rsplit('/', 1)[-1]
+    if not name:
+        return None
+    if name.startswith(('claude', 'opus', 'sonnet', 'haiku', 'fable')) or 'anthropic' in (model or '').lower():
+        return 'anthropic'
+    if name.startswith(('gpt', 'o1', 'o3', 'o4', 'codex', 'chatgpt')):
+        return 'openai'
+    if name.startswith(('gemini', 'gemma')):
+        return 'google'
+    return 'other'
+
+
+def model_profile_path(root, agent_id):
+    return Path(root) / 'config' / 'agent_models' / f'{agent_id}.json'
+
+
+def worker_agent_text(server, role, model, model_family=None):
     """A Claude Code subagent that works one claimed ticket on its own model.
 
     Claude Code has no model setting per MCP server, so the model a role's work
@@ -37,6 +60,9 @@ def worker_agent_text(server, role, model):
         f"brief names, use only MCP server `{server}`, and start with the brief's "
         f"`next_calls`. Work only that ticket and lease. Finish by returning only the "
         f"brief's `returns` fields plus any blockers, nothing from your transcript.\n"
+        + (f"Your model family is `{model_family}`; the dispatcher registers it with "
+           f"`agent.register(model_family=\"{model_family}\", model=\"{model}\")`.\n"
+           if model_family else "")
     )
 
 
@@ -92,7 +118,7 @@ def checked_project(root, project):
 
 
 def install_profile(root, project, role, instance, client, home, upgrade_skills=False, transport='stdio',
-                    model=None):
+                    model=None, model_family=None):
     from hoh_control_plane.agent_kit import build_kit
     from hoh_control_plane.agent_assets.install import install
     config = checked_project(root, project)
@@ -100,6 +126,10 @@ def install_profile(root, project, role, instance, client, home, upgrade_skills=
         raise ValueError('Unknown local MCP transport')
     if model is not None and not MODEL_ID.fullmatch(model):
         raise ValueError('Model must be a plain model identifier')
+    if model_family is None:
+        model_family = model_family_of(model)
+    elif model_family not in MODEL_FAMILIES:
+        raise ValueError('Model family must be one of ' + ', '.join(MODEL_FAMILIES))
     actor = installed_profile_actor(root, config, project, role, instance)
     server = 'hoh-' + actor.agent_id
     command = str(root / '.venv/Scripts/python.exe')
@@ -127,6 +157,9 @@ def install_profile(root, project, role, instance, client, home, upgrade_skills=
         (kit / 'mcp.json').write_text(json.dumps({'mcpServers': {server: claude}}), encoding='utf-8')
         manifest = json.loads((kit / 'manifest.json').read_text(encoding='utf-8'))
         manifest['server_name'], manifest['codex'] = server, codex
+        if model_family:
+            manifest['model_family'] = model_family
+            manifest['model'] = model
         model_note = None
         if model and client == 'codex':
             # A Codex profile carries a model; it applies when Codex starts with
@@ -135,7 +168,7 @@ def install_profile(root, project, role, instance, client, home, upgrade_skills=
         elif model and role != 'planner':
             agent = f'agents/{server}-worker.md'
             (kit / 'agents').mkdir()
-            (kit / agent).write_text(worker_agent_text(server, role, model), encoding='utf-8')
+            (kit / agent).write_text(worker_agent_text(server, role, model, model_family), encoding='utf-8')
             manifest['claude_agent'] = agent
         elif model:
             model_note = ('Claude Code has no per-server model setting; choose the Planner '
@@ -170,6 +203,15 @@ def install_profile(root, project, role, instance, client, home, upgrade_skills=
             raise
     result = {'server_name': server, 'agent_id': actor.agent_id, 'role': role, 'project_id': project, 'transport': transport,
               'skill_backups': [str(backup) for _, backup in moved]}
+    if model_family:
+        # A stdio server reads this at start and registers the family when the
+        # agent omits it; every client also gets the explicit register hint.
+        path = model_profile_path(root, actor.agent_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({'model_family': model_family, 'model': model}), encoding='utf-8')
+        result['model_family'] = model_family
+        result['register_hint'] = (f'agent.register(..., model_family="{model_family}"'
+                                   + (f', model="{model}")' if model else ')'))
     if model:
         result['model'] = model
         if client == 'codex':
@@ -269,13 +311,15 @@ def main():
     parser.add_argument('--upgrade-skills', action='store_true')
     parser.add_argument('--transport', choices=['stdio', 'shared-http'], default='shared-http')
     parser.add_argument('--model', help='Model this role runs on, where the client supports it')
+    parser.add_argument('--model-family', choices=MODEL_FAMILIES,
+                        help='Provider family of --model; derived from the model id when omitted')
     args = parser.parse_args()
     root = args.root.resolve()
     config = checked_project(root, args.project)
     actor = installed_profile_actor(root, config, args.project, args.role, args.instance)
     if args.action == 'setup':
         print(json.dumps(install_profile(root, args.project, args.role, args.instance, args.client, args.home, args.upgrade_skills, args.transport,
-                                         args.model)))
+                                         args.model, args.model_family)))
         return
     if any((root / 'config' / name).exists() for name in ('stop.request', 'shutdown.request')):
         raise SystemExit('HoH was stopped by the operator. Open the HoH desktop icon before reconnecting.')
@@ -285,6 +329,11 @@ def main():
     os.environ.update(HOH_DATABASE_PATH=config['database_path'], HOH_WORKER_MODE='supervised',
                       HOH_MCP_TRANSPORT='stdio', HOH_AGENT_ID=actor.agent_id,
                       HOH_AGENT_ROLE=args.role, HOH_PROJECT_IDS=args.project)
+    model_profile = model_profile_path(root, actor.agent_id)
+    if model_profile.is_file():
+        recorded = json.loads(model_profile.read_text(encoding='utf-8'))
+        os.environ['HOH_AGENT_MODEL_FAMILY'] = recorded.get('model_family') or ''
+        os.environ['HOH_AGENT_MODEL'] = recorded.get('model') or ''
     # Start the supervised host while reserving stdout for MCP protocol frames.
     subprocess.run([sys.executable, str(root / 'hoh_desktop.py'), '--no-browser'],
                    stdout=subprocess.DEVNULL, check=True, creationflags=0x08000000 if os.name == 'nt' else 0)

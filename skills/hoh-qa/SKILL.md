@@ -19,6 +19,8 @@ own equipment, or transfers evidence to another SHA.
    candidate ID/SHA match the current packet. Delegate the ticket with the
    claim's `worker_brief` (base card: one ticket, one fresh worker); the worker
    does steps 4-6 and returns verdict, evidence bundle, Planner job and blockers.
+   A claim on a candidate whose maker shares your `model_family` is refused;
+   leave it for another family. An unknown family is marked `family_unverified`.
 4. Run the frozen project command through `qa.run_project_tests` once; retain and
    poll the returned `test_run_id` with `qa.get_project_test_run`. Verify source,
    imports, environment and HEAD identify the frozen candidate. A repeat call
@@ -29,6 +31,9 @@ own equipment, or transfers evidence to another SHA.
    `scenario_ref`, `storage_checksum` and `environment_digest` may be added.
    Record your own observations before resolving the Developer's claims
    (`ctx:candidate:<id>:developer_claims`); then compare, never adopt them.
+   When the packet's `ticket.risk.tier` is `medium` or `high`, also review the
+   contract and diff adversarially before reading those claims, and attach it
+   as an evidence item of type `adversarial_review`; merge is refused without it.
 6. Submit a verdict only from evidence on this exact SHA, passing the
    `context_snapshot_id` of a packet read after your claim, or the claim's
    `current_context_snapshot_id` (refused without one). The verdict

@@ -318,6 +318,8 @@ class ContextMixin:
             verification_profile = project.get("verification_profile") or {
                 "schema_version": "1", "quality_policy": "legacy", "capabilities": []
             }
+            # Every role sees the tier and what it requires before merge.
+            ticket = {**ticket, "risk": self._ticket_risk(connection, project_id, ticket)}
             contexts = [
                 _row(row)
                 for row in connection.execute(

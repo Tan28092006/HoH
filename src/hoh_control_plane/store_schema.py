@@ -250,7 +250,10 @@ CREATE TABLE IF NOT EXISTS candidates (
     developer_claims TEXT NOT NULL,
     submitted_by TEXT NOT NULL,
     submitted_at TEXT NOT NULL,
-    frozen_at TEXT NOT NULL
+    frozen_at TEXT NOT NULL,
+    -- The maker's model family at submission; NULL when it was unknown.
+    maker_model_family TEXT,
+    maker_model TEXT
 );
 
 -- Changed paths are derived from immutable Git commits, rather than supplied
@@ -508,10 +511,41 @@ CREATE TABLE IF NOT EXISTS agent_presence (
     -- which stays a complete path on its own.
     endpoint TEXT,
     -- When this agent last registered, i.e. when its current chat began.
-    session_started_at TEXT
+    session_started_at TEXT,
+    -- Which model family runs this session (anthropic, openai, google, other),
+    -- as the launcher reports it. NULL means unknown: checker/maker
+    -- distinctness is then unverified, never assumed.
+    model_family TEXT,
+    model TEXT
 );
 CREATE INDEX IF NOT EXISTS agent_presence_role_expiry
     ON agent_presence(role, expires_at);
+
+-- Per-project risk policy (wave 7C3). Absence of a row means the defaults:
+-- checker distinct from maker on, built-in high/medium patterns.
+CREATE TABLE IF NOT EXISTS project_risk_policies (
+    project_id TEXT PRIMARY KEY REFERENCES projects(project_id),
+    checker_distinct_from_maker INTEGER NOT NULL DEFAULT 1,
+    high_risk_patterns TEXT NOT NULL,
+    medium_risk_patterns TEXT NOT NULL,
+    medium_max_files INTEGER NOT NULL,
+    configured_by TEXT NOT NULL,
+    configured_at TEXT NOT NULL
+);
+
+-- A human/Planner policy sign-off that lets one high-risk candidate merge.
+-- Bound to the candidate, so a rework needs a fresh sign-off.
+CREATE TABLE IF NOT EXISTS high_risk_approvals (
+    approval_id TEXT PRIMARY KEY,
+    ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
+    candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),
+    reason TEXT NOT NULL,
+    approved_by TEXT NOT NULL,
+    approved_role TEXT NOT NULL,
+    approved_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS high_risk_approvals_candidate
+    ON high_risk_approvals(candidate_id);
 
 -- A project's accepted skill/protocol versions. Absence of a row means no
 -- enforcement is configured yet: every agent stays compatible by default, so

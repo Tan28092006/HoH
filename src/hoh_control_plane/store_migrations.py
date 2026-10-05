@@ -44,7 +44,10 @@ class SchemaVersionError(SchemaMigrationError):
 #        the merge shadow partition (repository_reconciliations.scope,
 #        frozen_ticket_ids, shadow_*), agent_presence.session_started_at and
 #        ticket_usage_reports.
-SCHEMA_VERSION = 2
+#   3 -- model families and risk tiers (wave 7C3): agent_presence.model_family
+#        and .model, candidates.maker_model_family and .maker_model, and the
+#        project_risk_policies and high_risk_approvals tables.
+SCHEMA_VERSION = 3
 
 
 def read_schema_version(connection: Any, columns_of: Any) -> int:
@@ -178,6 +181,12 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # before the column: its session start is unknown, so no ticket count and
     # no restart advice is derived from it.
     ("agent_presence", "session_started_at", "TEXT"),
+    # Model families (wave 7C3). NULL is "unknown", which is the truth about
+    # every session and candidate recorded before the column.
+    ("agent_presence", "model_family", "TEXT"),
+    ("agent_presence", "model", "TEXT"),
+    ("candidates", "maker_model_family", "TEXT"),
+    ("candidates", "maker_model", "TEXT"),
 )
 
 

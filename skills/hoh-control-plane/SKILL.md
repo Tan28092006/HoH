@@ -14,7 +14,8 @@ is not.
 1. Start with `session.bootstrap`. Select a returned project explicitly and
    confirm the intended role and identity before any mutation.
 2. Execution roles call `agent.register` once with `hoh-control-plane`, their
-   role skill and capacity 1, then call `work.inbox`. Planner runs its role
+   role skill, capacity 1 and the `model_family` (`anthropic`, `openai`,
+   `google`, `other`) of the model doing ticket work, then call `work.inbox`. Planner runs its role
    control cycle before resuming work or waiting.
 3. Use discovery only to find a typed reference. Resolve the selected current
    ticket packet before a claim or write. A packet is the shared development
