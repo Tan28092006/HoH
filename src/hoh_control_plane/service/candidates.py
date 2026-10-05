@@ -226,7 +226,7 @@ class CandidateMixin:
                 connection.execute("""INSERT INTO candidate_test_profiles (candidate_id, test_command, timeout_seconds, configured_at)
                     VALUES (?, ?, ?, ?)""", (candidate_id, json.dumps(profile["test_command"]), profile["timeout_seconds"], timestamp))
             next_version = _transition_ticket(
-                connection, job["ticket_id"], expected_version=ticket["version"],
+                connection, job["ticket_id"], actor=actor, expected_version=ticket["version"],
                 from_statuses=(TicketStatus.DEV_IN_PROGRESS,),
                 changes={"status": TicketStatus.QA_READY, "base_commit": base_commit,
                          "candidate_commit": commit_sha, "updated_at": timestamp},
@@ -433,7 +433,7 @@ class CandidateMixin:
                     ),
                 )
             next_version = _transition_ticket(
-                connection, ticket_id, expected_version=ticket["version"],
+                connection, ticket_id, actor=actor, expected_version=ticket["version"],
                 from_statuses=(TicketStatus.DEV_IN_PROGRESS,),
                 changes={"status": TicketStatus.QA_READY, "base_commit": base_commit,
                          "candidate_commit": commit_sha, "updated_at": timestamp},

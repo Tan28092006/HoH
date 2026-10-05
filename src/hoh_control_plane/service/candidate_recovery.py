@@ -147,7 +147,7 @@ class CandidateRecoveryMixin:
 
             closed_offers = self._close_ticket_dispatch(connection, ticket_id, timestamp)
             _transition_ticket(
-                connection, ticket_id, expected_version=ticket["version"],
+                connection, ticket_id, actor=actor, expected_version=ticket["version"],
                 from_statuses=(TicketStatus.QA_READY,),
                 changes={"status": TicketStatus.REWORK, "blocked_reason": reason,
                          "updated_at": timestamp},
@@ -275,7 +275,7 @@ class CandidateRecoveryMixin:
             timestamp = _iso()
             next_version = ticket["version"] + 1
             _transition_ticket(
-                connection, ticket_id, expected_version=ticket["version"],
+                connection, ticket_id, actor=actor, expected_version=ticket["version"],
                 from_statuses=(TicketStatus.BLOCKED, TicketStatus.REWORK),
                 changes={"status": TicketStatus.QA_READY, "blocked_reason": None,
                          "updated_at": timestamp},

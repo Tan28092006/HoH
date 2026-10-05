@@ -90,7 +90,7 @@ class DeveloperMixin:
             )
             next_version = ticket["version"] + 1
             _transition_ticket(
-                connection, ticket_id, expected_version=ticket["version"],
+                connection, ticket_id, actor=actor, expected_version=ticket["version"],
                 from_statuses=(TicketStatus.DEV_IN_PROGRESS,),
                 changes={"status": TicketStatus.BLOCKED, "blocked_reason": reason,
                          "updated_at": timestamp},

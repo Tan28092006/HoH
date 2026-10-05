@@ -11,6 +11,7 @@ from hoh_control_plane.service._common import (
     ValidationError,
     _id,
     _iso,
+    _record_ticket_created,
     _transition_ticket,
     json,
     require_project,
@@ -176,6 +177,7 @@ class TicketAuthoringMixin:
                         """,
                         (ticket_id, dependency_id),
                     )
+                _record_ticket_created(connection, actor, ticket_id)
                 self._event(
                     connection,
                     actor,
@@ -209,7 +211,7 @@ class TicketAuthoringMixin:
             self._assert_quality_ready(project, ticket)
             timestamp = _iso()
             next_version = _transition_ticket(
-                connection, ticket_id, expected_version=ticket["version"],
+                connection, ticket_id, actor=actor, expected_version=ticket["version"],
                 from_statuses=(TicketStatus.BACKLOG, TicketStatus.BLOCKED),
                 changes={"status": TicketStatus.READY, "blocked_reason": None,
                          "updated_at": timestamp},
@@ -254,7 +256,7 @@ class TicketAuthoringMixin:
                 raise ValidationError("file_scope is unchanged")
             timestamp = _iso()
             next_version = _transition_ticket(
-                connection, ticket_id, expected_version=ticket["version"],
+                connection, ticket_id, actor=actor, expected_version=ticket["version"],
                 from_statuses=(TicketStatus.BACKLOG, TicketStatus.BLOCKED),
                 changes={"file_scope": json.dumps(normalized_scope), "updated_at": timestamp},
             )
@@ -428,7 +430,7 @@ class TicketAuthoringMixin:
                 changes["preservation_constraints"] = json.dumps(preservation_constraints)
             changed_fields = [field for field in changes if field != "updated_at"]
             next_version = _transition_ticket(
-                connection, ticket_id, expected_version=ticket["version"],
+                connection, ticket_id, actor=actor, expected_version=ticket["version"],
                 from_statuses=(TicketStatus.BACKLOG, TicketStatus.READY, TicketStatus.BLOCKED),
                 changes=changes,
             )
@@ -516,7 +518,7 @@ class TicketAuthoringMixin:
             timestamp = _iso()
             closed_offers = self._close_ticket_dispatch(connection, ticket_id, timestamp)
             next_version = _transition_ticket(
-                connection, ticket_id, expected_version=ticket["version"],
+                connection, ticket_id, actor=actor, expected_version=ticket["version"],
                 from_statuses=RETIRABLE_TICKET_STATUSES,
                 changes={"status": TicketStatus.SUPERSEDED, "updated_at": timestamp},
             )

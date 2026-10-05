@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from hoh_control_plane.observability import current_correlation_id
 from hoh_control_plane.service._common import (
     Actor,
     Any,
@@ -8,10 +7,8 @@ from hoh_control_plane.service._common import (
     ConflictError,
     NotFoundError,
     ValidationError,
-    _id,
-    _iso,
     _row,
-    json,
+    _write_audit_event,
     Connection,
     Path,
     re,
@@ -179,42 +176,7 @@ class ValidationMixin:
         aggregate_version: int,
         payload: dict[str, Any],
     ) -> None:
-        correlation_id = current_correlation_id()
-        # The request that last moved this aggregate is what caused this one to
-        # act, which is what links a chain across worker processes: each step
-        # read the state the previous step left.
-        previous = connection.execute(
-            """
-            SELECT correlation_id FROM audit_events
-            WHERE aggregate_type = ? AND aggregate_id = ? AND correlation_id IS NOT NULL
-            ORDER BY sequence DESC LIMIT 1
-            """,
-            (aggregate_type, aggregate_id),
-        ).fetchone()
-        causation_id = previous["correlation_id"] if previous else None
-        if causation_id == correlation_id:
-            # Several events from one request are siblings, not cause and effect.
-            causation_id = None
-        connection.execute(
-            """
-            INSERT INTO audit_events
-                (event_id, event_type, aggregate_type, aggregate_id, aggregate_version,
-                 project_id, actor_id, actor_role, payload, correlation_id, causation_id,
-                 occurred_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                _id(connection, "event"),
-                event_type,
-                aggregate_type,
-                aggregate_id,
-                aggregate_version,
-                project_id,
-                actor.agent_id,
-                actor.role.value,
-                json.dumps(payload),
-                correlation_id,
-                causation_id,
-                _iso(),
-            ),
+        _write_audit_event(
+            connection, actor, project_id, event_type, aggregate_type, aggregate_id,
+            aggregate_version, payload,
         )

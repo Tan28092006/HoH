@@ -38,6 +38,7 @@ from hoh_control_plane.domain import (
     require_role,
 )
 from hoh_control_plane.git_worktrees import CLEAN_CHECKPOINT, DIRTY, GitWorktreeManager
+from hoh_control_plane.observability import current_correlation_id
 from hoh_control_plane.qa_runner import ProjectTestRunner, TestExecution
 from hoh_control_plane.store import (
     CHECKSUM_ARTIFACT,
@@ -422,6 +423,60 @@ def _audit_event_has_field(
         if isinstance(payload, dict) and payload.get(field) == value:
             return True
     return False
+
+
+def _write_audit_event(
+    connection: Connection,
+    actor: Actor,
+    project_id: str,
+    event_type: str,
+    aggregate_type: str,
+    aggregate_id: str,
+    aggregate_version: int,
+    payload: dict[str, Any],
+) -> None:
+    """Append one audit event in the caller's transaction (``_event`` delegates here)."""
+    correlation_id = current_correlation_id()
+    # The request that last moved this aggregate is what caused this one to
+    # act, which is what links a chain across worker processes: each step
+    # read the state the previous step left.
+    previous = connection.execute(
+        """
+        SELECT correlation_id FROM audit_events
+        WHERE aggregate_type = ? AND aggregate_id = ? AND correlation_id IS NOT NULL
+        ORDER BY sequence DESC LIMIT 1
+        """,
+        (aggregate_type, aggregate_id),
+    ).fetchone()
+    causation_id = previous["correlation_id"] if previous else None
+    if causation_id == correlation_id:
+        # Several events from one request are siblings, not cause and effect.
+        causation_id = None
+    connection.execute(
+        """
+        INSERT INTO audit_events
+            (event_id, event_type, aggregate_type, aggregate_id, aggregate_version,
+             project_id, actor_id, actor_role, payload, correlation_id, causation_id,
+             occurred_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            _id(connection, "event"),
+            event_type,
+            aggregate_type,
+            aggregate_id,
+            aggregate_version,
+            project_id,
+            actor.agent_id,
+            actor.role.value,
+            json.dumps(payload),
+            correlation_id,
+            causation_id,
+            _iso(),
+        ),
+    )
+
+
 def require_snapshot_id(context_snapshot_id: Any, tool_name: str) -> str:
     """A consequential write must name the packet it was decided from.
 
@@ -498,11 +553,54 @@ _TRANSITION_COLUMNS = frozenset({
     "preservation_constraints", "file_scope",
 })
 
+#: The one event type that records a ticket's state. A ticket's creation and
+#: every ``_transition_ticket`` write it in the same transaction, so folding
+#: these events in sequence order reproduces every ticket's status and version
+#: (``replay_ticket_states``). Domain events (``ticket.claimed``,
+#: ``candidate.frozen`` ...) still say what happened; this one says what the row
+#: became, and is the only event a replay reads.
+TICKET_TRANSITION_EVENT = "ticket.transitioned"
+#: Changed values a transition event carries besides status. Commits identify
+#: the artifact; the reason is truncated because it can hold a whole error.
+_TRANSITION_EVENT_VALUES = ("base_commit", "candidate_commit", "blocked_reason")
+_TRANSITION_REASON_CHARS = 300
+
+
+def _ticket_project_and_status(connection: Connection, ticket_id: str) -> tuple[str, str] | None:
+    row = connection.execute(
+        """
+        SELECT f.project_id, t.status FROM tickets t
+        JOIN features f ON f.feature_id = t.feature_id
+        WHERE t.ticket_id = ?
+        """,
+        (ticket_id,),
+    ).fetchone()
+    return None if row is None else (str(row["project_id"]), str(row["status"]))
+
+
+def _record_ticket_created(connection: Connection, actor: Actor, ticket_id: str) -> None:
+    """The initial transition, from nothing to version 1, so a fold can start empty."""
+    located = _ticket_project_and_status(connection, ticket_id)
+    if located is None:
+        raise NotFoundError("Ticket not found")
+    project_id, status = located
+    _write_audit_event(
+        connection, actor, project_id, TICKET_TRANSITION_EVENT, "ticket", ticket_id, 1,
+        {
+            "from_status": None,
+            "to_status": status,
+            "from_version": 0,
+            "to_version": 1,
+            "changed_fields": ["created"],
+        },
+    )
+
 
 def _transition_ticket(
     connection: Connection,
     ticket_id: str,
     *,
+    actor: Actor,
     expected_version: int,
     from_statuses: Any,
     changes: dict[str, Any],
@@ -514,6 +612,11 @@ def _transition_ticket(
     under the global write lock this never refuses anything; it is what keeps a
     writer outside that lock (a non-``immediate`` connection, or PostgreSQL row
     locks) from silently overwriting a newer ticket state.
+
+    The same transaction appends a ``ticket.transitioned`` event (from and to
+    status and version, the changed fields), written by ``actor``. That event
+    is the canonical record of the change; whatever domain event the caller
+    adds says why.
     """
     if not changes:
         raise ValueError("A ticket transition must change at least one column")
@@ -535,6 +638,7 @@ def _transition_ticket(
     next_version = int(expected_version) + 1
     assignments = ", ".join(f"{column} = ?" for column in values)
     placeholders = ", ".join("?" for _ in statuses)
+    located = _ticket_project_and_status(connection, ticket_id)
     cursor = connection.execute(
         f"UPDATE tickets SET {assignments}, version = ? "
         f"WHERE ticket_id = ? AND version = ? AND status IN ({placeholders})",
@@ -555,4 +659,65 @@ def _transition_ticket(
                 "current_status": None if current is None else current["status"],
             },
         )
+    assert located is not None  # the UPDATE matched the row
+    project_id, from_status = located
+    payload: dict[str, Any] = {
+        "from_status": from_status,
+        "to_status": values.get("status", from_status),
+        "from_version": int(expected_version),
+        "to_version": next_version,
+        "changed_fields": sorted(column for column in values if column != "updated_at"),
+    }
+    for column in _TRANSITION_EVENT_VALUES:
+        if column in values:
+            value = values[column]
+            if column == "blocked_reason" and isinstance(value, str):
+                value = value[:_TRANSITION_REASON_CHARS]
+            payload[column] = value
+    _write_audit_event(
+        connection, actor, project_id, TICKET_TRANSITION_EVENT, "ticket", ticket_id,
+        next_version, payload,
+    )
     return next_version
+
+
+def replay_ticket_states(connection: Connection, project_id: str) -> dict[str, dict[str, Any]]:
+    """Fold a project's ``ticket.transitioned`` events into each ticket's status and version.
+
+    Events are applied in sequence order. Each one must continue the version
+    its ticket reached (``from_version``) and start from the status it left
+    (``from_status``); a gap or mismatch is reported on that ticket as
+    ``replay_errors`` rather than raised, so an audit tool can list every
+    divergence at once. Compare the result with the ``tickets`` rows to see
+    whether the log explains the current state.
+    """
+    states: dict[str, dict[str, Any]] = {}
+    rows = connection.execute(
+        """
+        SELECT sequence, aggregate_id, aggregate_version, payload FROM audit_events
+        WHERE project_id = ? AND aggregate_type = 'ticket' AND event_type = ?
+        ORDER BY sequence ASC
+        """,
+        (project_id, TICKET_TRANSITION_EVENT),
+    ).fetchall()
+    for row in rows:
+        event = _row(row) or {}
+        payload = event["payload"] if isinstance(event.get("payload"), dict) else {}
+        ticket_id = str(event["aggregate_id"])
+        state = states.setdefault(
+            ticket_id, {"status": None, "version": 0, "transitions": 0, "replay_errors": []}
+        )
+        if payload.get("from_version") != state["version"]:
+            state["replay_errors"].append(
+                f"sequence {event['sequence']}: from_version {payload.get('from_version')} "
+                f"after version {state['version']}"
+            )
+        elif payload.get("from_status") != state["status"]:
+            state["replay_errors"].append(
+                f"sequence {event['sequence']}: from_status {payload.get('from_status')} "
+                f"after status {state['status']}"
+            )
+        state["status"] = payload.get("to_status")
+        state["version"] = payload.get("to_version", event["aggregate_version"])
+        state["transitions"] += 1
+    return states

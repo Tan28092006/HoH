@@ -201,7 +201,7 @@ class IntegrationMixin:
                 ),
             )
             _transition_ticket(
-                connection, ticket_id, expected_version=ticket["version"],
+                connection, ticket_id, actor=actor, expected_version=ticket["version"],
                 from_statuses=(ticket["status"],),
                 changes={"status": TicketStatus.DONE, "blocked_reason": None,
                          "updated_at": timestamp},
@@ -935,7 +935,7 @@ class IntegrationMixin:
                     ),
                 )
                 _transition_ticket(
-                    connection, job["ticket_id"], expected_version=ticket["version"],
+                    connection, job["ticket_id"], actor=actor, expected_version=ticket["version"],
                     from_statuses=(TicketStatus.MERGE_READY,),
                     changes={"status": TicketStatus.REWORK, "blocked_reason": reason,
                              "updated_at": timestamp},
@@ -989,7 +989,7 @@ class IntegrationMixin:
                 )
                 return self._merge_job(connection, merge_job_id)
             _transition_ticket(
-                connection, job["ticket_id"], expected_version=ticket["version"],
+                connection, job["ticket_id"], actor=actor, expected_version=ticket["version"],
                 from_statuses=(TicketStatus.MERGE_READY,),
                 changes={"status": TicketStatus.DONE, "blocked_reason": None,
                          "updated_at": timestamp},
@@ -1093,7 +1093,7 @@ class IntegrationMixin:
                     "DELETE FROM leases WHERE ticket_id = ?", (ticket["ticket_id"],)
                 )
                 next_version = _transition_ticket(
-                    connection, ticket["ticket_id"], expected_version=ticket["version"],
+                    connection, ticket["ticket_id"], actor=actor, expected_version=ticket["version"],
                     from_statuses=(ticket["status"],),
                     changes={"status": TicketStatus.BLOCKED, "blocked_reason": error_message,
                              "updated_at": timestamp},

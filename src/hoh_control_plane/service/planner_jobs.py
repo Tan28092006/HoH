@@ -330,7 +330,7 @@ class PlannerJobMixin:
                     connection.execute("DELETE FROM worktree_ownership WHERE ticket_id = ?", (ticket_id,))
                     connection.execute("DELETE FROM leases WHERE ticket_id = ?", (ticket_id,))
                     next_version = _transition_ticket(
-                        connection, ticket_id, expected_version=ticket["version"],
+                        connection, ticket_id, actor=actor, expected_version=ticket["version"],
                         from_statuses=(ticket["status"],),
                         changes={"status": TicketStatus.BLOCKED, "blocked_reason": summary,
                                  "updated_at": timestamp},
@@ -510,7 +510,7 @@ class PlannerJobMixin:
                 ),
             )
             _transition_ticket(
-                connection, ticket["ticket_id"], expected_version=ticket["version"],
+                connection, ticket["ticket_id"], actor=actor, expected_version=ticket["version"],
                 from_statuses=(TicketStatus.BLOCKED, TicketStatus.REWORK),
                 changes={"status": next_status, "blocked_reason": None,
                          "updated_at": timestamp},

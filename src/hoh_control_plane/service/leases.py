@@ -88,7 +88,7 @@ class LeaseMixin:
                 self._retire_expired_jobs(connection, lease)
                 connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease["lease_id"],))
                 next_version = _transition_ticket(
-                    connection, ticket["ticket_id"], expected_version=ticket["version"],
+                    connection, ticket["ticket_id"], actor=actor, expected_version=ticket["version"],
                     from_statuses=(ticket["status"],),
                     changes={"status": fallback, "updated_at": _iso(timestamp)},
                 )
@@ -318,7 +318,7 @@ class LeaseMixin:
                 ),
             )
             next_version = _transition_ticket(
-                connection, ticket_id, expected_version=ticket["version"],
+                connection, ticket_id, actor=actor, expected_version=ticket["version"],
                 from_statuses=allowed_statuses,
                 changes={"status": next_status, "updated_at": _iso(timestamp)},
             )
@@ -470,15 +470,16 @@ class LeaseMixin:
                 if lease["role"] == Role.QA.value
                 else TicketStatus.READY
             )
+            recovery = Actor("lease-recovery", Role.ADMIN, frozenset({"*"}))
             _transition_ticket(
-                connection, ticket_id, expected_version=current["version"],
+                connection, ticket_id, actor=recovery, expected_version=current["version"],
                 from_statuses=(current["status"],),
                 changes={"status": fallback, "updated_at": _iso()},
             )
             project_id = self._project_for_ticket(connection, ticket_id)
             self._queue_ticket(
                 connection,
-                Actor("lease-recovery", Role.ADMIN, frozenset({"*"})),
+                recovery,
                 project_id,
                 self._ticket(connection, ticket_id),
             )

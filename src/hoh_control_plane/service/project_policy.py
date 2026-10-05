@@ -376,7 +376,7 @@ class ProjectPolicyMixin:
                 )
             timestamp = _iso()
             next_version = _transition_ticket(
-                connection, ticket_id, expected_version=ticket["version"],
+                connection, ticket_id, actor=actor, expected_version=ticket["version"],
                 from_statuses=(TicketStatus.BACKLOG, TicketStatus.READY, TicketStatus.BLOCKED),
                 changes={"validation_contract": json.dumps(normalized), "updated_at": timestamp},
             )

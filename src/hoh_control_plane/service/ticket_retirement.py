@@ -76,7 +76,7 @@ class TicketRetirementMixin:
             self._close_ticket_dispatch(connection, ticket_id, timestamp)
             connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease["lease_id"],))
             _transition_ticket(
-                connection, ticket_id, expected_version=ticket["version"],
+                connection, ticket_id, actor=actor, expected_version=ticket["version"],
                 from_statuses=(
                     TicketStatus.DEV_IN_PROGRESS,
                     TicketStatus.QA_IN_PROGRESS,
@@ -375,7 +375,7 @@ class TicketRetirementMixin:
                     connection, ticket_id, request["request_id"], timestamp
                 )
                 next_version = _transition_ticket(
-                    connection, ticket_id, expected_version=ticket["version"],
+                    connection, ticket_id, actor=actor, expected_version=ticket["version"],
                     from_statuses=(ticket["status"],),
                     changes={"status": request["target_status"], "blocked_reason": None,
                              "updated_at": timestamp},
@@ -588,7 +588,7 @@ class TicketRetirementMixin:
             timestamp = _iso()
             closed_offers = self._close_ticket_dispatch(connection, ticket_id, timestamp)
             next_version = _transition_ticket(
-                connection, ticket_id, expected_version=ticket["version"],
+                connection, ticket_id, actor=actor, expected_version=ticket["version"],
                 from_statuses=allowed_statuses,
                 changes={"status": next_status, "updated_at": timestamp},
             )

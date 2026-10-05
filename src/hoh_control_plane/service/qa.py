@@ -639,7 +639,7 @@ class QaMixin:
         """Stop offers for source work and preserve the candidate for a guarded retry."""
         timestamp = _iso()
         next_version = _transition_ticket(
-            connection, ticket["ticket_id"], expected_version=ticket["version"],
+            connection, ticket["ticket_id"], actor=actor, expected_version=ticket["version"],
             from_statuses=(ticket["status"],),
             changes={"status": TicketStatus.BLOCKED, "blocked_reason": "qa.infrastructure/" + reason,
                      "updated_at": timestamp},
@@ -948,7 +948,7 @@ class QaMixin:
                     else "qa.infrastructure/insufficient_evidence"
                 )
             next_version = _transition_ticket(
-                connection, ticket_id, expected_version=ticket["version"],
+                connection, ticket_id, actor=actor, expected_version=ticket["version"],
                 from_statuses=(TicketStatus.QA_IN_PROGRESS,), changes=changes,
             )
             connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease_id,))

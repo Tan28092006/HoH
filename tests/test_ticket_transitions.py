@@ -14,12 +14,13 @@ from pathlib import Path
 
 import pytest
 
-from hoh_control_plane.domain import ConflictError, Role, TicketStatus
+from hoh_control_plane.domain import Actor, ConflictError, Role, TicketStatus
 from hoh_control_plane.service._common import _transition_ticket
 from hoh_control_plane.store import SCHEMA, SQLiteStore, StoreIntegrityError
 from hoh_control_plane.store_schema import TICKET_STATUS_CHECK, TICKET_STATUSES
 
 SOURCE = Path(__file__).resolve().parents[1] / "src" / "hoh_control_plane"
+PLANNER = Actor("planner-01", Role.PLANNER, frozenset({"project-1"}))
 
 
 def _ticket_row(service, ticket_id: str) -> dict:
@@ -39,7 +40,7 @@ def test_a_stale_version_is_refused_by_the_update_itself(service, seeded) -> Non
                 "UPDATE tickets SET version = version + 1 WHERE ticket_id = ?", (ticket["ticket_id"],)
             )
             _transition_ticket(
-                connection, ticket["ticket_id"], expected_version=ticket["version"],
+                connection, ticket["ticket_id"], actor=PLANNER, expected_version=ticket["version"],
                 from_statuses=(TicketStatus.READY,),
                 changes={"status": TicketStatus.BLOCKED, "blocked_reason": "stale"},
             )
@@ -56,7 +57,7 @@ def test_a_status_the_caller_did_not_check_is_refused(service, seeded) -> None:
     with pytest.raises(ConflictError):
         with service.store.connection(immediate=True) as connection:
             _transition_ticket(
-                connection, ticket["ticket_id"], expected_version=ticket["version"],
+                connection, ticket["ticket_id"], actor=PLANNER, expected_version=ticket["version"],
                 from_statuses=(TicketStatus.BACKLOG, TicketStatus.BLOCKED),
                 changes={"status": TicketStatus.READY},
             )
@@ -67,7 +68,7 @@ def test_a_matching_transition_bumps_the_version_once(service, seeded) -> None:
     ticket = seeded["ticket"]
     with service.store.connection(immediate=True) as connection:
         new_version = _transition_ticket(
-            connection, ticket["ticket_id"], expected_version=ticket["version"],
+            connection, ticket["ticket_id"], actor=PLANNER, expected_version=ticket["version"],
             from_statuses=(TicketStatus.READY,),
             changes={"status": TicketStatus.BLOCKED, "blocked_reason": "waiting"},
         )
@@ -81,12 +82,12 @@ def test_only_lifecycle_columns_can_be_written(service, seeded) -> None:
     with service.store.connection(immediate=True) as connection:
         with pytest.raises(ValueError):
             _transition_ticket(
-                connection, seeded["ticket"]["ticket_id"], expected_version=1,
+                connection, seeded["ticket"]["ticket_id"], actor=PLANNER, expected_version=1,
                 from_statuses=(TicketStatus.READY,), changes={"version": 99},
             )
         with pytest.raises(ValueError):
             _transition_ticket(
-                connection, seeded["ticket"]["ticket_id"], expected_version=1,
+                connection, seeded["ticket"]["ticket_id"], actor=PLANNER, expected_version=1,
                 from_statuses=(), changes={"status": TicketStatus.BLOCKED},
             )
 
