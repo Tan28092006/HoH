@@ -767,6 +767,82 @@ class GitWorktreeManager:
             raise ValidationError("Candidate cannot fast-forward the default branch")
         return True, candidate
 
+    def rebase_candidate(
+        self,
+        *,
+        repository_path: str,
+        project_id: str,
+        ticket_id: str,
+        candidate_commit: str,
+        onto_commit: str,
+        keep_ref: str,
+    ) -> str | None:
+        """Replay a one-commit candidate onto ``onto_commit`` in a disposable checkout.
+
+        Never touches a developer worktree or the shared checkout: the
+        cherry-pick runs in a private integration snapshot of ``onto_commit``,
+        and only the resulting commit object is pushed back, under
+        ``keep_ref``, so QA and the gate can resolve it. Author and message are
+        kept. Returns the new commit, or None when the patch does not apply
+        cleanly (a conflict or an empty result).
+        """
+        repository = Path(self.validate_repository(repository_path))
+        candidate = self._resolve_commit(repository, candidate_commit)
+        onto = self._resolve_commit(repository, onto_commit)
+        with self.integration_checkout(
+            repository_path=repository_path, project_id=project_id,
+            ticket_id=ticket_id, candidate_commit=onto,
+        ) as checkout:
+            path = Path(checkout)
+            self._git(path, '-c', 'protocol.file.allow=always', 'fetch', '--no-tags',
+                      str(repository), candidate)
+            picked = self._git(
+                path, '-c', 'core.hooksPath=', '-c', 'user.name=HoH Integrator',
+                '-c', 'user.email=hoh-integrator@localhost', 'cherry-pick', '--no-rerere-autoupdate',
+                candidate, check=False,
+            )
+            if picked.returncode != 0:
+                return None
+            rebased = self._resolve_commit(path, 'HEAD')
+            if self._resolve_commit(path, 'HEAD^') != onto:
+                return None
+            self._git(path, '-c', 'protocol.file.allow=always', 'push', '--no-verify', '--force',
+                      str(repository), f'{rebased}:{keep_ref}')
+        return rebased
+
+    def cas_fast_forward(
+        self,
+        *,
+        repository_path: str,
+        default_branch: str,
+        expected_old_commit: str,
+        new_commit: str,
+    ) -> tuple[bool, str]:
+        """Move the default branch from ``expected_old_commit`` to ``new_commit`` atomically.
+
+        ``git update-ref <ref> <new> <old>`` is a compare-and-set: Git refuses
+        it when the branch no longer names ``expected_old_commit``, so a commit
+        that lands between the check and the write is never overwritten. When
+        the branch is checked out (and clean), its index and working tree are
+        then carried from old to new with a two-tree ``read-tree``.
+        """
+        repository = Path(self.validate_repository(repository_path))
+        ref = f"refs/heads/{default_branch}"
+        old = self._resolve_commit(repository, expected_old_commit)
+        new = self._resolve_commit(repository, new_commit)
+        if not self._is_ancestor(repository, old, new):
+            raise ValidationError("Rebased candidate does not descend from the expected mainline")
+        checked_out = self._git(repository, "branch", "--show-current").stdout.strip() == default_branch
+        if checked_out and self._git(repository, 'status', '--porcelain').stdout.strip():
+            raise ValidationError('Repository must be clean before integration')
+        updated = self._git(repository, "update-ref", "-m", "hoh: land rebased candidate",
+                            ref, new, old, check=False)
+        if updated.returncode != 0:
+            return False, self._resolve_commit(repository, ref)
+        if checked_out:
+            self._git(repository, "read-tree", "-m", "-u", old, new)
+        return True, new
+
     def commit_is_on_branch(
         self, *, repository_path: str, default_branch: str, commit: str
     ) -> bool:

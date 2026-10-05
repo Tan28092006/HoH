@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 from hoh_control_plane.service.qa import _INFRASTRUCTURE_OUTCOMES
@@ -12,6 +13,7 @@ from hoh_control_plane.service._common import (
     CLOSED_TICKET_STATUSES,
     ConflictError,
     DomainError,
+    MAX_AUTO_REBASES,
     MERGE_JOB_STUCK_SECONDS,
     PlannerJobType,
     ReleasePolicyError,
@@ -317,10 +319,13 @@ class IntegrationMixin:
             )
             candidate = self._current_integration_candidate(connection, ticket)
             candidate_id = candidate["candidate_id"]
+            # A derived candidate whose drift was disjoint carries the QA verdict
+            # of the candidate it was rebased from; regression runs stay its own.
+            evidence_candidate_id = candidate.get("qa_evidence_from") or candidate_id
             findings = [
                 _row(row)
                 for row in connection.execute(
-                    "SELECT * FROM qa_findings WHERE candidate_id = ?", (candidate_id,)
+                    "SELECT * FROM qa_findings WHERE candidate_id = ?", (evidence_candidate_id,)
                 ).fetchall()
             ]
             # One verdict writes its complete finding batch with one timestamp.
@@ -333,7 +338,7 @@ class IntegrationMixin:
             evidence = [
                 _row(row)
                 for row in connection.execute(
-                    "SELECT * FROM evidence WHERE candidate_id = ?", (candidate_id,)
+                    "SELECT * FROM evidence WHERE candidate_id = ?", (evidence_candidate_id,)
                 ).fetchall()
                 if row["evidence_id"] in current_evidence_ids
             ]
@@ -363,7 +368,7 @@ class IntegrationMixin:
                 ).fetchall()
             ]
             qa_verified = _audit_event_has_field(
-                connection, ticket_id, "ticket.verified", "candidate_id", candidate_id
+                connection, ticket_id, "ticket.verified", "candidate_id", evidence_candidate_id
             )
         return {
             "ticket": ticket,
@@ -379,7 +384,9 @@ class IntegrationMixin:
             "qa_verified": qa_verified,
         }
 
-    def _require_release_evidence(self, snapshot: dict[str, Any]) -> None:
+    def _require_release_evidence(
+        self, snapshot: dict[str, Any], *, require_regression_run: bool = True
+    ) -> None:
         """Judge release eligibility from durable evidence only, never from claims."""
         ticket = snapshot["ticket"]
         candidate = snapshot["candidate"]
@@ -427,14 +434,16 @@ class IntegrationMixin:
                 "The candidate has no registered regression command to satisfy",
                 {"reason": "regression_run_missing"},
             )
+        # A rebased candidate has no run of its own until its gate executes the
+        # suite; the check after the gate (``_finish_gate_and_merge``) requires it.
         digest = hashlib.sha256("\0".join(profile["test_command"]).encode()).hexdigest()
         matching = [run for run in snapshot["test_runs"] if run["command_digest"] == digest]
-        if not matching:
+        if not matching and require_regression_run:
             raise ReleasePolicyError(
                 "No registered regression run was recorded against this candidate",
                 {"reason": "regression_run_missing"},
             )
-        if not any(run["exit_code"] == 0 and not run["timed_out"] for run in matching):
+        if matching and not any(run["exit_code"] == 0 and not run["timed_out"] for run in matching):
             raise ReleasePolicyError(
                 "The registered regression run did not complete successfully",
                 {"reason": "regression_run_failed"},
@@ -682,7 +691,10 @@ class IntegrationMixin:
             return self.fail_queued_merge(merge_job_id, preflight_error)
         try:
             snapshot = self._release_policy_snapshot(actor, job["ticket_id"])
-            self._require_release_evidence(snapshot)
+            # A rebased candidate carrying QA over gets its regression run from
+            # this job's gate; ``_finish_gate_and_merge`` then requires it.
+            self._require_release_evidence(
+                snapshot, require_regression_run=not candidate.get("qa_evidence_from"))
             if snapshot["candidate"]["candidate_id"] != job["candidate_id"]:
                 raise ConflictError("Queued candidate is no longer the current policy snapshot")
             profile = snapshot["profile"]
@@ -705,7 +717,8 @@ class IntegrationMixin:
                         "candidate_already_on_main: the candidate is already on the default "
                         "branch; record the landing with record_external_landing.",
                     )
-                return self._complete_queued_merge(merge_job_id, False, current_main)
+                return self._auto_rebase_drifted(
+                    merge_job_id, job, actor, ticket, candidate, repository, project, current_main)
             reused = self._reusable_qa_run(job["candidate_id"], command, profile["timeout_seconds"])
         except DomainError as error:
             return self.fail_queued_merge(merge_job_id, str(error))
@@ -738,7 +751,145 @@ class IntegrationMixin:
             return self.fail_queued_merge(merge_job_id, str(error))
         return self._finish_gate_and_merge(
             merge_job_id, job, actor, candidate, repository, project, gate_run["test_run_id"],
-            gate_mode="executed")
+            gate_mode="executed_rebased" if candidate.get("derived_from") else "executed")
+
+    def _auto_rebase_drifted(self, merge_job_id, job, actor, ticket, candidate, repository, project,
+                             current_main: str) -> dict[str, Any]:
+        """Main moved under a queued candidate: rebase it server-side instead of rework.
+
+        The candidate's one commit is cherry-picked onto current main in a
+        private integration checkout. A clean result becomes a new derived
+        candidate (``derived_from``; parent = current main; same patch). When
+        the paths main changed since the old base are disjoint, by scope root,
+        from the candidate's paths, the QA verdict carries over
+        (``qa_evidence_from``) and this same merge job is re-queued, so the
+        normal gate executes the frozen suite on the rebased tree and the
+        landing is a compare-and-set ref update. Otherwise the derived
+        candidate goes to QA_READY. A conflict keeps today's rework path; the
+        ``MAX_AUTO_REBASES``th + 1 drift blocks the ticket for Planner.
+        Only drift onto a main HoH already observed is rebased: unobserved
+        outside work still closes the project through the drift path.
+        """
+        repository_path = repository["repository_path"]
+        with self.store.connection() as connection:
+            rebases = connection.execute(
+                "SELECT COUNT(*) AS n FROM candidates WHERE ticket_id = ? AND derived_from IS NOT NULL",
+                (job["ticket_id"],),
+            ).fetchone()["n"]
+            observed = connection.execute(
+                "SELECT observed_mainline_commit FROM project_repositories WHERE project_id = ?",
+                (job["project_id"],),
+            ).fetchone()
+            candidate_paths = [row["path"] for row in connection.execute(
+                "SELECT path FROM candidate_changed_paths WHERE candidate_id = ?",
+                (candidate["candidate_id"],),
+            ).fetchall()]
+        if observed is None or observed["observed_mainline_commit"] != current_main:
+            return self._complete_queued_merge(merge_job_id, False, current_main)
+        if rebases >= MAX_AUTO_REBASES:
+            return self._complete_queued_merge(
+                merge_job_id, False, current_main, drift_budget_exhausted=True)
+        derived_id_hint = f"{candidate['candidate_id']}-r{rebases + 1}"
+        try:
+            rebased = self.git_worktrees.rebase_candidate(
+                repository_path=repository_path, project_id=job["project_id"],
+                ticket_id=job["ticket_id"], candidate_commit=candidate["commit_sha"],
+                onto_commit=current_main,
+                keep_ref=f"refs/hoh/rebased/{job['ticket_id']}/{derived_id_hint}",
+            )
+            main_paths = self.git_worktrees.changed_paths(
+                repository_path=repository_path, base_commit=candidate["base_commit"],
+                candidate_commit=current_main)
+            rebased_paths = None if rebased is None else self.git_worktrees.changed_paths(
+                repository_path=repository_path, base_commit=current_main, candidate_commit=rebased)
+        except DomainError as error:
+            return self.fail_queued_merge(merge_job_id, str(error))
+        if rebased is None:
+            return self._complete_queued_merge(
+                merge_job_id, False, current_main,
+                drift_reason=("Mainline advanced after this candidate was based and its change "
+                              "does not apply cleanly to current main; rebase it and submit a "
+                              "new QA candidate."))
+        shared = [path for path in main_paths
+                  if "/" not in path or path.lower().startswith(self._SHARED_PATH_PREFIXES)]
+        carry_qa = not shared and not any(
+            self._scope_roots_overlap(left, right) for left in main_paths for right in candidate_paths)
+        try:
+            return self._record_rebased_candidate(
+                merge_job_id, job, actor, candidate, current_main, rebased, rebased_paths,
+                main_paths, carry_qa, rebases, derived_id_hint)
+        except DomainError as error:
+            return self.fail_queued_merge(merge_job_id, str(error))
+
+    def _record_rebased_candidate(self, merge_job_id, job, actor, candidate, current_main, rebased,
+                                  rebased_paths, main_paths, carry_qa, rebases,
+                                  derived_id_hint) -> dict[str, Any]:
+        with self.store.connection(immediate=True) as connection:
+            current_job = self._merge_job(connection, merge_job_id)
+            current_ticket = self._ticket(connection, job["ticket_id"])
+            if (current_job["status"] != "RUNNING" or current_ticket["status"] != TicketStatus.MERGE_READY.value
+                    or current_ticket["version"] != job["expected_version"]
+                    or current_ticket["candidate_commit"] != candidate["commit_sha"]):
+                raise ConflictError("Ticket or merge job changed while the candidate was rebased")
+            self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
+            timestamp = _iso()
+            derived_id = _id(connection, "cand")
+            connection.execute(
+                """INSERT INTO candidates
+                   (candidate_id, ticket_id, base_commit, commit_sha, branch_ref, developer_claims,
+                    submitted_by, submitted_at, frozen_at, derived_from, qa_evidence_from)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (derived_id, job["ticket_id"], current_main, rebased,
+                 f"refs/hoh/rebased/{job['ticket_id']}/{derived_id_hint}",
+                 candidate["developer_claims"] if isinstance(candidate["developer_claims"], str)
+                 else json.dumps(candidate["developer_claims"]),
+                 actor.agent_id, timestamp, timestamp, candidate["candidate_id"],
+                 (candidate.get("qa_evidence_from") or candidate["candidate_id"]) if carry_qa else None),
+            )
+            for path in rebased_paths:
+                connection.execute(
+                    "INSERT INTO candidate_changed_paths (candidate_id, path) VALUES (?, ?)",
+                    (derived_id, path))
+            connection.execute(
+                """INSERT INTO candidate_test_profiles (candidate_id, test_command, timeout_seconds, configured_at)
+                   SELECT ?, test_command, timeout_seconds, configured_at
+                   FROM candidate_test_profiles WHERE candidate_id = ?""",
+                (derived_id, candidate["candidate_id"]))
+            payload = {"candidate_id": derived_id, "derived_from": candidate["candidate_id"],
+                       "commit_sha": rebased, "base_commit": current_main,
+                       "qa_reused": carry_qa, "main_changed_paths": main_paths[:50],
+                       "auto_rebase": rebases + 1, "merge_job_id": merge_job_id}
+            if carry_qa:
+                next_version = _transition_ticket(
+                    connection, job["ticket_id"], actor=actor, expected_version=current_ticket["version"],
+                    from_statuses=(TicketStatus.MERGE_READY,),
+                    changes={"candidate_commit": rebased, "base_commit": current_main,
+                             "updated_at": timestamp})
+                self._event(connection, actor, job["project_id"], "candidate.rebased", "ticket",
+                            job["ticket_id"], next_version, payload)
+                # Same job, same lease: the Integrator keeps polling it. The
+                # supervisor re-admits it through the test slot, since the
+                # derived candidate has no QA run of its own to reuse.
+                connection.execute("DELETE FROM merge_intents WHERE merge_job_id = ?", (merge_job_id,))
+                connection.execute(
+                    """UPDATE merge_jobs SET status = 'QUEUED', started_at = NULL, candidate_id = ?,
+                       expected_version = ? WHERE merge_job_id = ?""",
+                    (derived_id, next_version, merge_job_id))
+                return self._merge_job(connection, merge_job_id)
+            next_version = _transition_ticket(
+                connection, job["ticket_id"], actor=actor, expected_version=current_ticket["version"],
+                from_statuses=(TicketStatus.MERGE_READY,),
+                changes={"status": TicketStatus.QA_READY, "candidate_commit": rebased,
+                         "base_commit": current_main, "blocked_reason": None, "updated_at": timestamp})
+            self._event(connection, actor, job["project_id"], "candidate.rebased", "ticket",
+                        job["ticket_id"], next_version, payload)
+            connection.execute("DELETE FROM leases WHERE lease_id = ?", (job["lease_id"],))
+            connection.execute(
+                """UPDATE merge_jobs SET status = 'COMPLETED', merge_status = 'rebased_for_qa',
+                   mainline_commit = ?, completed_at = ? WHERE merge_job_id = ?""",
+                (current_main, timestamp, merge_job_id))
+            self._queue_ticket(connection, actor, job["project_id"], self._ticket(connection, job["ticket_id"]))
+            return self._merge_job(connection, merge_job_id)
 
     def merge_gate_reuses_qa_run(self, merge_job_id: str) -> bool:
         """Whether this merge's gate will reuse a QA run rather than run the suite.
@@ -806,12 +957,22 @@ class IntegrationMixin:
         except DomainError as error:
             return self.fail_queued_merge(merge_job_id, str(error))
         try:
-            merged, mainline_commit = self.git_worktrees.fast_forward_default_branch(
-                repository_path=repository["repository_path"],
-                default_branch=project["default_branch"],
-                expected_base_commit=candidate["base_commit"],
-                candidate_commit=candidate["commit_sha"],
-            )
+            if candidate.get("derived_from"):
+                # A server-rebased tree lands only by compare-and-set: Git
+                # refuses the ref write if main moved since the gate's base.
+                merged, mainline_commit = self.git_worktrees.cas_fast_forward(
+                    repository_path=repository["repository_path"],
+                    default_branch=project["default_branch"],
+                    expected_old_commit=candidate["base_commit"],
+                    new_commit=candidate["commit_sha"],
+                )
+            else:
+                merged, mainline_commit = self.git_worktrees.fast_forward_default_branch(
+                    repository_path=repository["repository_path"],
+                    default_branch=project["default_branch"],
+                    expected_base_commit=candidate["base_commit"],
+                    candidate_commit=candidate["commit_sha"],
+                )
             return self._complete_queued_merge(merge_job_id, merged, mainline_commit)
         except DomainError as error:
             # Git may already have changed. Preserve the intent and reconcile
@@ -917,7 +1078,8 @@ class IntegrationMixin:
 
     def _complete_queued_merge(
         self, merge_job_id: str, merged: bool, mainline_commit: str, *, recovered: bool = False,
-        regression_failure: str | None = None,
+        regression_failure: str | None = None, drift_reason: str | None = None,
+        drift_budget_exhausted: bool = False,
     ) -> dict[str, Any]:
         with self.store.connection(immediate=True) as connection:
             job = self._merge_job(connection, merge_job_id)
@@ -950,7 +1112,12 @@ class IntegrationMixin:
             next_version = ticket["version"] + 1
             connection.execute("DELETE FROM leases WHERE lease_id = ?", (job["lease_id"],))
             if not merged:
-                reason = regression_failure or (
+                if drift_budget_exhausted:
+                    drift_reason = (
+                        f"drift_budget_exhausted: mainline moved again after {MAX_AUTO_REBASES} "
+                        "automatic rebases; Planner decides whether to rebase, re-scope or drop it."
+                    )
+                reason = regression_failure or drift_reason or (
                     "Mainline advanced after this candidate was based; rebase the candidate "
                     "and submit a new QA candidate."
                 )
@@ -971,8 +1138,9 @@ class IntegrationMixin:
                 _transition_ticket(
                     connection, job["ticket_id"], actor=actor, expected_version=ticket["version"],
                     from_statuses=(TicketStatus.MERGE_READY,),
-                    changes={"status": TicketStatus.REWORK, "blocked_reason": reason,
-                             "updated_at": timestamp},
+                    changes={"status": (TicketStatus.BLOCKED if drift_budget_exhausted
+                                        else TicketStatus.REWORK),
+                             "blocked_reason": reason, "updated_at": timestamp},
                 )
                 self._event(
                     connection, actor, job["project_id"],
