@@ -25,6 +25,9 @@ JOBS = {
     'provision': ('worktree_provision_jobs', 'provision_id', 'execute_queued_worktree_provision', 'fail_queued_worktree_provision'),
     'submission': ('candidate_submission_jobs', 'submission_id', 'execute_queued_candidate_submission', 'fail_queued_candidate_submission'),
     'merge': ('merge_jobs', 'merge_job_id', 'execute_queued_merge', 'fail_queued_merge'),
+    # The check of main after a landing (service/run_guardrails.py); it runs the
+    # project suite, so it takes the test slot like a QA run.
+    'mainline': ('mainline_checks', 'check_id', 'execute_queued_mainline_check', 'fail_queued_mainline_check'),
 }
 ADMIN = Actor('hoh-supervisor', Role.ADMIN, frozenset({'*'}))
 TEST_LANE, MERGE_LANE, GIT_LANE = 'test', 'merge', 'git'
@@ -118,7 +121,7 @@ class Supervisor:
         so the answer cannot turn false between admission and execution; the
         worker still re-checks and leaves the job queued if it would.
         """
-        if kind == 'qa':
+        if kind in {'qa', 'mainline'}:
             return TEST_LANE
         if kind == 'merge':
             try:
@@ -127,6 +130,12 @@ class Supervisor:
                 reuses = False  # Unknown or unreadable: take the conservative lane.
             return MERGE_LANE if reuses else TEST_LANE
         return GIT_LANE
+
+    def _merge_admitted(self, identifier):
+        try:
+            return self.service.merge_queue_admits(identifier)
+        except Exception:
+            return True  # The worker asks again before it touches Git.
 
     def _pending(self):
         # Constants define all SQL identifiers. Limit each source before sorting.
@@ -198,8 +207,10 @@ class Supervisor:
             if job is None or job['status'] not in {'QUEUED', 'RUNNING'}:
                 return True
             with self.service.store.connection(immediate=True) as db:
-                lease = db.execute('SELECT expires_at FROM leases WHERE lease_id = ?', (job['lease_id'],)).fetchone()
                 db.execute('UPDATE worker_executions SET heartbeat_at = ? WHERE execution_id = ?', (now(), execution_id))
+                if 'lease_id' not in job:
+                    return False  # A main check belongs to no lease.
+                lease = db.execute('SELECT expires_at FROM leases WHERE lease_id = ?', (job['lease_id'],)).fetchone()
             return lease is None or datetime.fromisoformat(lease['expires_at'].replace('Z', '+00:00')) <= datetime.now(UTC)
         outcome = 'worker error'
         arguments = [sys.executable, '-m', 'hoh_control_plane.managed_worker',
@@ -257,6 +268,8 @@ class Supervisor:
                     continue
                 if key[0] == 'merge' and any(k[0] == 'merge' for k in self.active):
                     continue
+                if key[0] == 'merge' and not self._merge_admitted(key[1]):
+                    continue  # The project's merge queue is paused; the job waits QUEUED.
                 self.lanes[key] = lane
                 future = self._submit(*key)
                 if future is None:

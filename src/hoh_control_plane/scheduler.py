@@ -19,8 +19,9 @@ def sweep_once(database_path: str | Path) -> dict[str, object]:
     scheduler = Actor("hoh-scheduler", Role.ADMIN, frozenset({"*"}))
     recovered = service.sweep_expired_leases(scheduler)
     # Git is observed here too, not only while a Planner waits: a commit opens
-    # its reconciliation, a candidate that landed outside HoH and a merge job
-    # recovery cannot settle each reach Planner as a job. Throttled per project
+    # its reconciliation, a candidate that landed outside HoH is recorded as an
+    # ungated landing by system:sweep, and a merge job recovery cannot settle
+    # reaches Planner as a job. Throttled per project
     # by the same observed_at the Planner wait uses. Before dispatch, so work is
     # not offered past a barrier this pass opened.
     repositories = service.sweep_repositories(scheduler)
@@ -59,10 +60,15 @@ def main() -> None:
         if result["count"]:
             print(f"Requeued {result['count']} expired lease(s).", flush=True)
         repositories = result["repositories"]
-        landed = len(repositories["candidates_already_on_main"])
+        landed = repositories["candidates_already_on_main"]
+        recorded = sum(1 for item in landed if item.get("recorded"))
+        raised = len(landed) - recorded
         stuck = len(repositories["stuck_merge_jobs"])
-        if landed or stuck:
-            print(f"Raised {landed} candidate(s) already on the default branch and "
+        if recorded:
+            print(f"Recorded {recorded} landing(s) already on the default branch as "
+                  "ungated (system:sweep).", flush=True)
+        if raised or stuck:
+            print(f"Raised {raised} candidate(s) already on the default branch and "
                   f"{stuck} stuck merge job(s) for Planner.", flush=True)
         if repositories["failed"]:
             # Only the error type: a Git message can carry a remote URL.

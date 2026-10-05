@@ -44,8 +44,11 @@ class SchemaVersionError(SchemaMigrationError):
 #        the merge shadow partition (repository_reconciliations.scope,
 #        frozen_ticket_ids, shadow_*), agent_presence.session_started_at and
 #        ticket_usage_reports.
-#   3 -- candidates.derived_from and candidates.qa_evidence_from: the
-#        candidate a queued merge rebased onto a moved main (wave 7B).
+#   3 -- wave 7: candidates.derived_from and candidates.qa_evidence_from (a
+#        queued candidate rebased onto a moved main, 7B);
+#        tickets.planning_base_stale (7C-1); project_run_guardrails and
+#        mainline_checks (7C-2); agent model_family, ticket risk tiers and
+#        high-risk approvals (7C-3).
 SCHEMA_VERSION = 3
 
 

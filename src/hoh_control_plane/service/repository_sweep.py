@@ -7,6 +7,8 @@ from hoh_control_plane.service._common import (
     REPOSITORY_OBSERVE_SECONDS,
     Actor,
     Any,
+    ConflictError,
+    DomainError,
     InterventionSeverity,
     Path,
     PlannerJobType,
@@ -22,6 +24,8 @@ from hoh_control_plane.service._common import (
 
 #: Reasons the sweep gives Planner. Both open an ``integration_conflict``
 #: Planner job whose summary starts with the reason.
+#: The actor a landing recorded by the sweep is attributed to.
+SWEEP_ACTOR_ID = "system:sweep"
 CANDIDATE_ALREADY_ON_MAIN = "candidate_already_on_main"
 MERGE_JOB_STUCK = "merge_job_stuck"
 _CANDIDATE_ON_MAIN_EVENT = "repository.candidate_already_on_main"
@@ -66,10 +70,11 @@ class RepositorySweepMixin:
         For each project whose repository a Planner has observed before and that
         is due (``REPOSITORY_OBSERVE_SECONDS``): run the ordinary repository sync,
         so a new commit opens its reconciliation even with no Planner chat open;
-        flag open tickets whose candidate is already on the default branch; and
-        escalate merge jobs that outlived the worker timeout and that recovery
-        cannot settle. Nothing is recorded on Planner's behalf: a landing stays
-        an explicit, ungated record. A project that was never observed is left
+        record, as ungated landings attributed to ``system:sweep``, open tickets
+        whose candidate work is already on the default branch (by ancestry or by
+        patch-id); and escalate merge jobs that outlived the worker timeout and
+        that recovery cannot settle. A recorded landing is never a QA approval.
+        A project that was never observed is left
         alone, because its first observation opens the baseline reconciliation
         and belongs to the Planner that will resolve it. One project's failure
         never stops the others.
@@ -126,11 +131,17 @@ class RepositorySweepMixin:
     def _flag_candidates_already_on_main(
         self, actor: Actor, project: dict[str, Any]
     ) -> list[dict[str, Any]]:
-        """Open one Planner job per (ticket, candidate) whose candidate Git already has.
+        """Record, as ungated, open tickets whose candidate work is already on main.
 
-        Mismatch class 1 of the review: classifiable by one ancestry check, and
-        otherwise reported as drift or left as outstanding work. A ticket with a
-        queued or running merge is skipped; the merge path settles that itself.
+        Two Git facts count as landed: the candidate commit is reachable from the
+        default branch, or a default-branch commit's own diff has the same stable
+        patch-id as ``git diff base candidate`` (an applied diff or a cherry-pick).
+        Either is recorded through ``record_external_landing`` as an ungated
+        landing attributed to ``system:sweep``: it certifies no QA verdict and no
+        acceptance criterion. Work in flight (a live lease or job) is retried on a
+        later sweep; a landing the service refuses for any other reason falls
+        back to one Planner job, as before. A ticket with a queued or running
+        merge is skipped; the merge path settles that itself.
         """
         project_id = project["project_id"]
         placeholders = ", ".join("?" for _ in _TERMINAL)
@@ -138,7 +149,11 @@ class RepositorySweepMixin:
             rows = [
                 dict(row) for row in connection.execute(
                     f"""
-                    SELECT t.ticket_id, t.candidate_commit FROM tickets t
+                    SELECT t.ticket_id, t.candidate_commit, t.version,
+                           (SELECT c.base_commit FROM candidates c
+                            WHERE c.ticket_id = t.ticket_id AND c.commit_sha = t.candidate_commit
+                            ORDER BY c.submitted_at DESC LIMIT 1) AS candidate_base
+                    FROM tickets t
                     JOIN features f ON f.feature_id = t.feature_id
                     WHERE f.project_id = ? AND t.candidate_commit IS NOT NULL
                       AND t.status NOT IN ({placeholders})
@@ -163,73 +178,125 @@ class RepositorySweepMixin:
         repository_path = project["repository_path"]
         branch = project["default_branch"]
         head = self.git_worktrees._resolve_commit(Path(repository_path), f"refs/heads/{branch}")
-        landed = [
-            row for row in rows
+        landed: list[tuple[dict[str, Any], str, str]] = []
+        for row in rows:
             if self.git_worktrees.commit_is_on_branch(
                 repository_path=repository_path, default_branch=branch,
                 commit=row["candidate_commit"],
+            ):
+                landed.append((row, row["candidate_commit"], "ancestry"))
+                continue
+            base = row.get("candidate_base")
+            if not base or base == head:
+                continue
+            equivalent = self.git_worktrees.equivalent_landing(
+                repository_path=repository_path, default_branch=branch,
+                base_commit=base, candidate_commit=row["candidate_commit"],
             )
-        ]
+            if equivalent:
+                landed.append((row, equivalent, "patch_id"))
+        sweep_actor = Actor(SWEEP_ACTOR_ID, Role.ADMIN, frozenset({project_id}))
         flagged: list[dict[str, Any]] = []
-        for row in landed:
+        for row, landed_commit, match in landed:
             ticket_id, commit = row["ticket_id"], row["candidate_commit"]
-            with self.store.connection(immediate=True) as connection:
-                ticket = self._ticket(connection, ticket_id)
-                # Git was asked outside the lock; the ticket may have moved since.
-                if ticket["status"] in _TERMINAL or ticket["candidate_commit"] != commit:
-                    continue
-                if _audit_event_has_field(
-                    connection, ticket_id, _CANDIDATE_ON_MAIN_EVENT, "candidate_commit", commit
-                ):
-                    continue
-                if connection.execute(
-                    "SELECT 1 FROM merge_jobs WHERE ticket_id = ? AND status IN ('QUEUED', 'RUNNING')",
-                    (ticket_id,),
-                ).fetchone():
-                    continue
-                candidate = connection.execute(
-                    "SELECT candidate_id FROM candidates WHERE ticket_id = ? AND commit_sha = ? "
-                    "ORDER BY submitted_at DESC LIMIT 1",
-                    (ticket_id, commit),
-                ).fetchone()
-                candidate_id = candidate["candidate_id"] if candidate else None
-                self._event(
-                    connection, actor, project_id, _CANDIDATE_ON_MAIN_EVENT, "ticket", ticket_id,
-                    ticket["version"],
-                    {
-                        "reason": CANDIDATE_ALREADY_ON_MAIN,
-                        "candidate_commit": commit,
-                        "candidate_id": candidate_id,
-                        "mainline_commit": head,
-                        "ticket_status": ticket["status"],
-                    },
-                )
-                planner_job = self._open_planner_job(
-                    connection, actor, project_id, ticket,
-                    job_type=PlannerJobType.INTEGRATION_CONFLICT,
-                    summary=(
-                        f"{CANDIDATE_ALREADY_ON_MAIN}: candidate {candidate_id or commit} of "
-                        f"{ticket_id} ({ticket['status']}) is reachable from {branch} at {head}, "
-                        "but HoH did not merge it. Nothing was recorded. If this is the "
-                        "delivered work, record it with planner.record_external_landing "
-                        "(ungated, during the pending reconciliation) and classify the ticket "
-                        "complete; otherwise decide a revert or rework."
-                    ),
-                    evidence_refs=[
-                        *([f"candidate:{candidate_id}"] if candidate_id else []),
-                        f"mainline:{head}",
-                    ],
-                    candidate_id=candidate_id,
-                    artifact_commit=head,
-                )
-            flagged.append({
-                "project_id": project_id,
-                "ticket_id": ticket_id,
+            detection = {
+                "recorded_by": SWEEP_ACTOR_ID,
+                "match": match,
                 "candidate_commit": commit,
+                "candidate_base": row.get("candidate_base"),
                 "mainline_commit": head,
-                "planner_job_id": planner_job["planner_job_id"],
+            }
+            how = (
+                "is reachable from " if match == "ancestry"
+                else f"has the same patch-id as {landed_commit} on "
+            )
+            try:
+                result = self.record_external_landing(
+                    sweep_actor, ticket_id, int(row["version"]), landed_commit,
+                    (
+                        f"Auto-recorded by {SWEEP_ACTOR_ID}: candidate {commit} of {ticket_id} "
+                        f"{how}{branch}. Ungated: this record certifies no QA verdict "
+                        "and no acceptance criterion."
+                    ),
+                    detection=detection,
+                )
+            except ConflictError:
+                # A live lease or job, a newer version, or a ticket that just
+                # closed: the next sweep sees the settled state and tries again.
+                continue
+            except DomainError as error:
+                planner_job = self._raise_candidate_on_main(
+                    actor, project_id, branch, head, ticket_id, commit, landed_commit, match,
+                    str(error),
+                )
+                if planner_job is not None:
+                    flagged.append({
+                        "project_id": project_id, "ticket_id": ticket_id,
+                        "candidate_commit": commit, "landed_commit": landed_commit,
+                        "match": match, "mainline_commit": head, "recorded": False,
+                        "planner_job_id": planner_job["planner_job_id"],
+                    })
+                continue
+            flagged.append({
+                "project_id": project_id, "ticket_id": ticket_id,
+                "candidate_commit": commit, "landed_commit": landed_commit,
+                "match": match, "mainline_commit": head, "recorded": True,
+                "gated": False,
+                "mainline_check_id": result.get("mainline_check_id"),
             })
         return flagged
+
+    def _raise_candidate_on_main(
+        self, actor: Actor, project_id: str, branch: str, head: str, ticket_id: str,
+        commit: str, landed_commit: str, match: str, refusal: str,
+    ) -> dict[str, Any] | None:
+        """The fallback when the service refused the automatic record: one Planner job."""
+        with self.store.connection(immediate=True) as connection:
+            ticket = self._ticket(connection, ticket_id)
+            # Git was asked outside the lock; the ticket may have moved since.
+            if ticket["status"] in _TERMINAL or ticket["candidate_commit"] != commit:
+                return None
+            if _audit_event_has_field(
+                connection, ticket_id, _CANDIDATE_ON_MAIN_EVENT, "candidate_commit", commit
+            ):
+                return None
+            candidate = connection.execute(
+                "SELECT candidate_id FROM candidates WHERE ticket_id = ? AND commit_sha = ? "
+                "ORDER BY submitted_at DESC LIMIT 1",
+                (ticket_id, commit),
+            ).fetchone()
+            candidate_id = candidate["candidate_id"] if candidate else None
+            self._event(
+                connection, actor, project_id, _CANDIDATE_ON_MAIN_EVENT, "ticket", ticket_id,
+                ticket["version"],
+                {
+                    "reason": CANDIDATE_ALREADY_ON_MAIN,
+                    "candidate_commit": commit,
+                    "landed_commit": landed_commit,
+                    "match": match,
+                    "candidate_id": candidate_id,
+                    "mainline_commit": head,
+                    "ticket_status": ticket["status"],
+                },
+            )
+            return self._open_planner_job(
+                connection, actor, project_id, ticket,
+                job_type=PlannerJobType.INTEGRATION_CONFLICT,
+                summary=(
+                    f"{CANDIDATE_ALREADY_ON_MAIN}: candidate {candidate_id or commit} of "
+                    f"{ticket_id} ({ticket['status']}) landed on {branch} as {landed_commit} "
+                    f"({match}), but HoH did not merge it, and the automatic ungated record "
+                    f"was refused: {refusal[:300]} If this is the delivered work, record it "
+                    "with planner.record_external_landing (ungated) and classify the ticket "
+                    "complete; otherwise decide a revert or rework."
+                )[:4000],
+                evidence_refs=[
+                    *([f"candidate:{candidate_id}"] if candidate_id else []),
+                    f"mainline:{head}",
+                ],
+                candidate_id=candidate_id,
+                artifact_commit=head,
+            )
 
     def _flag_stuck_merge_jobs(self, actor: Actor, project_id: str) -> list[dict[str, Any]]:
         """Escalate merge jobs past the worker timeout that recovery cannot settle.

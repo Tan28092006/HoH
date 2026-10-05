@@ -20,6 +20,8 @@ One host process (`deploy/desktop/hoh_desktop.py --host` locally) serves:
   caller's role are absent. Over stdio the role comes from `HOH_AGENT_ROLE`.
 - **Supervisor** — `supervisor.py` runs queued jobs in managed worker processes
   (`managed_worker.py`, `managed_process.py`) and recovers RUNNING jobs on start.
+  Job kinds: QA runs, provisioning, submissions, merges and checks of main
+  (`mainline`).
   `HOH_WORKER_MODE` defaults to `supervised`, so MCP only queues; the explicit
   opt-in `legacy` mode spawns unsupervised `*_worker.py` processes with no job
   lock, timeout or recovery. The desktop host and `local_agent` set `supervised`.
@@ -62,7 +64,8 @@ helper you are about to change across `service/`.
 | --- | --- |
 | `project_setup.py` | Project creation and repository configuration |
 | `repository_reconciliation.py` | Repository sync, reconciliations and the barrier (state from `ExecutionGate` in `_common.py`) |
-| `repository_sweep.py` | The scheduler's Git sweep: throttled observation, candidates already on main, stuck merge jobs |
+| `repository_sweep.py` | The scheduler's Git sweep: throttled observation, landings already on main (recorded ungated), stuck merge jobs |
+| `run_guardrails.py` | Merge budgets, the merge-queue pause (`MergeQueueGuard`), checks of main after a landing, revert tickets |
 | `project_policy.py` | Test command, verification and capability profiles, validation contracts, skill policy |
 | `ticket_authoring.py` | Features and tickets: create, ready, write scope, fields, split |
 | `ticket_retirement.py` | Stop, cancel, supersede and retire tickets through a pending reconciliation |
@@ -154,12 +157,15 @@ helper you are about to change across `service/`.
   Planner wait checks too, so the two processes never fetch twice in a window).
   It runs the ordinary `sync_repository`, so a commit opens its reconciliation
   with no Planner chat open; it never takes a project's first observation,
-  which opens the baseline and belongs to a Planner. It then gives Planner one
-  `integration_conflict` job per (ticket, candidate) whose candidate Git already
-  has (`candidate_already_on_main`, deduplicated by its audit event) and one per
-  merge job RUNNING past `MERGE_JOB_STUCK_SECONDS` that recovery leaves marked
-  for reconciliation (`merge_job_stuck`, with the Git facts). It records no
-  landing: that stays an explicit ungated record. Planner ends a stuck job with
+  which opens the baseline and belongs to a Planner. An open ticket whose
+  candidate Git already has (by ancestry, or by patch-id: a default-branch
+  commit whose diff equals `git diff base candidate`) is recorded through
+  `record_external_landing` as an ungated landing by `system:sweep`; a live
+  lease or job defers it to a later sweep, and any other refusal falls back to
+  one `candidate_already_on_main` Planner job (deduplicated by its audit event).
+  It gives Planner one job per merge job RUNNING past `MERGE_JOB_STUCK_SECONDS`
+  that recovery leaves marked for reconciliation (`merge_job_stuck`, with the
+  Git facts). Planner ends a stuck job with
   `planner.close_stuck_merge_job`: recovery runs once more under the repository
   lock (a live operation is never taken over), then the job ends FAILED, its
   intent stays and its lease is released, so `record_external_landing` or a
@@ -183,7 +189,8 @@ helper you are about to change across `service/`.
 | Candidate is one ordinary commit on the frozen base | Candidate verification in `candidates.py` / `git_worktrees.py` | `test_candidate_submission.py` |
 | A drifted queued candidate is rebased server-side into a derived candidate (`derived_from`) that lands only after the frozen suite passes on it, by compare-and-set; QA carries over only when main's changed paths miss the candidate's scope roots; at most `MAX_AUTO_REBASES` per ticket | `_auto_rebase_drifted` in `integration.py`; `rebase_candidate`, `cas_fast_forward` in `git_worktrees.py` | `test_auto_rebase.py` |
 | Merge only the current candidate after a fresh QA pass and isolated gate | `integration.py` queued merge and `merge_intents` reconciliation | `test_integration_async_gate.py`, `test_integration_release_policy.py` |
-| Git is observed without a waiting Planner; a candidate already on main and a merge job recovery cannot settle each reach Planner once, and nothing is recorded for it | `sweep_repositories` in `repository_sweep.py`, called by `scheduler.sweep_once`; throttle `REPOSITORY_OBSERVE_SECONDS` on `project_repositories.observed_at`, shared with `event_wait`; `close_stuck_merge_job` in `integration.py` | `test_repository_sweep.py` |
+| Git is observed without a waiting Planner; a candidate already on main (ancestry or patch-id) is recorded ungated by `system:sweep`, never as QA approval; a merge job recovery cannot settle reaches Planner once | `sweep_repositories` and `_flag_candidates_already_on_main` in `repository_sweep.py`, called by `scheduler.sweep_once`; `equivalent_landing` in `git_worktrees.py`; throttle `REPOSITORY_OBSERVE_SECONDS` on `project_repositories.observed_at`, shared with `event_wait`; `close_stuck_merge_job` in `integration.py` | `test_repository_sweep.py` |
+| No merge starts while the project's merge queue is paused (red main, failure budget, hourly budget) | `MergeQueueGuard` in `service/run_guardrails.py`: `require_open` in `queue_merge_candidate`; `merge_queue_admits` in `execute_queued_merge` and `Supervisor.tick` | — |
 | Retried writes do not repeat effects | `service/idempotency.py` (payload-bound key stamped with the request's correlation id; a stale IN_PROGRESS key is settled from that id's audit events, committed → `status: committed` replay, otherwise re-run; complete and release by `record_id`; contention after a committed write returns the committed outcome); `_run_with_contention_retry` in `mcp/invoke.py` retries only while nothing the call wrote has committed | `test_idempotency.py` |
 | Validation contracts fit the packet | Limits in `contracts.py`, checked in `project_policy.py` and published in the MCP and REST schemas | `test_team_quality_gates.py`, `test_contract_parity.py` |
 | Advertised capabilities name only tools the role has | `CAPABILITY_TOOLS` and `capabilities()` in `discovery.py` | `test_contract_parity.py` |
@@ -302,6 +309,34 @@ can only turn from no to yes. The worker is still started with
 `--without-test-slot` and `execute_queued_merge(run_suite=False)` leaves the job
 QUEUED, untouched, if it would have to run the suite, so a misjudged lane can
 never put a second suite on the host.
+
+### Landings are recorded, then main is checked (wave 7C part 2)
+
+- **Auto-recorded landings.** The sweep records work already on main as an
+  ungated landing (`integration.landed_ungated`, `gated: false`,
+  `qa_verified: false`, `detection.match` = `ancestry` or `patch_id`) attributed
+  to `system:sweep`, instead of only opening a Planner job. It never certifies a
+  QA verdict or criterion. Patch-id matching (`git patch-id --stable` over
+  `git diff base candidate` and the last 200 non-merge commits in
+  `base..main`) catches applied diffs and cherry-picks, as HOH-280 landed.
+- **Check of main.** Every gated merge and every recorded landing queues one
+  `mainline_checks` row, run by the supervisor (`mainline` kind, test slot) with
+  the project's current test command on that main commit. A waiting check is
+  retargeted to the newest main rather than queueing a second suite. A gated
+  fast-forward is recorded as `covered_by_gate` without a run: main is exactly
+  the tree the gate just tested with the frozen command. A red check pauses the
+  merge queue (`mainline_check_failed`), opens a priority-95 BACKLOG ticket of
+  type `revert` naming the commit (git revert or a fix, through the gate; never a
+  reset), and raises a high-severity Planner job. An unrunnable check counts as
+  a failure but never as red.
+- **Budgets.** `project_run_guardrails` holds `max_merges_per_hour` (default 12,
+  one test slot's suite rate) and `max_consecutive_failures` (default 3: merge
+  gate regressions and infrastructure failures, red or unrunnable checks; reset
+  by a merge or a green check). Over the hourly budget, queued merges wait and
+  the pause clears itself; any other pause holds until
+  `planner.resume_merge_queue`. The pause is a merge-queue flag, not an
+  `ExecutionGate` barrier: development and QA keep flowing. Set the limits with
+  `planner.configure_run_guardrails`.
 
 ### Latency is measured, not argued (wave 6F)
 

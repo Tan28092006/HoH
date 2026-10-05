@@ -842,6 +842,44 @@ CREATE TABLE IF NOT EXISTS project_capability_preflights (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (project_id, capability)
 );
+
+-- Run-level guardrails (service/run_guardrails.py): merge budgets and the
+-- project's merge-queue pause flag. No row means the defaults and no pause.
+CREATE TABLE IF NOT EXISTS project_run_guardrails (
+    project_id TEXT PRIMARY KEY REFERENCES projects(project_id),
+    max_merges_per_hour INTEGER NOT NULL DEFAULT 12,
+    max_consecutive_failures INTEGER NOT NULL DEFAULT 3,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    merge_queue_paused INTEGER NOT NULL DEFAULT 0,
+    pause_reason TEXT,
+    pause_detail TEXT,
+    paused_at TEXT,
+    configured_by TEXT,
+    updated_at TEXT NOT NULL
+);
+
+-- One run of the project's test command on main after a landing moved it,
+-- executed by the supervisor in the host's test slot.
+CREATE TABLE IF NOT EXISTS mainline_checks (
+    check_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    mainline_commit TEXT NOT NULL,
+    trigger_ref TEXT NOT NULL,
+    trigger_ticket_id TEXT REFERENCES tickets(ticket_id),
+    status TEXT NOT NULL CHECK (status IN ('QUEUED', 'RUNNING', 'COMPLETED', 'FAILED')),
+    outcome TEXT,
+    exit_code INTEGER,
+    termination_reason TEXT,
+    output_tail TEXT,
+    error_message TEXT,
+    revert_ticket_id TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_mainline_checks_project_status
+    ON mainline_checks(project_id, status, created_at);
 """
 
 
