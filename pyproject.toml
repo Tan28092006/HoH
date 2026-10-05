@@ -51,14 +51,15 @@ include = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["ui: browser acceptance tests (enable with --run-ui)"]
-addopts = [
-  "--strict-markers",
-  "--cov=hoh_control_plane",
-  "--cov-branch",
-  "--cov-report=term-missing",
-  "--cov-fail-under=80",
+markers = [
+  "ui: browser acceptance tests (enable with --run-ui)",
+  "slow: modules that dominate wall time; the fast lane deselects them",
+  "git: drives real Git repositories; the fast lane deselects them",
 ]
+# The coverage gate is not here: a targeted run must not fail on coverage. The
+# full run adds it (scripts/test.ps1 with no test paths, and CI); see
+# docs/TESTING.md.
+addopts = ["--strict-markers"]
 
 [tool.coverage.run]
 branch = true
