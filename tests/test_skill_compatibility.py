@@ -282,7 +282,9 @@ _CURRENT_AGENT_PRESENCE_COLUMNS = (
     "    skill_compatibility TEXT NOT NULL DEFAULT '{}',\n"
     "    -- Where to knock. An agent that registers none is not broken: it polls,\n"
     "    -- which stays a complete path on its own.\n"
-    "    endpoint TEXT\n"
+    "    endpoint TEXT,\n"
+    "    -- When this agent last registered, i.e. when its current chat began.\n"
+    "    session_started_at TEXT\n"
     ");"
 )
 _LEGACY_AGENT_PRESENCE_COLUMNS = "    updated_at TEXT NOT NULL\n);"
@@ -322,7 +324,9 @@ def test_a_legacy_database_without_skill_columns_upgrades_cleanly(tmp_path: Path
         columns_after = {row[1] for row in after.execute("PRAGMA table_info(agent_presence)")}
     finally:
         after.close()
-    assert {"skill_manifest", "protocol_version", "skill_compatibility"} <= columns_after
+    assert {
+        "skill_manifest", "protocol_version", "skill_compatibility", "session_started_at",
+    } <= columns_after
 
     service = ControlPlaneService(SQLiteStore(path))
     planner = Actor("planner-01", Role.PLANNER, frozenset({"project-1"}))
