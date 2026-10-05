@@ -28,6 +28,8 @@ captured ticket one evidenced disposition:
 Create bounded fix, adoption or regression tickets for new gaps and include
 their IDs in the decision. Call `planner.resolve_repository_reconciliation` only
 after every captured ticket is covered; never resolve merely to unblock queue.
+Each `ticket_decisions` item is `{ticket_id, disposition, reason}`, plus
+`replacement_ticket_id` for `supersede`; any other key is refused.
 
 For obsolete nonterminal work use `planner.retire_ticket_for_reconciliation`
 with `CANCELLED` or `SUPERSEDED`. It revokes non-merge execution and preserves

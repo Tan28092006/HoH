@@ -36,6 +36,12 @@ DIGEST_CHARS = 128
 MAX_DEVELOPER_CLAIMS = 50
 DEVELOPER_CLAIM_CHARS = 2_000
 
+# --- Repository reconciliation decisions
+# (service.repository_reconciliation.resolve_repository_reconciliation)
+MAX_TICKET_DECISIONS = 500
+DECISION_REASON_CHARS = 2_000
+DECISION_TICKET_ID_CHARS = 200
+
 # --- Worker usage (service.usage.report_usage)
 # How a ticket was worked: by a fresh subagent the dispatcher started for it, by
 # the waiting dispatcher chat itself, or in a new session started for it.
@@ -45,11 +51,14 @@ Verdict = Literal["passed", "failed"]
 FindingStatus = Literal["verified", "failed", "insufficient_evidence", "flaky"]
 ValidationMethod = Literal["black_box", "white_box", "mixed"]
 WorkerKind = Literal["fresh_subagent", "dispatcher", "new_session"]
+#: What Planner decided for one ticket that was open when a commit was observed.
+Disposition = Literal["keep", "revise", "cancel", "supersede", "complete", "rework"]
 
 VERDICTS: frozenset[str] = frozenset(get_args(Verdict))
 FINDING_STATUSES: frozenset[str] = frozenset(get_args(FindingStatus))
 VALIDATION_METHODS: frozenset[str] = frozenset(get_args(ValidationMethod))
 WORKER_KINDS: frozenset[str] = frozenset(get_args(WorkerKind))
+DISPOSITIONS: frozenset[str] = frozenset(get_args(Disposition))
 #: The kinds that keep one ticket's transcript out of the next ticket.
 FRESH_WORKER_KINDS: frozenset[str] = frozenset({"fresh_subagent", "new_session"})
 
@@ -121,6 +130,29 @@ class FindingInput(ContractModel):
 
 
 Findings = Annotated[list[FindingInput], Field(min_length=1, max_length=MAX_FINDINGS)]
+
+
+DecisionTicketId = _text(DECISION_TICKET_ID_CHARS, 1)
+DecisionReason = _text(DECISION_REASON_CHARS, 1)
+
+
+class TicketDecision(ContractModel):
+    """Planner's classification of one ticket that was open when a commit was observed.
+
+    keep: the plan still holds. revise: the ticket was updated (its version
+    moved). cancel / supersede / complete: the ticket is now CANCELLED,
+    SUPERSEDED (name replacement_ticket_id) or DONE. rework: the ticket moved
+    to REWORK or BLOCKED after the observation. The service checks each disposition against the
+    board, so apply the ticket change first, then record the decision.
+    """
+
+    ticket_id: DecisionTicketId
+    disposition: Disposition
+    reason: DecisionReason
+    replacement_ticket_id: DecisionTicketId | None = None
+
+
+TicketDecisions = Annotated[list[TicketDecision], Field(max_length=MAX_TICKET_DECISIONS)]
 DeveloperClaims = Annotated[
     list[DeveloperClaim], Field(max_length=MAX_DEVELOPER_CLAIMS)
 ]
