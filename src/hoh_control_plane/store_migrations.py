@@ -178,6 +178,10 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # before the column: its session start is unknown, so no ticket count and
     # no restart advice is derived from it.
     ("agent_presence", "session_started_at", "TEXT"),
+    # A non-blocking flag set when a merge moved main under a ticket's plan.
+    # NULL for every older ticket: none was planned against a moved base the
+    # flag could describe.
+    ("tickets", "planning_base_stale", "TEXT"),
 )
 
 

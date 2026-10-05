@@ -76,7 +76,12 @@ JSON_FIELDS = {
     "accepted_skill_versions",
     "frozen_ticket_ids",
     "shadow_partition",
+    "planning_base_stale",
 }
+
+#: The QA criterion a fresh-context reviewer answers when a ticket's planning
+#: base went stale: does the ticket's intent still hold against the new main?
+INTENT_CHECK_CRITERION = "intent_check"
 COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
 
 MIN_TOKEN_BUDGET = 200
@@ -629,7 +634,7 @@ class ExecutionGate:
 _TRANSITION_COLUMNS = frozenset({
     "status", "blocked_reason", "base_commit", "candidate_commit", "updated_at",
     "title", "objective", "priority", "acceptance_criteria", "validation_contract",
-    "preservation_constraints", "file_scope",
+    "preservation_constraints", "file_scope", "planning_base_stale",
 })
 
 #: The one event type that records a ticket's state. A ticket's creation and

@@ -131,20 +131,21 @@ _ROLE_TICKET_FIELDS: dict[Role, frozenset[str]] = {
             "ticket_id", "feature_id", "ticket_type", "title", "objective",
             "status", "required_role", "validation_contract",
             "preservation_constraints", "file_scope", "blocked_reason", "version",
+            "planning_base_stale",
         }
     ),
     Role.QA: frozenset(
         {
             "ticket_id", "feature_id", "title", "objective", "status",
             "validation_contract", "preservation_constraints", "blocked_reason",
-            "version",
+            "version", "planning_base_stale", "intent_check",
         }
     ),
     Role.INTEGRATOR: frozenset(
         {
             "ticket_id", "feature_id", "title", "objective", "status",
             "validation_contract", "preservation_constraints", "blocked_reason",
-            "version",
+            "version", "planning_base_stale", "intent_check",
         }
     ),
 }
@@ -972,6 +973,19 @@ class ContextMixin:
         if isinstance(ticket, dict) and allowed_ticket_fields is not None:
             if not ticket.get("validation_contract"):
                 allowed_ticket_fields = allowed_ticket_fields | {"acceptance_criteria"}
+            if ticket.get("planning_base_stale") and actor.role in {Role.QA, Role.INTEGRATOR}:
+                # Wave 7C: a merge moved main under this plan. QA's verdict is
+                # refused without a verified intent_check finding.
+                ticket["intent_check"] = {
+                    "required": True,
+                    "criterion": "intent_check",
+                    "instruction": (
+                        "A fresh-context reviewer (not the developer, ideally another model) "
+                        "reads the objective, contract, the diff and the main commits since "
+                        "the ticket's base, and records finding criterion 'intent_check': "
+                        "verified if the intent still holds on the new main, failed if stale."
+                    ),
+                }
             payload["ticket"] = {
                 key: value for key, value in ticket.items()
                 if key in allowed_ticket_fields

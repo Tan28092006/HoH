@@ -21,6 +21,7 @@ def _digest_matches(supplied: str, actual: str) -> bool:
     )
 from hoh_control_plane.service._common import (
     require_snapshot_id,
+    INTENT_CHECK_CRITERION,
     CHECKSUM_ARTIFACT,
     CHECKSUM_CLAIMED,
     Actor,
@@ -767,9 +768,14 @@ class QaMixin:
             contract = {
                 item["criterion"]: item for item in (ticket.get("validation_contract") or [])
             }
+            # Wave 7C: a merge moved main under this ticket's plan. The verdict
+            # must carry an intent_check finding from a fresh-context reviewer.
+            intent_check_required = bool(ticket.get("planning_base_stale"))
             if contract:
                 for finding_data in findings:
                     criterion = str(finding_data.get("criterion", ""))
+                    if intent_check_required and criterion == INTENT_CHECK_CRITERION:
+                        continue
                     scenario = contract.get(criterion)
                     if scenario is None:
                         raise ValidationError(
@@ -894,6 +900,7 @@ class QaMixin:
                 })
             rejections: int | None = None
             budget_exhausted = False
+            plan_stale = False
             if verdict == "passed":
                 missing = set(ticket["acceptance_criteria"]) - verified_criteria
                 if missing:
@@ -901,19 +908,35 @@ class QaMixin:
                         "Passed verdict requires verified evidence for every criterion",
                         {"missing_criteria": sorted(missing)},
                     )
+                if intent_check_required and INTENT_CHECK_CRITERION not in verified_criteria:
+                    raise ValidationError(
+                        "planning_base_stale: a passed verdict requires a verified intent_check "
+                        "finding from a fresh-context reviewer against the new main",
+                        {"missing_criteria": [INTENT_CHECK_CRITERION],
+                         "planning_base_stale": ticket.get("planning_base_stale")},
+                    )
                 next_status = TicketStatus.VERIFIED
             else:
-                evidence_gap = any(f.get("status") == "insufficient_evidence" for f in findings) and all(
+                # A stale intent is a planning question, not the maker's miss:
+                # block for Planner without spending the rework budget.
+                plan_stale = intent_check_required and any(
+                    str(f.get("criterion")) == INTENT_CHECK_CRITERION
+                    and f.get("status") != "verified" for f in findings
+                ) and all(
+                    f.get("status") == "verified" for f in findings
+                    if str(f.get("criterion")) != INTENT_CHECK_CRITERION
+                )
+                evidence_gap = not plan_stale and any(f.get("status") == "insufficient_evidence" for f in findings) and all(
                     f.get("status") in {"verified", "insufficient_evidence"} for f in findings)
                 # Only a rejection of the source counts against the budget; an
                 # evidence gap is an infrastructure question, not a maker's miss.
                 rejections = (
-                    None if evidence_gap
+                    None if evidence_gap or plan_stale
                     else self._qa_rejections_since_reset(connection, ticket_id) + 1
                 )
                 budget_exhausted = rejections is not None and rejections >= MAX_QA_REJECTIONS
                 next_status = (
-                    TicketStatus.BLOCKED if evidence_gap or budget_exhausted
+                    TicketStatus.BLOCKED if evidence_gap or plan_stale or budget_exhausted
                     else TicketStatus.REWORK
                 )
                 known_failure_entry_id = _id(connection, "ctx")
@@ -929,7 +952,10 @@ class QaMixin:
                         project_id,
                         ticket["feature_id"],
                         ticket_id,
-                        ("QA evidence is insufficient; infrastructure owner must record readiness before retry. No source rework is requested."
+                        ("intent_check found the ticket's intent stale against the new main; "
+                         "Planner decides whether to revise, re-scope or retire it. No source rework is requested."
+                         if plan_stale else
+                         "QA evidence is insufficient; infrastructure owner must record readiness before retry. No source rework is requested."
                          if evidence_gap else
                          f"QA rejected candidate {MAX_QA_REJECTIONS} times; rework budget exhausted. "
                          "Planner decides whether to split the ticket, revise its contract or cancel it."
@@ -942,9 +968,12 @@ class QaMixin:
                     ),
                 )
             changes: dict[str, Any] = {"status": next_status, "updated_at": timestamp}
+            if verdict == "passed" and intent_check_required:
+                changes["planning_base_stale"] = None
             if next_status == TicketStatus.BLOCKED:
                 changes["blocked_reason"] = (
                     REWORK_BUDGET_EXHAUSTED if budget_exhausted
+                    else "plan_stale" if plan_stale
                     else "qa.infrastructure/insufficient_evidence"
                 )
             next_version = _transition_ticket(
@@ -963,6 +992,7 @@ class QaMixin:
                 project_id,
                 ("ticket.verified" if verdict == "passed" else
                  "ticket.rework_budget_exhausted" if budget_exhausted else
+                 "ticket.plan_stale" if plan_stale else
                  "qa.infrastructure_blocked" if next_status == TicketStatus.BLOCKED else "ticket.rework_requested"),
                 "ticket",
                 ticket_id,
@@ -1011,6 +1041,9 @@ class QaMixin:
                         f"{REWORK_BUDGET_EXHAUSTED}: QA rejected this ticket {rejections} times; "
                         "split it, revise its contract or cancel it."
                         if budget_exhausted else
+                        "intent_check: the ticket's intent is stale against the new main; "
+                        "revise, re-scope or retire it."
+                        if plan_stale else
                         "QA rejected the frozen candidate; inspect the linked findings."
                     ),
                     evidence_refs=[
