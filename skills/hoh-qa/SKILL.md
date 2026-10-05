@@ -16,13 +16,17 @@ own equipment, or transfers evidence to another SHA.
 2. Call `work.inbox`. Read `capability_blockers` before saying there is no work;
    inspect discovery `capability_state` for each QA-ready candidate.
 3. Claim only when `claimable=true`, `planning_barrier` is clear, and the
-   candidate ID/SHA match the current packet.
+   candidate ID/SHA match the current packet. Delegate the ticket with the
+   claim's `worker_brief` (base card: one ticket, one fresh worker); the worker
+   does steps 4-6 and returns verdict, evidence bundle, Planner job and blockers.
 4. Run the frozen project command through `qa.run_project_tests` once; retain and
    poll the returned `test_run_id` with `qa.get_project_test_run`. Verify source,
    imports, environment and HEAD identify the frozen candidate. A repeat call
    returns the passing run (`reused=true`); pass `rerun=true` only for suspected flakiness.
 5. Execute every `validation_contract` scenario with claim → observe → assess.
    Attach the declared evidence types and record the result for every criterion.
+   Record your own observations before resolving the Developer's claims
+   (`ctx:candidate:<id>:developer_claims`); then compare, never adopt them.
 6. Submit a verdict only from evidence on this exact SHA, passing the
    `context_snapshot_id` of a packet read after your claim, or the claim's
    `current_context_snapshot_id` (refused without one). The verdict

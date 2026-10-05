@@ -106,7 +106,7 @@ class IntegrationMixin:
         integration gate.
         """
         require_role(actor, Role.PLANNER, Role.INTEGRATOR, Role.ADMIN)
-        self._valid_commit(landed_commit, "landed_commit")
+        landed_commit = self._full_commit(actor, ticket_id, landed_commit, "landed_commit")
         self._bounded_text(reason, "reason", 2000)
         with self.store.connection() as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)

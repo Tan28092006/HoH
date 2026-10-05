@@ -339,7 +339,7 @@ def test_criterion_9_a_replacement_continues_from_the_ticket_alone(
     assert packet["ticket"]["acceptance_criteria"], "what it must satisfy"
     assert packet["ticket"]["file_scope"], "where it may write"
     assert any(
-        entry["entry_type"] == "worktree_handoff" and entry["artifact_commit"] == checkpoint
+        entry["entry_type"] == "worktree_handoff" and entry["artifact_commit"] == checkpoint[:12]
         for entry in packet["context_entries"]
     ), "and what the previous agent had reached, without its chat"
     assert _git(Path(replacement["worktree_path"]), "rev-parse", "HEAD") == checkpoint

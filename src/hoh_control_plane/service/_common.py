@@ -90,6 +90,13 @@ _CHECKPOINT_CHARS = 200
 _CONTRACT_TEXT_CHARS = contracts.CONTRACT_TEXT_CHARS
 _CONTRACT_TOKEN_BUDGET = contracts.CONTRACT_TOKEN_BUDGET
 
+# A maker and a checker can disagree forever. The third QA rejection of one
+# ticket stops the loop: the ticket is BLOCKED and Planner decides whether to
+# split it, revise its contract or cancel it. Only a recorded Planner decision
+# starts a new count (event ticket.rework_budget_reset).
+MAX_QA_REJECTIONS = 3
+REWORK_BUDGET_EXHAUSTED = "rework_budget_exhausted"
+
 # Retention policy for idempotency records: a replay is honored for this long,
 # after which purge_expired_idempotency_records may delete the row and the same
 # key behaves like a fresh request. Long enough to outlive any worker restart
@@ -286,6 +293,37 @@ def _required_execution_capabilities(ticket: dict[str, Any]) -> set[str]:
         for scenario in ticket.get("validation_contract") or []
         for capability in scenario.get("required_capabilities") or []
     }
+
+
+# What an agent reads names a commit by 12 hex characters, as `git log` would.
+# A full SHA-1 costs about ten tokens and a SHA-256 digest about sixteen, every
+# time a packet or result repeats one, and no agent compares them by eye. The
+# store, audit events and evidence reports keep the full value; tools that take
+# a commit accept either form and resolve a prefix before any comparison.
+AGENT_SHA_CHARS = 12
+_FULL_HEX = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+_EMBEDDED_HEX = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{40}(?:[0-9a-f]{24})?(?![0-9A-Za-z])")
+
+
+def agent_facing(payload: Any) -> Any:
+    """Abbreviate every full commit SHA and SHA-256 digest in what an agent reads.
+
+    A whole value that is a 40 or 64 hex string is shortened. Inside prose (a
+    value with whitespace) embedded ones are shortened too; a value without
+    whitespace is a reference an agent may pass back, so only an exact match is
+    touched. Idempotent: an abbreviated value no longer matches.
+    """
+    if isinstance(payload, str):
+        if _FULL_HEX.fullmatch(payload):
+            return payload[:AGENT_SHA_CHARS]
+        if any(character.isspace() for character in payload):
+            return _EMBEDDED_HEX.sub(lambda match: match.group(0)[:AGENT_SHA_CHARS], payload)
+        return payload
+    if isinstance(payload, dict):
+        return {key: agent_facing(value) for key, value in payload.items()}
+    if isinstance(payload, (list, tuple)):
+        return [agent_facing(value) for value in payload]
+    return payload
 
 
 def delivered_json(payload: Any) -> str:

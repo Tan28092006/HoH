@@ -181,7 +181,7 @@ def test_compaction_retains_criteria_constraints_candidate_sha_and_findings(
             context["ticket"]["preservation_constraints"]
             == ticket["preservation_constraints"]
         )
-        assert context["candidate"]["commit_sha"] == candidate["candidate"]["commit_sha"]
+        assert context["candidate"]["commit_sha"] == candidate["candidate"]["commit_sha"][:12]
         assert context["known_failures"][0]["status"] == "failed"
         assert (
             context["known_failures"][0]["evidence"][0]["storage_ref"]
@@ -275,7 +275,7 @@ def test_qa_packet_keeps_candidate_identity_and_test_interface(
     )
 
     assert context["candidate"]["candidate_id"] == candidate["candidate"]["candidate_id"]
-    assert context["candidate"]["base_commit"] == candidate["candidate"]["base_commit"]
+    assert context["candidate"]["base_commit"] == candidate["candidate"]["base_commit"][:12]
     assert context["candidate"]["branch_ref"] == candidate["candidate"]["branch_ref"]
     omitted = {entry["section"] for entry in context["omitted_sections"]}
     assert "candidate" not in omitted
@@ -389,7 +389,7 @@ def test_compacted_history_preserves_actionable_identity_and_reference(
     for entry in bounded["context_entries"]:
         source = original[entry["entry_id"]]
         assert entry["entry_type"] == source["entry_type"]
-        assert entry["actor_role"] == source["actor_role"]
+        assert entry["source"] == source["source"]
         assert entry["source_ref"] == source["source_ref"]
         assert entry["artifact_commit"] == source["artifact_commit"]
         assert source["content"].startswith(entry["content"].removesuffix("..."))
@@ -493,8 +493,15 @@ def test_qa_packet_keeps_everything_section_7_3_makes_its_own(
     evidence = packet["known_failures"][0]["evidence"][0]
     assert evidence["storage_ref"]
     assert "environment_digest" in evidence and "storage_checksum" in evidence
-    # 6. Developer evidence, kept for reference rather than trusted.
-    assert packet["candidate"]["developer_claims"]
+    # 6. Developer evidence, kept for reference rather than trusted: QA gets
+    # only the reference, so it observes before it reads the maker's claims.
+    claims_ref = f"ctx:candidate:{candidate['candidate']['candidate_id']}:developer_claims"
+    assert packet["candidate"]["developer_claims"] == []
+    assert any(
+        claims_ref in item["references"] for item in packet["omitted_sections"]
+    )
+    resolved = service.resolve_context_reference(actors["qa"], claims_ref)
+    assert resolved["developer_claims"] == ["Retry implementation is ready for QA."]
 
 
 def test_packets_drop_repeated_identity_and_machine_local_paths(

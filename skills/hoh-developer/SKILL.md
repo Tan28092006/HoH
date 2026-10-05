@@ -13,9 +13,11 @@ acceptance, QA verdicts or protected-branch integration.
 
 1. Register once, call `work.inbox`, and resume an owned lease/job before taking
    new work. Resolve the current ticket packet before claim.
-2. Claim one executable ticket. In `colocated`, use only the worktree returned
-   by `dev.prepare_worktree`; in `agent_workspace`, use an isolated worktree in
-   your own clone and ensure the service can fetch the submitted SHA.
+2. Claim one executable ticket and delegate it with the claim's `worker_brief`
+   (base card: one ticket, one fresh worker). The worker does steps 3-6 and
+   returns submission ID, commit SHA and blockers. In `colocated` it uses only
+   the worktree returned by `dev.prepare_worktree`; in `agent_workspace`, an
+   isolated worktree in your own clone the service can fetch the SHA from.
 3. Verify path, branch, base and scope. Preserve dirty files from an owned prior
    attempt; never reset another agent's work.
 4. Read the validation contract, implement the bounded outcome, and create the

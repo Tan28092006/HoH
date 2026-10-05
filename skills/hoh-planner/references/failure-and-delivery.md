@@ -14,6 +14,12 @@ Integrator resume require the current frozen candidate; Integrator also requires
 current QA verification. Never close a fixable Planner job while leaving its
 ticket stranded `BLOCKED`.
 
+`rework_budget_exhausted` means QA rejected the ticket three times; the service
+blocked it instead of looping Developer and QA again. Decide whether to split
+it, revise its contract or cancel it. Resuming it with
+`planner.resume_ticket_after_failure` records the budget reset; say why one more
+attempt will differ.
+
 For `qa.infrastructure/*`, preserve the candidate. After real remediation,
 append a Planner decision naming readiness evidence and call
 `planner.recover_candidate_for_qa` with the original failed run/finding and

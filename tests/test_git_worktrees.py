@@ -698,11 +698,11 @@ def test_expired_lease_takeover_seeds_the_replacement_from_a_clean_checkpoint(
         service, actors["developer_2"], ticket["ticket_id"], "worktree_handoff"
     )
     assert len(handoff) == 1
-    assert handoff[0]["artifact_commit"] == checkpoint
+    assert handoff[0]["artifact_commit"] == checkpoint[:12]
     content = handoff[0]["content"]
     assert "dev-01" in content
     assert first_worktree["branch_ref"] in content
-    assert first_worktree["base_commit"] in content
+    assert first_worktree["base_commit"][:12] in content
 
 
 def test_takeover_fails_closed_and_records_recovery_evidence_for_a_dirty_worktree(
