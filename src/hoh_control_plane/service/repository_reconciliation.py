@@ -15,6 +15,7 @@ from hoh_control_plane.service._common import (
     _id,
     _iso,
     _row,
+    _set_planning_base_stale,
     json,
     require_project,
     require_role,
@@ -721,17 +722,7 @@ class RepositoryReconciliationMixin:
         verdict that includes one clears it. It deliberately does not bump the
         ticket version, so a live lease's expected_version stays valid.
         """
-        if not ticket_ids:
-            return
-        placeholders = ",".join("?" for _ in ticket_ids)
-        connection.execute(
-            f"""
-            UPDATE tickets SET planning_base_stale = ?
-            WHERE ticket_id IN ({placeholders})
-              AND status NOT IN ('DONE', 'CANCELLED', 'SUPERSEDED')
-            """,
-            (json.dumps(flag, sort_keys=True), *ticket_ids),
-        )
+        _set_planning_base_stale(connection, ticket_ids, flag)
 
     @staticmethod
     def _withdraw_offers(

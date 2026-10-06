@@ -4,7 +4,6 @@ import json
 from dataclasses import replace
 
 from hoh_control_plane.service.qa import _INFRASTRUCTURE_OUTCOMES
-from hoh_control_plane.service.run_guardrails import MergeQueueGuard
 from hoh_control_plane.service._common import (
     _audit_event_has_field,
     require_snapshot_id,
@@ -560,7 +559,7 @@ class IntegrationMixin:
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             self._require_repository_reconciled(connection, project_id, ticket_id)
-            MergeQueueGuard.require_open(connection, project_id)
+            self._require_merge_queue_open(connection, project_id)
             self._expect_version(ticket, expected_version)
             self.require_fresh_context(connection, ticket_id, context_snapshot_id)
             if ticket["status"] != TicketStatus.MERGE_READY.value:

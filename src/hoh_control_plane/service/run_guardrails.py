@@ -125,6 +125,11 @@ class MergeQueueGuard:
 class RunGuardrailsMixin:
     """Merge budgets, the merge-queue pause and post-landing checks of main."""
 
+    @staticmethod
+    def _require_merge_queue_open(connection: Any, project_id: str) -> None:
+        """Refuse a merge enqueue while the project's merge queue is paused."""
+        MergeQueueGuard.require_open(connection, project_id)
+
     # -- policy -----------------------------------------------------------
 
     def configure_run_guardrails(

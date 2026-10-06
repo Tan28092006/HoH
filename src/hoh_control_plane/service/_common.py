@@ -684,6 +684,28 @@ def _record_ticket_created(connection: Connection, actor: Actor, ticket_id: str)
     )
 
 
+def _set_planning_base_stale(
+    connection: Connection, ticket_ids: list[str], flag: dict[str, Any]
+) -> None:
+    """Annotate open tickets with a non-blocking planning_base_stale flag (wave 7C).
+
+    The one ticket write outside ``_transition_ticket``: it changes no status
+    and deliberately keeps the version, so a live lease's expected_version stays
+    valid. Clearing it goes through ``_transition_ticket`` with the verdict.
+    """
+    if not ticket_ids:
+        return
+    placeholders = ",".join("?" for _ in ticket_ids)
+    connection.execute(
+        f"""
+        UPDATE tickets SET planning_base_stale = ?
+        WHERE ticket_id IN ({placeholders})
+          AND status NOT IN ('DONE', 'CANCELLED', 'SUPERSEDED')
+        """,
+        (json.dumps(flag, sort_keys=True), *ticket_ids),
+    )
+
+
 def _transition_ticket(
     connection: Connection,
     ticket_id: str,
