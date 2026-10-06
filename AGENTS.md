@@ -15,7 +15,7 @@ ticket state here; `tests/test_repo_docs.py` caps it at 900 words.
 | What is installed on this machine, and what must never happen to it? | [docs/LOCAL_RUNTIME.md](docs/LOCAL_RUNTIME.md) |
 | What is the state of the tickets? | Not in any file. Bootstrap the role MCP, call `work.discover`, then resolve the current ticket packet. If the MCP is unreachable, say so; do not reconstruct state from documents or old chat. |
 | Why does an invariant exist? | [docs/releases/README.md](docs/releases/README.md) names the release that introduced it |
-| What are the known structural risks? | [docs/reviews/2026-10-harness-architecture-review.md](docs/reviews/2026-10-harness-architecture-review.md) |
+| What are the known structural risks? | The `reviews/` rows of [docs/README.md](docs/README.md); each review is a dated snapshot |
 
 ## Run and verify
 
@@ -23,11 +23,10 @@ ticket state here; `tests/test_repo_docs.py` caps it at 900 words.
   and this checkout's `src/` (`tests/conftest.py` refuses any other tree) and
   runs `-n 6` by default (`-n 0` serial). Targeted runs may add `--no-cov`; the
   full suite must clear the 80% coverage gate.
-- `main` is green (1167 passed, 31 skipped, coverage 83% on 2026-10-05). A failure after your
-  change is yours until a run of unchanged `main` shows otherwise.
+- Baseline: run the same tests on unchanged `main`. A failure after your change
+  is yours until that run shows otherwise.
 - A local development instance: [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md).
-  Never start a component without the host environment (no
-  `HOH_DATABASE_PATH` creates a stray database).
+  Never start a component without the host environment.
 
 ## Rules for every task
 
@@ -83,9 +82,8 @@ The service enforces these; [ARCHITECTURE.md](docs/ARCHITECTURE.md) says where.
   require the `context_snapshot_id` of a packet read just before the write.
 - Packets are bounded (4,000 estimated tokens by default; contract fields 600
   characters, contract 1,200 tokens). Older history is resolved by reference.
-- Planner syncs repository truth after bootstrap and before every idle wait,
-  and keeps at most three current priorities. Execution roles report one
-  unhandled failure through `work.report_failure` before idling.
+- The scheduler and Planner's idle wait observe the repository; `work.report_failure`
+  turns a durable execution failure into one deduplicated Planner job.
 
 ## Role skills
 

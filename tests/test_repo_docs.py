@@ -52,6 +52,30 @@ def test_entry_router_stays_within_budget(name: str, budget: int) -> None:
     )
 
 
+def test_the_entry_router_records_no_live_numbers() -> None:
+    """AGENTS.md said "1167 passed ... on 2026-10-05" and "about 5 minutes" while
+    forbidding live state; a baseline comes from running unchanged main."""
+    text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    live = re.findall(
+        r"\b\d+ (?:passed|skipped|failed)\b|\b20\d\d-\d\d-\d\d\b|\b\d+(?:\.\d+)? ?min(?:ute)?s?\b"
+        r"|coverage \d+%",
+        text,
+    )
+    assert not live, f"AGENTS.md records live numbers: {live}"
+    assert "unchanged `main`" in text
+
+
+def test_the_enforced_invariants_claim_no_priority_cap() -> None:
+    """The server has no cap on Planner priorities; the rule lives in the Planner skill."""
+    text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    enforced = text.split("## Protocol invariants", 1)[1].split("\n## ", 1)[0]
+    assert "The service enforces these" in enforced
+    assert "priorit" not in enforced.lower()
+    assert "at most three active priorities" in (
+        ROOT / "skills" / "hoh-planner" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+
 DATABASE_ASSIGNMENT = re.compile(r"HOH_DATABASE_PATH\s*=\s*['\"]?([^'\"\s`]+)")
 # Databases that look plausible but are not the authoritative one (LOCAL_RUNTIME.md).
 WRONG_DATABASES = ("d:/hoh-service/data/", "control_plane.db")
