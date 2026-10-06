@@ -50,11 +50,12 @@ def record_regression_run(service, candidate_id: str, ticket_id: str, exit_code:
             """
             INSERT INTO qa_test_runs
                 (test_run_id, candidate_id, ticket_id, command_digest, exit_code, timed_out,
-                 duration_ms, storage_ref, report_path, executed_by, created_at)
-            VALUES (?, ?, ?, ?, ?, 0, 10, 'evidence://local/run.json', 'run.json', 'qa-01', ?)
+                 duration_ms, storage_ref, report_path, executed_by, created_at,
+                 termination_reason)
+            VALUES (?, ?, ?, ?, ?, 0, 10, 'evidence://local/run.json', 'run.json', 'qa-01', ?, ?)
             """,
             (f"testrun_{candidate_id[-8:]}_{exit_code}", candidate_id, ticket_id, digest,
-             exit_code, "2026-01-01T00:00:00Z"),
+             exit_code, "2026-01-01T00:00:00Z", "passed" if exit_code == 0 else "test_failure"),
         )
 
 

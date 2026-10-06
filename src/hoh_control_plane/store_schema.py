@@ -411,6 +411,9 @@ CREATE TABLE IF NOT EXISTS merge_intents (
     candidate_commit TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+-- qa_test_runs.termination_reason is the runner's classification
+-- (qa_runner.INFRASTRUCTURE_REASONS, 'passed', 'test_failure', ...). Only
+-- 'passed' is reusable or satisfies the gate; exit code 0 alone is not (8A, R1).
 CREATE TABLE IF NOT EXISTS qa_test_runs (
     test_run_id TEXT PRIMARY KEY,
     candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),
@@ -424,7 +427,9 @@ CREATE TABLE IF NOT EXISTS qa_test_runs (
     environment_digest TEXT,
     storage_checksum TEXT,
     executed_by TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    termination_reason TEXT,
+    provenance_status TEXT
 );
 CREATE INDEX IF NOT EXISTS qa_test_runs_candidate_created
     ON qa_test_runs(candidate_id, created_at);

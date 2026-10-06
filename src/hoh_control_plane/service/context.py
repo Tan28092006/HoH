@@ -116,6 +116,7 @@ _DEVELOPER_TEST_RUN_FIELDS = (
     "test_run_id",
     "exit_code",
     "timed_out",
+    "termination_reason",
     "duration_ms",
     "storage_ref",
 )

@@ -32,8 +32,10 @@ def seed_release_regression_run(service, ticket_id: str) -> None:
             """
             INSERT INTO qa_test_runs
                 (test_run_id, candidate_id, ticket_id, command_digest, exit_code, timed_out,
-                 duration_ms, storage_ref, report_path, executed_by, created_at)
-            VALUES (?, ?, ?, ?, 0, 0, 10, 'evidence://local/run.json', 'run.json', 'qa-01', ?)
+                 duration_ms, storage_ref, report_path, executed_by, created_at,
+                 termination_reason)
+            VALUES (?, ?, ?, ?, 0, 0, 10, 'evidence://local/run.json', 'run.json', 'qa-01', ?,
+                    'passed')
             """,
             (f"testrun_seed_{candidate['candidate_id']}", candidate["candidate_id"], ticket_id,
              digest, "2026-01-01T00:00:00Z"),

@@ -284,8 +284,9 @@ class IntegrationMixin:
             INSERT INTO qa_test_runs
                 (test_run_id, candidate_id, ticket_id, command_digest, exit_code, timed_out,
                  duration_ms, storage_ref, report_path, environment_digest,
-                 storage_checksum, executed_by, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 storage_checksum, executed_by, created_at, termination_reason,
+                 provenance_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 test_run_id,
@@ -301,6 +302,8 @@ class IntegrationMixin:
                 checksum,
                 actor.agent_id,
                 timestamp,
+                execution.termination_reason,
+                execution.provenance_status,
             ),
         )
         outcome = "timed out" if execution.timed_out else f"exited {execution.exit_code}"
@@ -318,6 +321,7 @@ class IntegrationMixin:
                 "candidate_commit": candidate_commit,
                 "exit_code": execution.exit_code,
                 "timed_out": execution.timed_out,
+                "termination_reason": execution.termination_reason,
                 "outcome": outcome,
             },
         )
@@ -465,7 +469,7 @@ class IntegrationMixin:
                 "No registered regression run was recorded against this candidate",
                 {"reason": "regression_run_missing"},
             )
-        if matching and not any(run["exit_code"] == 0 and not run["timed_out"] for run in matching):
+        if matching and not any(self._run_passed(run) for run in matching):
             raise ReleasePolicyError(
                 "The registered regression run did not complete successfully",
                 {"reason": "regression_run_failed"},
@@ -492,6 +496,36 @@ class IntegrationMixin:
                     "A current integration hold blocks this candidate",
                     {"reason": "integration_hold", "entry_id": holds[-1]["entry_id"]},
                 )
+
+    @staticmethod
+    def _run_passed(run: dict[str, Any]) -> bool:
+        """Whether a recorded run passed, as the runner itself classified it.
+
+        An exit code of 0 is not enough: a run that ended for an infrastructure
+        reason (output_truncated, capture_failure, ...) keeps its exit code, so
+        only ``termination_reason = 'passed'`` counts (wave 8A, R1). A row
+        written before the column has NULL there; its retained report, whose
+        checksum must still match, is the only honest source for that fact.
+        """
+        if run.get("exit_code") != 0 or run.get("timed_out"):
+            return False
+        reason = run.get("termination_reason")
+        if reason is not None:
+            return reason == "passed"
+        expected = run.get("storage_checksum")
+        if not expected or not run.get("report_path"):
+            return False
+        try:
+            body = Path(run["report_path"]).read_bytes()
+        except (OSError, TypeError, ValueError):
+            return False
+        if hashlib.sha256(body).hexdigest() != expected:
+            return False
+        try:
+            report = json.loads(body.decode("utf-8"))
+        except ValueError:
+            return False
+        return isinstance(report, dict) and report.get("termination_reason") == "passed"
 
     def _require_mergeable_identity(self, snapshot: dict[str, Any]) -> None:
         """Confirm the exact candidate still fast-forwards current main.
@@ -774,7 +808,9 @@ class IntegrationMixin:
                     or execution.capture_errors or execution.stdout_truncated or execution.stderr_truncated):
                 return self.fail_queued_merge(merge_job_id,
                     f"Integration infrastructure failure: {execution.termination_reason}; preserve candidate and retry after remediation. No source rework.")
-            if execution.exit_code != 0 or execution.timed_out:
+            # Only the runner's own 'passed' lands; an exit code of 0 with any
+            # other termination reason is not a passing gate (wave 8A, R1).
+            if execution.termination_reason != "passed" or execution.exit_code != 0 or execution.timed_out:
                 return self._complete_queued_merge(merge_job_id, False, candidate["base_commit"],
                     regression_failure=f"Integration regression failed; inspect {gate_run['storage_ref']} and submit corrected source for independent QA.")
         except DomainError as error:
@@ -971,6 +1007,7 @@ class IntegrationMixin:
                 JOIN qa_test_jobs j ON j.test_run_id = r.test_run_id
                 WHERE r.candidate_id = ? AND r.command_digest = ? AND j.timeout_seconds = ?
                   AND r.exit_code = 0 AND r.timed_out = 0 AND j.status = 'COMPLETED'
+                  AND r.termination_reason = 'passed'
                 ORDER BY r.created_at DESC LIMIT 1
                 """,
                 (candidate_id, digest, timeout_seconds),
@@ -1027,7 +1064,8 @@ class IntegrationMixin:
         if proof is None or proof["payload"].get("candidate_id") != job["candidate_id"]:
             return False
         return connection.execute(
-            "SELECT 1 FROM qa_test_runs WHERE test_run_id=? AND candidate_id=? AND exit_code=0 AND timed_out=0",
+            "SELECT 1 FROM qa_test_runs WHERE test_run_id=? AND candidate_id=? AND exit_code=0 AND timed_out=0 "
+            "AND termination_reason='passed'",
             (proof["payload"].get("test_run_id"), job["candidate_id"])).fetchone() is not None
 
     def reconcile_merge_job(self, actor: Actor, merge_job_id: str) -> dict[str, Any]:

@@ -352,6 +352,7 @@ class QaMixin:
                     WHERE j.candidate_id = ? AND j.status = 'COMPLETED'
                       AND j.command_digest = ? AND j.timeout_seconds = ?
                       AND r.exit_code = 0 AND r.timed_out = 0
+                      AND r.termination_reason = 'passed'
                     ORDER BY j.created_at DESC LIMIT 1
                     """,
                     (candidate["candidate_id"],
@@ -602,8 +603,9 @@ class QaMixin:
                     INSERT INTO qa_test_runs
                         (test_run_id, candidate_id, ticket_id, command_digest, exit_code, timed_out,
                          duration_ms, storage_ref, report_path, environment_digest,
-                         storage_checksum, executed_by, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         storage_checksum, executed_by, created_at, termination_reason,
+                         provenance_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         test_run_id,
@@ -619,6 +621,8 @@ class QaMixin:
                         checksum,
                         actor.agent_id,
                         timestamp,
+                        execution.termination_reason,
+                        execution.provenance_status,
                     ),
                 )
                 connection.execute(
@@ -663,6 +667,7 @@ class QaMixin:
                         "test_run_id": test_run_id,
                         "exit_code": execution.exit_code,
                         "timed_out": execution.timed_out,
+                        "termination_reason": execution.termination_reason,
                     },
                 )
                 if execution.termination_reason in _INFRASTRUCTURE_OUTCOMES:
@@ -748,7 +753,8 @@ class QaMixin:
         if test_run is not None:
             job.update({
                 key: test_run[key]
-                for key in ("exit_code", "timed_out", "duration_ms", "storage_ref", "report_path")
+                for key in ("exit_code", "timed_out", "duration_ms", "storage_ref", "report_path",
+                            "termination_reason", "provenance_status")
             })
         return job
 

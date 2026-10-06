@@ -48,7 +48,9 @@ class SchemaVersionError(SchemaMigrationError):
 #        queued candidate rebased onto a moved main, 7B);
 #        tickets.planning_base_stale (7C-1); project_run_guardrails and
 #        mainline_checks (7C-2); agent model_family, ticket risk tiers and
-#        high-risk approvals (7C-3).
+#        high-risk approvals (7C-3). Wave 8A adds, still under 3 (every
+#        column is additive and nullable, so a wave 7 build reads it safely):
+#        qa_test_runs.termination_reason and provenance_status (R1).
 SCHEMA_VERSION = 3
 
 
@@ -198,6 +200,11 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("agent_presence", "model", "TEXT"),
     ("candidates", "maker_model_family", "TEXT"),
     ("candidates", "maker_model", "TEXT"),
+    # Wave 8A: why a run ended, as the runner classified it, and how its
+    # imported source was attested. NULL on an older row means "not recorded";
+    # only 'passed' counts for reuse or the merge gate.
+    ("qa_test_runs", "termination_reason", "TEXT"),
+    ("qa_test_runs", "provenance_status", "TEXT"),
 )
 
 

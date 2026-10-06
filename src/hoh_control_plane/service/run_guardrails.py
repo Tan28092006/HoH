@@ -440,7 +440,7 @@ class RunGuardrailsMixin:
         )
         if infrastructure:
             outcome = "infrastructure"
-        elif execution.exit_code == 0 and not execution.timed_out:
+        elif execution.termination_reason == "passed" and execution.exit_code == 0 and not execution.timed_out:
             outcome = "green"
         else:
             outcome = "red"
