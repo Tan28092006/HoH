@@ -52,6 +52,29 @@ def test_entry_router_stays_within_budget(name: str, budget: int) -> None:
     )
 
 
+DATABASE_ASSIGNMENT = re.compile(r"HOH_DATABASE_PATH\s*=\s*['\"]?([^'\"\s`]+)")
+# Databases that look plausible but are not the authoritative one (LOCAL_RUNTIME.md).
+WRONG_DATABASES = ("d:/hoh-service/data/", "control_plane.db")
+
+
+@pytest.mark.parametrize("document", _documents(), ids=lambda p: p.relative_to(ROOT).as_posix())
+def test_no_document_points_a_component_at_a_wrong_database(document: Path) -> None:
+    """RUNTIME_OPERATIONS.md once told operators to start a supervisor on D:/HoH-service/data."""
+    wrong = []
+    for value in DATABASE_ASSIGNMENT.findall(document.read_text(encoding="utf-8")):
+        normalized = value.replace("\\", "/").lower()
+        absolute = re.match(r"^([a-z]:/|/|<|\$)", normalized)
+        if not absolute or any(marker in normalized for marker in WRONG_DATABASES):
+            wrong.append(value)
+    assert not wrong, f"{document.relative_to(ROOT)} sets HOH_DATABASE_PATH to {wrong}"
+
+
+def test_runtime_operations_is_not_a_release_note() -> None:
+    text = (ROOT / "docs" / "RUNTIME_OPERATIONS.md").read_text(encoding="utf-8")
+    assert "This release" not in text
+    assert not re.search(r"^#+ .*\b0\.\d+\.\d+", text, re.MULTILINE), "no version-scoped headings"
+
+
 def test_every_doc_is_indexed() -> None:
     index = (ROOT / "docs" / "README.md").read_text(encoding="utf-8")
     linked = {link for link in _relative_links(ROOT / "docs" / "README.md")}
