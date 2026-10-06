@@ -846,13 +846,42 @@ class PlannerJobMixin:
                 "planner_intervention", intervention_id, 1,
                 {"planner_job_id": intervention["planner_job_id"]},
             )
+            # Acknowledging a delivery report is reading it; a decision job stays open.
+            self._close_acknowledged_delivery_report(
+                connection, actor, intervention["planner_job_id"]
+            )
             return self._planner_intervention(connection, intervention_id)
 
+    # Packets are bounded (AGENTS.md); a discovery result is one too. The count
+    # beside the list says how much more is waiting.
+    PLANNER_JOB_DISCOVERY_LIMIT = 10
+    # Open jobs first, high severity before normal, then oldest first.
+    _PLANNER_JOB_ORDER = """
+        CASE WHEN j.status = 'RESOLVED' THEN 1 ELSE 0 END,
+        CASE WHEN EXISTS (
+            SELECT 1 FROM planner_interventions i
+            WHERE i.planner_job_id = j.planner_job_id AND i.severity = 'high'
+              AND i.status IN ('PENDING', 'DELIVERED')
+        ) THEN 0 ELSE 1 END,
+        j.created_at ASC, j.planner_job_id ASC"""
+
     def discover_planner_jobs(
-        self, actor: Actor, project_id: str, *, include_resolved: bool = False
+        self,
+        actor: Actor,
+        project_id: str,
+        *,
+        include_resolved: bool = False,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """List planning work separately from the executable Developer/QA queue."""
+        """List planning work separately from the executable Developer/QA queue.
+
+        At most ``limit`` jobs (default ``PLANNER_JOB_DISCOVERY_LIMIT``), high
+        severity first; ``count_planner_jobs`` gives the total.
+        """
         require_project(actor, project_id)
+        limit = self.PLANNER_JOB_DISCOVERY_LIMIT if limit is None else limit
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValidationError("limit must be an integer from 1 to 100")
         with self.store.connection(immediate=True) as connection:
             self._expire_planner_job_leases(connection)
             statuses = (
@@ -862,15 +891,86 @@ class PlannerJobMixin:
             )
             rows = connection.execute(
                 f"""
-                SELECT planner_job_id FROM planner_jobs
-                WHERE project_id = ? AND status IN ({', '.join('?' for _ in statuses)})
-                ORDER BY created_at ASC
+                SELECT j.planner_job_id FROM planner_jobs j
+                WHERE j.project_id = ? AND j.status IN ({', '.join('?' for _ in statuses)})
+                ORDER BY {self._PLANNER_JOB_ORDER}
+                LIMIT ?
                 """,
-                (project_id, *statuses),
+                (project_id, *statuses, limit),
             ).fetchall()
             return [
                 self._planner_job(connection, str(row["planner_job_id"])) for row in rows
             ]
+
+    def count_planner_jobs(self, actor: Actor, project_id: str) -> int:
+        """How many planning jobs are open, whatever discovery returned."""
+        require_project(actor, project_id)
+        with self.store.connection() as connection:
+            return int(connection.execute(
+                "SELECT COUNT(*) AS n FROM planner_jobs "
+                "WHERE project_id = ? AND status IN ('READY', 'IN_PROGRESS')",
+                (project_id,),
+            ).fetchone()["n"])
+
+    def _resolve_planner_job_row(
+        self,
+        connection: Connection,
+        actor: Actor,
+        planner_job_id: str,
+        resolution: str,
+        *,
+        event_payload: dict[str, Any] | None = None,
+    ) -> bool:
+        """Close one open planning job and its lease; False if it was already closed."""
+        timestamp = _iso()
+        job = _row(connection.execute(
+            "SELECT project_id, ticket_id, status FROM planner_jobs WHERE planner_job_id = ?",
+            (planner_job_id,),
+        ).fetchone())
+        if job is None or job["status"] == PlannerJobStatus.RESOLVED.value:
+            return False
+        connection.execute(
+            """
+            UPDATE planner_jobs
+            SET status = 'RESOLVED', resolution = ?, resolved_by = ?, resolved_at = ?,
+                updated_at = ?
+            WHERE planner_job_id = ? AND status IN ('READY', 'IN_PROGRESS')
+            """,
+            (resolution, actor.agent_id, timestamp, timestamp, planner_job_id),
+        )
+        connection.execute(
+            "DELETE FROM planner_job_leases WHERE planner_job_id = ?", (planner_job_id,)
+        )
+        self._event(
+            connection, actor, job["project_id"], "planner_job.resolved", "planner_job",
+            planner_job_id, 1, {"ticket_id": job["ticket_id"], **(event_payload or {})},
+        )
+        return True
+
+    def _close_acknowledged_delivery_report(
+        self, connection: Connection, actor: Actor, planner_job_id: str
+    ) -> bool:
+        """A delivery report is information: reading it is all it asks for.
+
+        Left open, every merge would add one READY job that nothing closes, and
+        the Planner's wake-up and discovery would fill with them (review R3).
+        Only an unleased report closes; one a Planner claimed stays theirs.
+        """
+        job = _row(connection.execute(
+            "SELECT job_type, status FROM planner_jobs WHERE planner_job_id = ?",
+            (planner_job_id,),
+        ).fetchone())
+        if (
+            job is None
+            or job["job_type"] != PlannerJobType.DELIVERY_COMPLETED.value
+            or job["status"] != PlannerJobStatus.READY.value
+        ):
+            return False
+        return self._resolve_planner_job_row(
+            connection, actor, planner_job_id,
+            f"Delivery report acknowledged by {actor.agent_id}.",
+            event_payload={"resolution": "delivery_acknowledged"},
+        )
 
     def claim_planner_job(
         self, actor: Actor, planner_job_id: str, lease_seconds: int = 900

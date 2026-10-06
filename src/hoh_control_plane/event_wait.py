@@ -210,6 +210,44 @@ def _expire_abandoned_planner_jobs(service):
         service._expire_planner_job_leases(db)
 
 
+PLANNER_JOB_EVENT_LIMIT = 50
+
+
+def _planner_job_events(db, actor, project):
+    """READY Planner jobs this Planner has not already acknowledged, urgent first.
+
+    The window excludes, in SQL, every job whose current event this agent has
+    already acknowledged (or that went obsolete), so fifty old reports read but
+    not resolved can never hide a new blocker behind the LIMIT (review R3). A
+    delivered but unacknowledged event stays in the window, so it is replayed.
+    """
+    rows = db.execute(
+        """
+        SELECT j.planner_job_id, j.ticket_id, j.updated_at FROM planner_jobs j
+        WHERE j.project_id = ? AND j.status = 'READY'
+          AND NOT EXISTS (
+              SELECT 1 FROM agent_event_deliveries d
+              WHERE d.agent_id = ? AND d.project_id = j.project_id
+                AND d.event_key = 'planner:' || j.planner_job_id || ':' || j.updated_at
+                AND d.state != 'pending'
+          )
+        ORDER BY
+          CASE WHEN EXISTS (
+              SELECT 1 FROM planner_interventions i
+              WHERE i.planner_job_id = j.planner_job_id AND i.severity = 'high'
+                AND i.status IN ('PENDING', 'DELIVERED')
+          ) THEN 0 ELSE 1 END,
+          j.created_at, j.planner_job_id
+        LIMIT ?
+        """,
+        (project, actor.agent_id, PLANNER_JOB_EVENT_LIMIT),
+    ).fetchall()
+    return [('planner:' + row['planner_job_id'] + ':' + row['updated_at'],
+             {'kind': 'planner_work', 'planner_job_id': row['planner_job_id'],
+              'ticket_ref': 'ticket:' + row['ticket_id']})
+            for row in rows]
+
+
 def _pending(service, actor, project, kind=None, identifier=None):
     if kind is not None:
         job, poll_tool, _ = _job(service, actor, project, kind, identifier)
@@ -296,10 +334,7 @@ def _pending(service, actor, project, kind=None, identifier=None):
         if active >= presence['capacity']:
             return []
         if actor.role == Role.PLANNER:
-            jobs = [('planner:' + row['planner_job_id'] + ':' + row['updated_at'],
-                     {'kind': 'planner_work', 'planner_job_id': row['planner_job_id'],
-                      'ticket_ref': 'ticket:' + row['ticket_id']})
-                    for row in db.execute("SELECT planner_job_id,ticket_id,updated_at FROM planner_jobs WHERE project_id=? AND status='READY' ORDER BY created_at LIMIT 50", (project,))]
+            jobs = _planner_job_events(db, actor, project)
             if jobs:
                 return jobs
             qa_tickets = [
@@ -505,6 +540,10 @@ async def wait_for_event(service, actor, project_id, *, timeout_seconds=43200,
                     raise AuthorizationError('Cannot acknowledge another agent or project event')
                 db.execute("UPDATE agent_event_deliveries SET state='acked',acknowledged_at=? WHERE event_id=?", (_iso(), ack_event_id))
                 db.execute('DELETE FROM agent_event_reservations WHERE project_id=? AND event_key=? AND agent_id=?', (project_id, delivery['event_key'], actor.agent_id))
+                if actor.role == Role.PLANNER and delivery['event_key'].startswith('planner:'):
+                    # planner:<job id>:<updated_at>; a delivery report closes on ack.
+                    service._close_acknowledged_delivery_report(
+                        db, actor, delivery['event_key'].split(':', 2)[1])
             db.execute('DELETE FROM agent_event_waiters WHERE agent_id=?', (actor.agent_id,))
             db.execute("INSERT INTO agent_event_waiters VALUES (?,?,?,?,?,'waiting',?,?)",
                        (actor.agent_id, project_id, actor.role.value, wait_id, receiver.getsockname()[1],

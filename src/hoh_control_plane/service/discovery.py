@@ -408,6 +408,7 @@ class DiscoveryMixin:
             # Planning decisions are their own queue: a Planner sees them beside,
             # never mixed into, the tickets an execution role can claim.
             discovered["planning_jobs"] = self.discover_planner_jobs(actor, project_id)
+            discovered["planning_job_count"] = self.count_planner_jobs(actor, project_id)
         return discovered
 
     _DEPENDENCY_UNMET_CASE = f"CASE WHEN {_DEPENDENCY_UNMET} THEN 0 ELSE 1 END"
@@ -523,6 +524,7 @@ class DiscoveryMixin:
             # it reads them here. A board view that dropped them would make the
             # default call the one that hides the work Planner must do first.
             "planning_jobs": self.discover_planner_jobs(actor, project["project_id"]),
+            "planning_job_count": self.count_planner_jobs(actor, project["project_id"]),
             "detail_call": {
                 "tool": "work.discover",
                 "arguments": {
