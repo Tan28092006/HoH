@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from hoh_control_plane import contracts
+from hoh_control_plane.service.context import BARE_REFERENCE_KINDS
 from hoh_control_plane.service._common import (
     Actor,
     Any,
@@ -240,11 +241,13 @@ class BoardMixin:
                     collapsed[key] = entry = {
                         "type": row["aggregate_type"],
                         "id": row["aggregate_id"],
-                        "ref": f"{row['aggregate_type']}:{row['aggregate_id']}",
                         "events": 0,
                         "last_event": row["event_type"],
                         "at": row["occurred_at"],
                     }
+                    # A ref is offered only where context.resolve can follow it.
+                    if row["aggregate_type"] in BARE_REFERENCE_KINDS:
+                        entry["ref"] = f"{row['aggregate_type']}:{row['aggregate_id']}"
                 entry["events"] += 1
                 # The newest wins: where it ended up is what a caller acts on.
                 entry["last_event"] = row["event_type"]

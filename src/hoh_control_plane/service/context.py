@@ -67,6 +67,49 @@ _TICKET_SUMMARY_FIELDS = (
 )
 _VERSION_TOKEN = re.compile(r"v[0-9]+")
 
+# The bare typed references the server writes into Planner jobs, findings,
+# events and packets, and the ctx: kind each one resolves as. context.resolve
+# accepts both spellings, so a reference copied from any tool result resolves
+# without the caller learning a second vocabulary.
+BARE_REFERENCE_KINDS: dict[str, str] = {
+    "context": "entry",
+    "finding": "finding",
+    "candidate": "candidate",
+    "ticket": "ticket",
+    "feature": "feature",
+    "experience": "experience",
+    "test_run": "test_run",
+    "qa_test_job": "test_run",
+    "qa_test_jobs": "test_run",
+    "merge_job": "merge_job",
+    "worktree_provision_job": "provision",
+    "candidate_submission_job": "submission",
+    "planner_job": "planner_job",
+}
+# Worker and Planner jobs a reference can name: table, key column, fields shown.
+_JOB_REFERENCES: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    "test_run": ("qa_test_jobs", "test_run_id", (
+        "test_run_id", "ticket_id", "candidate_id", "status", "candidate_commit",
+        "error_message", "created_at", "completed_at",
+    )),
+    "merge_job": ("merge_jobs", "merge_job_id", (
+        "merge_job_id", "ticket_id", "candidate_id", "status", "merge_status",
+        "mainline_commit", "error_message", "created_at", "completed_at",
+    )),
+    "provision": ("worktree_provision_jobs", "provision_id", (
+        "provision_id", "ticket_id", "status", "error_message", "created_at", "completed_at",
+    )),
+    "submission": ("candidate_submission_jobs", "submission_id", (
+        "submission_id", "ticket_id", "candidate_id", "commit_sha", "status",
+        "error_message", "created_at", "completed_at",
+    )),
+    "planner_job": ("planner_jobs", "planner_job_id", (
+        "planner_job_id", "ticket_id", "job_type", "status", "summary", "candidate_id",
+        "evidence_refs", "resolution", "created_at", "resolved_at",
+    )),
+}
+_MAX_RESOLVED_FINDINGS = 50
+
 # Who wrote each section, so a reader can tell direction from evidence. Planner
 # text sets the work; developer, qa and integrator text is advisory, a claim or
 # an observation to check rather than an instruction; system is server state.
@@ -518,10 +561,15 @@ class ContextMixin:
         entry type a role never sees in a packet is not visible here either,
         and a project the actor is not scoped to is not found.
         """
-        if not isinstance(reference, str) or not reference.startswith("ctx:"):
+        if not isinstance(reference, str):
             raise ValidationError("reference must be a typed ctx: reference from a packet")
+        reference = self._canonical_reference(reference)
         parts = reference.split(":")
         kind = parts[1] if len(parts) > 2 else ""
+        if any(not part for part in parts[2:]):
+            raise ValidationError("reference has an empty identifier")
+        if kind == "experience" and len(parts) == 3:
+            return {"reference": reference, **self.get_experience(actor, parts[2])}
         with self.store.connection() as connection:
             if kind == "entry" and len(parts) == 3:
                 return self._resolve_entry(connection, actor, parts[2])
@@ -529,8 +577,12 @@ class ContextMixin:
                 "developer_claims", "changed_paths"
             }:
                 return self._resolve_candidate_section(connection, actor, parts[2], parts[3])
+            if kind == "candidate" and len(parts) == 3:
+                return self._resolve_candidate_summary(connection, actor, parts[2])
             if kind == "finding" and len(parts) == 3:
                 return self._resolve_finding(connection, actor, parts[2])
+            if kind in _JOB_REFERENCES and len(parts) == 3:
+                return self._resolve_job(connection, actor, kind, parts[2])
             rest = parts[3:]
             if rest and _VERSION_TOKEN.fullmatch(rest[0]):
                 rest = rest[1:]
@@ -551,10 +603,95 @@ class ContextMixin:
                 return {"reference": reference, rest[0]: packet[rest[0]]}
         raise ValidationError(
             "Unsupported reference; resolvable forms are ctx:entry:<id>, "
-            "ctx:candidate:<id>:developer_claims, ctx:candidate:<id>:changed_paths, "
-            "ctx:finding:<id>, ctx:ticket:<id>[:v<n>][:<section>|:history] and "
-            "ctx:feature:<id>[:v<n>][:<section>]"
+            "ctx:candidate:<id>[:developer_claims|:changed_paths], "
+            "ctx:finding:<id>, ctx:experience:<id>, "
+            + ", ".join(f"ctx:{kind}:<id>" for kind in _JOB_REFERENCES)
+            + ", "
+            "ctx:ticket:<id>[:v<n>][:<section>|:history] and "
+            "ctx:feature:<id>[:v<n>][:<section>], or the bare "
+            + ", ".join(f"{prefix}:<id>" for prefix in sorted(BARE_REFERENCE_KINDS))
+            + " the server emits"
         )
+
+    @staticmethod
+    def _canonical_reference(reference: str) -> str:
+        """Spell a bare server reference (candidate:<id>, context:<id>, ...) as ctx:."""
+        if reference.startswith("ctx:"):
+            return reference
+        prefix, separator, rest = reference.partition(":")
+        if separator and prefix in BARE_REFERENCE_KINDS:
+            return f"ctx:{BARE_REFERENCE_KINDS[prefix]}:{rest}"
+        raise ValidationError(
+            "reference must be a typed ctx: reference or one of "
+            + ", ".join(f"{name}:<id>" for name in sorted(BARE_REFERENCE_KINDS))
+        )
+
+    def _resolve_candidate_summary(
+        self, connection: Connection, actor: Actor, candidate_ref: str
+    ) -> dict[str, Any]:
+        """A frozen candidate's identity, its QA findings and its section references.
+
+        A handoff entry may name the candidate by its commit rather than its id,
+        so an unknown id falls back to the newest candidate with that commit.
+        """
+        candidate = _row(connection.execute(
+            "SELECT * FROM candidates WHERE candidate_id = ?", (candidate_ref,)
+        ).fetchone()) or _row(connection.execute(
+            "SELECT * FROM candidates WHERE commit_sha = ? "
+            "ORDER BY submitted_at DESC LIMIT 1",
+            (candidate_ref,),
+        ).fetchone())
+        if candidate is None:
+            raise NotFoundError("Candidate not found")
+        self._authorized_ticket(connection, actor, candidate["ticket_id"])
+        candidate_id = candidate["candidate_id"]
+        findings = connection.execute(
+            "SELECT finding_id, status, severity, criterion FROM qa_findings "
+            "WHERE candidate_id = ? ORDER BY created_at, finding_id LIMIT ?",
+            (candidate_id, _MAX_RESOLVED_FINDINGS),
+        ).fetchall()
+        return {
+            "reference": f"ctx:candidate:{candidate_id}",
+            "candidate": {
+                key: candidate.get(key)
+                for key in (
+                    "candidate_id", "ticket_id", "commit_sha", "base_commit", "branch_ref",
+                    "submitted_by", "submitted_at", "derived_from",
+                )
+            },
+            "findings": [
+                {
+                    "reference": f"ctx:finding:{row['finding_id']}",
+                    "status": row["status"],
+                    "severity": row["severity"],
+                    "criterion": _checkpoint(row["criterion"]),
+                }
+                for row in findings
+            ],
+            "sections": [
+                f"ctx:candidate:{candidate_id}:developer_claims",
+                f"ctx:candidate:{candidate_id}:changed_paths",
+            ],
+        }
+
+    def _resolve_job(
+        self, connection: Connection, actor: Actor, kind: str, job_id: str
+    ) -> dict[str, Any]:
+        """The outcome of one worker or Planner job that a reference cites."""
+        table, key, fields = _JOB_REFERENCES[kind]
+        job = _row(connection.execute(
+            f"SELECT * FROM {table} WHERE {key} = ?", (job_id,)
+        ).fetchone())
+        if job is None:
+            raise NotFoundError("Job not found")
+        self._authorized_ticket(connection, actor, job["ticket_id"])
+        summary = {field: job.get(field) for field in fields}
+        for field in ("error_message", "summary", "resolution"):
+            if isinstance(summary.get(field), str):
+                summary[field] = _checkpoint(summary[field])
+        if isinstance(summary.get("evidence_refs"), str):
+            summary["evidence_refs"] = json.loads(summary["evidence_refs"])
+        return {"reference": f"ctx:{kind}:{job_id}", kind: summary}
 
     def _resolve_ticket_summary(
         self, connection: Connection, actor: Actor, ticket_id: str, reference: str

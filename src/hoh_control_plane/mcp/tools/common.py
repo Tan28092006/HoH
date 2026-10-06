@@ -353,12 +353,16 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
 
     @server.tool(name="context.resolve", structured_output=True)
     def context_resolve(reference: str) -> dict[str, Any]:
-        """Resolve one typed reference cited by a packet's omitted_sections.
+        """Resolve one typed reference from a packet, Planner job, event or tool result.
 
-        Accepts ctx:entry:<id>, ctx:candidate:<id>:developer_claims,
-        ctx:candidate:<id>:changed_paths, ctx:finding:<id>,
-        ctx:ticket:<id>[:v<n>][:<section>|:history] and
-        ctx:feature:<id>[:v<n>][:<section>]. Returns only that item.
+        Accepts ctx:entry:<id>, ctx:candidate:<id>[:developer_claims|:changed_paths],
+        ctx:finding:<id>, ctx:experience:<id>, ctx:test_run:<id>, ctx:merge_job:<id>,
+        ctx:planner_job:<id>, ctx:ticket:<id>[:v<n>][:<section>|:history] and
+        ctx:feature:<id>[:v<n>][:<section>], and the bare forms the server writes
+        (candidate:<id>, context:<id>, finding:<id>, experience:<id>, test_run:<id>,
+        merge_job:<id>, ticket:<id>, ...). Returns only that item.
+
+        Example: context.resolve(reference="finding:finding_0007")
         """
         arguments = {"reference": reference}
         return invoke(
