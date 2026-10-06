@@ -56,7 +56,7 @@ test runs and merges stay `QUEUED`:
 .\scripts\start-supervisor.ps1
 ```
 
-Open <http://127.0.0.1:8775>. These scripts start a development instance on its own database, `D:\HoH\tmp\dev\control-plane.db`, and refuse the real one under `D:\HoH\data` and the installed host's ports; they enable local identity headers and seed a demo project into the dev database. To attach the role-scoped MCP to separate Codex or Claude agents, follow [docs/LOCAL_SETUP.md](./docs/LOCAL_SETUP.md).
+Open <http://127.0.0.1:8775>. These scripts start a development instance on its own database, `D:\HoH\tmp\dev\control-plane.db`, and refuse the real one under `D:\HoH\data` and the installed host's ports; they enable local identity headers and seed nothing unless `start-dashboard.ps1 -SeedDemo` asks for the demo project. To attach the role-scoped MCP to separate Codex or Claude agents, follow [docs/LOCAL_SETUP.md](./docs/LOCAL_SETUP.md).
 
 For how a long-lived Codex or Claude Code role worker waits for hand-offs,
 see [docs/ROLE_WAKEUPS.md](./docs/ROLE_WAKEUPS.md).

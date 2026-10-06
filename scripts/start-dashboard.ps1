@@ -5,7 +5,8 @@ param(
     # Defaults to D:\HoH\tmp\dev\control-plane.db (or HOH_DEV_DATABASE_PATH); the
     # real database under D:\HoH\data or D:\HoH-service is refused.
     [string]$DatabasePath,
-    [switch]$NoSeedDemo
+    # Opt-in: a demo project is seeded into the dev database only when asked.
+    [switch]$SeedDemo
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,8 +24,9 @@ $env:HOH_DATABASE_PATH = $database
 $env:HOH_HOST = "127.0.0.1"
 $env:HOH_PORT = "$Port"
 $env:HOH_LOCAL_MODE = "1"
-# The demo project only ever goes into the dev database resolved above.
-$env:HOH_SEED_DEMO = if ($NoSeedDemo) { "0" } else { "1" }
+# Seeding is opt-in, and the demo project only ever goes into the dev database
+# resolved above.
+$env:HOH_SEED_DEMO = if ($SeedDemo) { "1" } else { "0" }
 
 Write-Host "Harness Control dev dashboard: http://127.0.0.1:$Port (database $database)"
 & $venvPython -m hoh_control_plane

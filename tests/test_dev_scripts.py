@@ -103,6 +103,16 @@ def test_the_dev_defaults_are_not_the_installed_hosts() -> None:
         assert "data\\control-plane.db" not in text, script
 
 
+def test_the_dev_dashboard_seeds_the_demo_project_only_when_asked() -> None:
+    dashboard = (SCRIPTS / "start-dashboard.ps1").read_text(encoding="utf-8")
+
+    assert "[switch]$SeedDemo" in dashboard
+    assert "NoSeedDemo" not in dashboard
+    assert '$env:HOH_SEED_DEMO = if ($SeedDemo) { "1" } else { "0" }' in dashboard
+    for document in (ROOT / "README.md", ROOT / "docs" / "LOCAL_SETUP.md"):
+        assert "NoSeedDemo" not in document.read_text(encoding="utf-8"), document.name
+
+
 def test_the_quick_starts_start_the_supervisor() -> None:
     """Workers default to supervised mode: without a supervisor, queued jobs never run."""
     supervisor = (SCRIPTS / "start-supervisor.ps1").read_text(encoding="utf-8")

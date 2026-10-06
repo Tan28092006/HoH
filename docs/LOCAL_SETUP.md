@@ -33,11 +33,12 @@ cd D:\HoH
 .\scripts\start-dashboard.ps1
 ```
 
-Open <http://127.0.0.1:8775>. The dashboard remains local (`127.0.0.1`), seeds
-the `demo` project into the dev database when empty, and shows Jira-like ticket progress plus redacted
-Agent activity. Keep this terminal running while you want the dashboard.
+Open <http://127.0.0.1:8775>. The dashboard remains local (`127.0.0.1`) and
+shows Jira-like ticket progress plus redacted Agent activity. Keep this terminal
+running while you want the dashboard.
 
-Use `-NoSeedDemo` only when a Planner will create the first project itself.
+It seeds nothing by default. Add `-SeedDemo` to put the `demo` project into the
+dev database when it is empty.
 
 In a second PowerShell window, start the local lease scheduler:
 
