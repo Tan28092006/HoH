@@ -130,7 +130,7 @@ class ProjectPolicyMixin:
         require_role(actor, Role.PLANNER, Role.ADMIN)
         require_project(actor, project_id)
         self._bounded_list(capabilities, "capabilities", 50, 100, required=True)
-        if quality_policy not in {"legacy", "claim-evidence-v1"}:
+        if quality_policy not in contracts.QUALITY_POLICIES:
             raise ValidationError("quality_policy must be legacy or claim-evidence-v1")
         normalized = sorted(set(capabilities))
         if len(normalized) != len(capabilities):

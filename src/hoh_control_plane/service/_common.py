@@ -161,12 +161,9 @@ CONTEXT_ENTRY_TYPES = frozenset(
         "integration_regression_failed",
         "integration_authorization",
         "bootstrap_integration",
-        # Written by a Planner.
-        "planner_decision",
-        "design_decision",
-        "risk",
-        "note",
     }
+    # Written by a Planner: the values planner.append_context offers.
+    | contracts.PLANNER_ENTRY_TYPES
 )
 
 # Labels that mean exactly what a vocabulary type means. Mapping these is a

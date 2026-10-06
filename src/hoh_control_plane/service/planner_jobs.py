@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hoh_control_plane import contracts
 from hoh_control_plane.service._common import (
     _audit_event_has_field,
     Actor,
@@ -29,6 +30,15 @@ from hoh_control_plane.service._common import (
     timedelta,
     uuid4,
 )
+
+# The failed worker job a failure report may cite: table, key and the terminal
+# states that count as failed. Its keys are contracts.FailedJobKind.
+_FAILED_JOB_TABLES: dict[str, tuple[str, str, set[str]]] = {
+    "worktree_provision": ("worktree_provision_jobs", "provision_id", {"FAILED"}),
+    "candidate_submission": ("candidate_submission_jobs", "submission_id", {"FAILED"}),
+    "qa_test": ("qa_test_jobs", "test_run_id", {"FAILED", "STALE"}),
+    "merge": ("merge_jobs", "merge_job_id", {"FAILED"}),
+}
 
 
 class PlannerJobMixin:
@@ -161,15 +171,7 @@ class PlannerJobMixin:
         """
         require_role(actor, Role.DEVELOPER, Role.QA, Role.INTEGRATOR)
         require_project(actor, project_id)
-        allowed_classes = {
-            "source_or_contract",
-            "infrastructure",
-            "dependency",
-            "integration_conflict",
-            "security_or_data",
-            "unknown_durable",
-        }
-        if failure_class not in allowed_classes:
+        if failure_class not in contracts.FAILURE_CLASSES:
             raise ValidationError(
                 "failure_class must identify a durable source/contract, infrastructure, "
                 "dependency, integration, security/data or unknown failure"
@@ -191,13 +193,7 @@ class PlannerJobMixin:
                 raise ConflictError("Planner retirement is already handling this ticket")
             source_ref: str
             if job_kind is not None and job_id is not None:
-                jobs = {
-                    "worktree_provision": ("worktree_provision_jobs", "provision_id", {"FAILED"}),
-                    "candidate_submission": ("candidate_submission_jobs", "submission_id", {"FAILED"}),
-                    "qa_test": ("qa_test_jobs", "test_run_id", {"FAILED", "STALE"}),
-                    "merge": ("merge_jobs", "merge_job_id", {"FAILED"}),
-                }
-                selected = jobs.get(job_kind)
+                selected = _FAILED_JOB_TABLES.get(job_kind)
                 if selected is None:
                     raise ValidationError(
                         "job_kind must be worktree_provision, candidate_submission, qa_test or merge"
@@ -398,7 +394,7 @@ class PlannerJobMixin:
             raise ValidationError(
                 "resume_role must be developer, qa or integrator"
             ) from error
-        if target_role not in {Role.DEVELOPER, Role.QA, Role.INTEGRATOR}:
+        if target_role.value not in contracts.EXECUTION_ROLES:
             raise ValidationError("resume_role must be developer, qa or integrator")
         with self.store.connection(immediate=True) as connection:
             job = self._planner_job(connection, planner_job_id)

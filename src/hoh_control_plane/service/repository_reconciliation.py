@@ -450,7 +450,7 @@ class RepositoryReconciliationMixin:
         """List immutable Git observations still awaiting a board decision."""
         require_role(actor, Role.PLANNER, Role.ADMIN)
         require_project(actor, project_id)
-        if status not in {"PENDING", "RESOLVED"}:
+        if status not in contracts.RECONCILIATION_STATUSES:
             raise ValidationError("status must be PENDING or RESOLVED")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
             raise ValidationError("limit must be an integer from 1 to 100")

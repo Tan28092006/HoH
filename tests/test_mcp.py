@@ -187,7 +187,7 @@ async def test_planner_mcp_creates_ready_ticket_and_records_safe_tool_activity(t
         "planner.append_context",
         {
             "ticket_id": "DEV-100",
-            "entry_type": "planning_decision",
+            "entry_type": "planner_decision",
             "content": "Split code and QA work by observable behavior.",
         },
     )

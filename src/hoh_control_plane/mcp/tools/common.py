@@ -47,7 +47,7 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
         capacity: int = 1,
         machine_id: str | None = None,
         presence_seconds: int = 120,
-        skill_manifest: list[dict[str, Any]] | None = None,
+        skill_manifest: contracts.SkillManifest | None = None,
         protocol_version: str | None = None,
         model_family: str | None = None,
         model: str | None = None,
@@ -65,7 +65,7 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
         cover the ticket validation contract on the same machine.
 
         skill_manifest is an optional list of {name, version, checksum, loaded_at}
-        entries recording which skill files this agent actually loaded; combined
+        entries (loaded_at ISO-8601) recording which skill files this agent actually loaded; combined
         with protocol_version, it lets a project's skill policy flag this agent
         as incompatible before it can claim work, without ever granting it any
         role permission it does not already hold.
@@ -82,7 +82,7 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
             "capacity": capacity,
             "machine_id": machine_id,
             "presence_seconds": presence_seconds,
-            "skill_manifest": skill_manifest,
+            "skill_manifest": contracts.as_payload(skill_manifest),
             "protocol_version": protocol_version,
             "model_family": model_family,
             "model": model,
@@ -117,7 +117,8 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
         @server.tool(name="work.wait_for_event", structured_output=True)
         async def work_wait_for_event(project_id: str, timeout_seconds: int = 43200,
                                       ack_event_id: str | None = None,
-                                      job_kind: str | None = None, job_id: str | None = None,
+                                      job_kind: contracts.WaitJobKind | None = None,
+                                      job_id: str | None = None,
                                       resume_wait_id: str | None = None) -> dict[str, Any]:
             """Keep this GUI chat waiting without model polling until work or a job result arrives.
 
@@ -193,10 +194,10 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
         def work_report_failure(
             project_id: str,
             ticket_id: str,
-            failure_class: str,
+            failure_class: contracts.FailureClass,
             summary: str,
             evidence_refs: list[str] | None = None,
-            job_kind: str | None = None,
+            job_kind: contracts.FailedJobKind | None = None,
             job_id: str | None = None,
             idempotency_key: str | None = None,
         ) -> dict[str, Any]:
@@ -206,6 +207,12 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
             empty inbox, stale context, lease/state conflict or first transient
             transport timeout. Supply a failed worker job when the error came
             from provision, submission, QA execution or merge.
+
+            Example:
+                work.report_failure(
+                    project_id="p1", ticket_id="T-7", failure_class="infrastructure",
+                    summary="Test runner cannot start: port 5432 refused",
+                    job_kind="qa_test", job_id="run_12")
             """
             arguments = {
                 "project_id": project_id,
@@ -257,10 +264,10 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
         dependency_ready: bool = True,
         blocked_only: bool = False,
         limit: int = 50,
-        status: list[str] | None = None,
+        status: list[contracts.TicketStatusName] | None = None,
         feature_id: str | None = None,
         priority_min: int | None = None,
-        awaiting_role: str | None = None,
+        awaiting_role: contracts.ExecutionRole | None = None,
         unassigned_only: bool = False,
         cursor: str | None = None,
         detail: bool | None = None,
@@ -401,7 +408,13 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
     def experience_record(
         ticket_id: str, lesson: str, file_scope: list[str] | None = None
     ) -> dict[str, Any]:
-        """File a lesson against the file scope it was learned in, for whoever works there next."""
+        """File a lesson against the file scope it was learned in, for whoever works there next.
+
+        ticket_id is the ticket you hold (a ticket:<id> reference is accepted too).
+
+        Example: experience.record(ticket_id="T-7",
+            lesson="Reset the payment stub between retry tests", file_scope=["src/checkout/**"])
+        """
         arguments = {"ticket_ref": ticket_id, "lesson": lesson, "file_scope": file_scope}
         return invoke(
             "experience.record",
@@ -455,7 +468,7 @@ def register_lease_heartbeat(server: FastMCP, service: ControlPlaneService, acto
 
         @server.tool(name="work.heartbeat", structured_output=True)
         def work_heartbeat(lease_id: str, lease_seconds: int = 900) -> dict[str, Any]:
-            """Renew an active Developer or QA lease while useful work is in progress."""
+            """Renew an active Developer, QA or Integrator lease while useful work is in progress."""
             arguments = {"lease_id": lease_id, "lease_seconds": lease_seconds}
             return invoke(
                 "work.heartbeat", arguments, lambda: service.heartbeat(actor, **arguments)
