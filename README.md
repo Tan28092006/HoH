@@ -29,7 +29,7 @@ See the [production audit](docs/PRODUCTION_AUDIT.md) for measured improvements a
 remaining scale limits, [agent kit setup](docs/AGENT_KIT.md) to onboard a new chat,
 and [browser QA](docs/UI_QA.md) for candidate UI acceptance.
 
-The full architecture is in [HOH_MULTI_AGENT_CONTROL_PLANE.md](./HOH_MULTI_AGENT_CONTROL_PLANE.md).
+How the code is organized, and where each invariant is enforced, is in [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md). The original product specification, which also contains requirements that were never built, is [HOH_MULTI_AGENT_CONTROL_PLANE.md](./HOH_MULTI_AGENT_CONTROL_PLANE.md).
 
 ## Local quick start
 

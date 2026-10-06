@@ -100,11 +100,34 @@ def test_runtime_operations_is_not_a_release_note() -> None:
 
 
 def test_every_doc_is_indexed() -> None:
-    index = (ROOT / "docs" / "README.md").read_text(encoding="utf-8")
-    linked = {link for link in _relative_links(ROOT / "docs" / "README.md")}
-    unindexed = [
-        path.relative_to(ROOT / "docs").as_posix()
-        for path in sorted((ROOT / "docs").glob("*.md"))
-        if path.name != "README.md" and path.relative_to(ROOT / "docs").as_posix() not in linked
-    ]
+    """Subfolders count too: a glob of docs/*.md once let docs/reviews/ go unindexed.
+    Release notes are routed by their own index, docs/releases/README.md."""
+    docs = ROOT / "docs"
+    index = (docs / "README.md").read_text(encoding="utf-8")
+    linked = {link for link in _relative_links(docs / "README.md")}
+    releases = {link for link in _relative_links(docs / "releases" / "README.md")}
+    unindexed = []
+    for path in sorted(docs.rglob("*.md")):
+        relative = path.relative_to(docs).as_posix()
+        if relative == "README.md" or relative in linked:
+            continue
+        if path.parent == docs / "releases" and path.name in releases:
+            continue
+        unindexed.append(relative)
     assert index and not unindexed, f"docs/README.md does not route to: {unindexed}"
+
+
+def test_the_architecture_service_table_lists_every_mixin_module() -> None:
+    """ARCHITECTURE.md said "25 mixins" when there were 26; it lists them instead."""
+    text = (ROOT / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    service = ROOT / "src" / "hoh_control_plane" / "service"
+    modules = sorted(p.name for p in service.glob("*.py") if not p.name.startswith("_"))
+    missing = [name for name in modules if f"| `{name}` |" not in text]
+    assert not missing, f"ARCHITECTURE.md's service table omits {missing}"
+    assert not re.search(r"\b\d+\s+mixins\b|\b\d+ distinct cross-mixin\b", text), "no rotting counts"
+
+
+def test_the_readme_does_not_call_the_specification_the_architecture() -> None:
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "full architecture" not in text.lower()
+    assert "docs/ARCHITECTURE.md" in text
