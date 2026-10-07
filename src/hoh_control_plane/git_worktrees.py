@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
-from hoh_control_plane.domain import ValidationError
+from hoh_control_plane.domain import GitPreconditionError, ValidationError
 from hoh_control_plane.resource_lock import exclusive_file_lock
 from hoh_control_plane.managed_process import run_managed
 
@@ -754,9 +754,9 @@ class GitWorktreeManager:
         repository = Path(self.validate_repository(repository_path))
         active_branch = self._git(repository, "branch", "--show-current").stdout.strip()
         if active_branch != default_branch:
-            raise ValidationError("Repository default branch is not checked out for integration")
+            raise GitPreconditionError("Repository default branch is not checked out for integration")
         if self._git(repository, 'status', '--porcelain').stdout.strip():
-            raise ValidationError('Repository must be clean before integration')
+            raise GitPreconditionError('Repository must be clean before integration')
         current = self._resolve_commit(repository, f"refs/heads/{default_branch}")
         expected_base = self._resolve_commit(repository, expected_base_commit)
         candidate = self._resolve_commit(repository, candidate_commit)
@@ -834,7 +834,7 @@ class GitWorktreeManager:
             raise ValidationError("Rebased candidate does not descend from the expected mainline")
         checked_out = self._git(repository, "branch", "--show-current").stdout.strip() == default_branch
         if checked_out and self._git(repository, 'status', '--porcelain').stdout.strip():
-            raise ValidationError('Repository must be clean before integration')
+            raise GitPreconditionError('Repository must be clean before integration')
         updated = self._git(repository, "update-ref", "-m", "hoh: land rebased candidate",
                             ref, new, old, check=False)
         if updated.returncode != 0:

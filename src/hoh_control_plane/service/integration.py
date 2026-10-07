@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 
+from hoh_control_plane.domain import GitPreconditionError
 from hoh_control_plane.service.qa import _INFRASTRUCTURE_OUTCOMES
 from hoh_control_plane.service.run_guardrails import MergeQueueGuard
 from hoh_control_plane.service._common import (
@@ -687,6 +688,7 @@ class IntegrationMixin:
 
     def _execute_queued_merge_locked(self, merge_job_id: str) -> dict[str, Any]:
         preflight_error: str | None = None
+        outcome = "barrier_pending"
         with self.store.connection(immediate=True) as connection:
             job = self._merge_job(connection, merge_job_id)
             if job["status"] != "QUEUED":
@@ -695,11 +697,13 @@ class IntegrationMixin:
             ticket = self._ticket(connection, job["ticket_id"])
             try:
                 self._require_repository_reconciled(connection, job["project_id"], job["ticket_id"])
+                outcome = "ticket_changed"
                 if ticket["status"] != TicketStatus.MERGE_READY.value:
                     raise ConflictError(
                         "Ticket is no longer ready for integration before the merge worker started"
                     )
                 self._expect_version(ticket, job["expected_version"])
+                outcome = "lease_expired"
                 self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
             except DomainError as error:
                 preflight_error = str(error)
@@ -718,7 +722,7 @@ class IntegrationMixin:
                     (_iso(), merge_job_id),
                 )
         if preflight_error is not None:
-            return self.fail_queued_merge(merge_job_id, preflight_error)
+            return self._fail_merge_precondition(merge_job_id, outcome, preflight_error)
         try:
             snapshot = self._release_policy_snapshot(actor, job["ticket_id"])
             # A rebased candidate carrying QA over gets its regression run from
@@ -776,7 +780,11 @@ class IntegrationMixin:
                     f"Integration infrastructure failure: {execution.termination_reason}; preserve candidate and retry after remediation. No source rework.")
             if execution.exit_code != 0 or execution.timed_out:
                 return self._complete_queued_merge(merge_job_id, False, candidate["base_commit"],
-                    regression_failure=f"Integration regression failed; inspect {gate_run['storage_ref']} and submit corrected source for independent QA.")
+                    regression_failure=(
+                        f"Candidate configuration is invalid ({execution.stderr[:300]}); fix it and "
+                        "submit corrected source for independent QA."
+                        if execution.termination_reason == "candidate_config_invalid" else
+                        f"Integration regression failed; inspect {gate_run['storage_ref']} and submit corrected source for independent QA."))
         except DomainError as error:
             return self.fail_queued_merge(merge_job_id, str(error))
         return self._finish_gate_and_merge(
@@ -979,23 +987,29 @@ class IntegrationMixin:
 
     def _finish_gate_and_merge(self, merge_job_id, job, actor, candidate, repository, project,
                                test_run_id: str, *, gate_mode: str) -> dict[str, Any]:
+        # A hold, barrier or lost lease during a long gate must still prevent
+        # Git. Each is a precondition that changed before Git was touched, so
+        # the job fails cleanly under its own outcome (review A7).
+        outcome = "release_policy_changed"
         try:
-            # A hold or revoked lease during a long gate must still prevent Git.
             current = self._release_policy_snapshot(actor, job["ticket_id"])
             self._require_release_evidence(current)
             if current["candidate"]["candidate_id"] != job["candidate_id"]:
                 raise ConflictError("Candidate changed while the integration gate ran")
             with self.store.connection(immediate=True) as connection:
                 current_ticket = self._ticket(connection, job["ticket_id"])
+                outcome = "barrier_pending"
                 self._require_repository_reconciled(connection, job["project_id"], job["ticket_id"])
+                outcome = "ticket_changed"
                 self._expect_version(current_ticket, job["expected_version"])
+                outcome = "lease_expired"
                 self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
                 self._event(connection, actor, job["project_id"], "integration.gate_passed", "merge_job",
                     merge_job_id, job["expected_version"], {"candidate_id": job["candidate_id"],
                         "candidate_commit": candidate["commit_sha"], "test_run_id": test_run_id,
                         "gate_mode": gate_mode})
         except DomainError as error:
-            return self.fail_queued_merge(merge_job_id, str(error))
+            return self._fail_merge_precondition(merge_job_id, outcome, str(error))
         try:
             if candidate.get("derived_from"):
                 # A server-rebased tree lands only by compare-and-set: Git
@@ -1014,6 +1028,14 @@ class IntegrationMixin:
                     candidate_commit=candidate["commit_sha"],
                 )
             return self._complete_queued_merge(merge_job_id, merged, mainline_commit)
+        except GitPreconditionError as error:
+            # Refused before any write: nothing to reconcile. A dirty or
+            # wrongly checked-out shared checkout is the host's to repair.
+            return self.fail_queued_merge(
+                merge_job_id,
+                f"git_precondition_failed: {error}. Nothing changed in Git; repair the shared "
+                "checkout, then resume the ticket for the Integrator. No source rework.",
+            )
         except DomainError as error:
             # Git may already have changed. Preserve the intent and reconcile
             # facts instead of turning an uncertain side effect into a retry.
@@ -1315,6 +1337,50 @@ class IntegrationMixin:
                 covered_by_gate=bool(gate_covers_main) and mainline_commit == candidate_commit_of(
                     gate_covers_main["payload"]),
             )
+            return self._merge_job(connection, merge_job_id)
+
+    # A merge that stopped on one of these never reached Git. None is an
+    # infrastructure fault or a source defect, so the ticket is not blocked
+    # and no Planner job opens: the candidate and its QA verdict stand.
+    _MERGE_PRECONDITION_NEXT = {
+        "barrier_pending": "queue the merge again once Planner resolves the reconciliation.",
+        "lease_expired": "the ticket returns to the Integrator queue; claim it and queue the merge again.",
+        "ticket_changed": "read the ticket again; it moved on while the merge waited.",
+        "release_policy_changed": "the release evidence changed during the gate; restore it, then queue the merge again.",
+    }
+
+    def _fail_merge_precondition(
+        self, merge_job_id: str, outcome: str, detail: str
+    ) -> dict[str, Any]:
+        """Fail a merge cleanly on a precondition that changed before Git was touched."""
+        message = (
+            f"precondition_failed:{outcome}: {detail[:1000]}. Nothing changed in Git; the "
+            f"candidate and its QA verdict stand; {self._MERGE_PRECONDITION_NEXT[outcome]}"
+        )
+        with self.store.connection(immediate=True) as connection:
+            job = self._merge_job(connection, merge_job_id)
+            if job["status"] in {"COMPLETED", "FAILED"}:
+                return job
+            timestamp = _iso()
+            connection.execute(
+                """UPDATE merge_jobs SET status = 'FAILED', error_message = ?, completed_at = ?
+                   WHERE merge_job_id = ?""",
+                (message, timestamp, merge_job_id),
+            )
+            actor = Actor(job["requested_by"], Role.INTEGRATOR, frozenset({job["project_id"]}))
+            ticket = self._ticket(connection, job["ticket_id"])
+            self._event(
+                connection, actor, job["project_id"], "integration.merge_precondition_failed",
+                "ticket", job["ticket_id"], ticket["version"],
+                {"merge_job_id": merge_job_id, "outcome": outcome},
+            )
+            if connection.execute(
+                "SELECT 1 FROM leases WHERE ticket_id = ? AND expires_at > ?",
+                (job["ticket_id"], timestamp),
+            ).fetchone() is None:
+                # Nobody holds the ticket any more; offer it again rather than
+                # leave verified work waiting for someone to notice.
+                self._queue_ticket(connection, actor, job["project_id"], ticket)
             return self._merge_job(connection, merge_job_id)
 
     def fail_queued_merge(self, merge_job_id: str, error_message: str) -> dict[str, Any]:

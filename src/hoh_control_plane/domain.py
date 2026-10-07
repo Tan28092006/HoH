@@ -162,6 +162,17 @@ class ValidationError(DomainError):
     status_code = 422
 
 
+class GitPreconditionError(ValidationError):
+    """A Git step refused before it changed anything (review A7).
+
+    Raised only from checks that run before the first write, such as a dirty
+    shared checkout. Unlike any other Git error, it is never an uncertain side
+    effect: the caller knows nothing changed and need not reconcile Git facts.
+    """
+
+    code = "git_precondition_failed"
+
+
 def require_role(actor: Actor, *roles: Role) -> None:
     if actor.role not in roles:
         allowed = ", ".join(role.value for role in roles)

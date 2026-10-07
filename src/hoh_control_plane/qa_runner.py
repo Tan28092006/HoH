@@ -322,7 +322,14 @@ class ProjectTestRunner:
         requested_workers = xdist_workers(arguments)
         started = time.perf_counter()
         digest = hashlib.sha256("\0".join(command).encode()).hexdigest()
-        modules = self._provenance_modules(worktree)
+        config_error = None
+        try:
+            modules = self._provenance_modules(worktree)
+        except (tomllib.TOMLDecodeError, UnicodeDecodeError) as error:
+            # The candidate's own pyproject.toml is broken: a source defect for
+            # the Developer, never an infrastructure fault (review A7).
+            modules = []
+            config_error = f"candidate_config_invalid: pyproject.toml cannot be parsed: {error}"
         resources = resource_snapshot()
         manifest = {"schema_version": 1, "command": command, "command_digest": digest,
                     "provenance_modules": modules, "host_resources": resources,
@@ -336,7 +343,7 @@ class ProjectTestRunner:
             arguments = with_xdist_workers(arguments, memory_sized_workers(resources))
         effective_workers = xdist_workers(arguments)
         manifest["xdist_workers"] = {"requested": requested_workers, "effective": effective_workers}
-        def result(reason, *, child=None, completed=None):
+        def result(reason, *, child=None, completed=None, detail=None):
             child = child or {}
             manifest["child"] = child
             paths = [v["path"] for v in child.get("source_modules", {}).values()]
@@ -346,7 +353,7 @@ class ProjectTestRunner:
                 exit_code=(None if completed is None or completed.timed_out else completed.returncode),
                 timed_out=bool(completed and completed.timed_out),
                 duration_ms=round((time.perf_counter() - started) * 1000),
-                stdout=completed.stdout if completed else "", stderr=completed.stderr if completed else reason,
+                stdout=completed.stdout if completed else "", stderr=completed.stderr if completed else (detail or reason),
                 resolved_source=paths[0] if paths else None, environment_digest=hashlib.sha256(material).hexdigest(),
                 artifact_mismatch=provenance in {"mismatch", "unresolved"}, provenance_status=provenance,
                 termination_reason=reason, environment_manifest={
@@ -357,6 +364,8 @@ class ProjectTestRunner:
                 stdout_truncated=bool(completed and completed.stdout_truncated),
                 stderr_truncated=bool(completed and completed.stderr_truncated),
                 capture_errors=completed.capture_errors if completed else ())
+        if config_error is not None:
+            return result("candidate_config_invalid", detail=config_error)
         # This is an admission floor, not a promise that every test fits. Retain
         # the measured facts so a later allocation failure is diagnosable.
         if resources.get("available_physical_bytes", 2**63) < 256 * 1024**2 or resources.get(
