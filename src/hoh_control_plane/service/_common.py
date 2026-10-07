@@ -109,6 +109,10 @@ MAX_QA_REJECTIONS = 3
 #: next drift blocks the ticket for Planner as ``drift_budget_exhausted``.
 MAX_AUTO_REBASES = 3
 REWORK_BUDGET_EXHAUSTED = "rework_budget_exhausted"
+# Evidence ref that marks a Planner job as a pure QA capability review for one
+# agent (``capability_review:<agent_id>``); capability approval closes only those.
+# Shared here because both the capability and the Planner job mixins read it.
+CAPABILITY_REVIEW_MARK = "capability_review:"
 
 # How often one project's repository is observed (fetch and compare), whoever
 # asks: a waiting Planner (event_wait) or the scheduler's sweep. The throttle is

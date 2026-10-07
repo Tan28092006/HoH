@@ -3,6 +3,7 @@ from __future__ import annotations
 from hoh_control_plane import contracts
 from hoh_control_plane.capability_probe import machine_fingerprint
 from hoh_control_plane.service._common import (
+    CAPABILITY_REVIEW_MARK,
     _audit_event_has_field,
     Actor,
     Any,
@@ -42,9 +43,6 @@ _FAILED_JOB_TABLES: dict[str, tuple[str, str, set[str]]] = {
 }
 
 
-# Evidence ref that marks a job as a pure QA capability review for one agent
-# (``capability_review:<agent_id>``); capability approval closes only those.
-CAPABILITY_REVIEW_MARK = "capability_review:"
 # Evidence ref that groups QA failures by machine and class
 # (``qa_machine:<machine fingerprint>:<failure_class>``). While a job carrying
 # it is open, that machine is quarantined from QA offers and claims.

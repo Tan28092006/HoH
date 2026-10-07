@@ -17,8 +17,8 @@ from __future__ import annotations
 import hashlib
 
 from hoh_control_plane.capability_probe import machine_fingerprint
-from hoh_control_plane.service.planner_jobs import CAPABILITY_REVIEW_MARK
 from hoh_control_plane.service._common import (
+    CAPABILITY_REVIEW_MARK,
     Actor,
     Any,
     Connection,
