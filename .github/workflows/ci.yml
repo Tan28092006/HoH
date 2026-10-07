@@ -1,0 +1,77 @@
+# Tests for every pull request and every push to main. See docs/TESTING.md.
+#
+# Pull requests run the fast lane (-m "not slow and not git"). Pushes to main and
+# manual runs run the full suite with the 80% coverage gate. No secrets are used:
+# the PostgreSQL suite and the browser tests skip without their settings.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  tests:
+    name: ${{ github.event_name == 'pull_request' && 'fast lane' || 'full suite' }} (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 30 || 75 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        # pyproject: requires-python = ">=3.12"
+        python: ["3.12", "3.13"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Configure Git for test repositories
+        run: |
+          git config --global user.name "HoH CI"
+          git config --global user.email "hoh-ci@example.invalid"
+          git config --global init.defaultBranch main
+          git config --global core.longpaths true
+
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+
+      # tests/conftest.py refuses a package imported from anywhere but this
+      # checkout's src/; the editable install and PYTHONPATH both point there.
+      - name: Fast lane
+        if: github.event_name == 'pull_request'
+        env:
+          PYTHONPATH: src
+        run: >
+          python -m pytest -q -n auto -p no:cacheprovider
+          -m "not slow and not git"
+          --basetemp="${{ runner.temp }}/p"
+
+      - name: Full suite with coverage gate
+        if: github.event_name != 'pull_request'
+        env:
+          PYTHONPATH: src
+        run: >
+          python -m pytest -q -n auto -p no:cacheprovider
+          --cov=hoh_control_plane --cov-branch --cov-report=term-missing
+          --cov-fail-under=80
+          --basetemp="${{ runner.temp }}/p"

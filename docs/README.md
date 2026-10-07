@@ -26,6 +26,7 @@ its tests win.
 | --- | --- | --- |
 | [LOCAL_RUNTIME.md](LOCAL_RUNTIME.md) | Touching the installed service at `D:/HoH-service`, its database or host settings | current; verify facts with the commands it gives |
 | [LOCAL_SETUP.md](LOCAL_SETUP.md) | Setting up a development instance from this checkout | current |
+| [TESTING.md](TESTING.md) | Running tests, choosing a lane, changing CI, markers or the coverage gate, or writing test helpers | current |
 | [RUNTIME_OPERATIONS.md](RUNTIME_OPERATIONS.md) | Changing the supervisor, managed workers or crash recovery | current |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | Network deployment, TLS, bearer identities, PostgreSQL | current |
 | [AGENT_KIT.md](AGENT_KIT.md) | Building or installing a portable role kit for a client | current |
