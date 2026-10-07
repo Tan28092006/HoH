@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from test_integration_async import (
+from helpers.integration import (
     _candidate_ready_for_integration,
     _claimed_for_integration,
     _git,

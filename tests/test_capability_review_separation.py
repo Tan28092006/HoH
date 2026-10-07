@@ -9,7 +9,7 @@ ticket's job open.
 """
 from __future__ import annotations
 
-from test_capability_preflight import CAPABILITIES, _open_jobs, blocked  # noqa: F401
+from helpers.capability import CAPABILITIES, _open_jobs, blocked  # noqa: F401
 
 from hoh_control_plane.domain import InterventionSeverity, PlannerJobType
 from hoh_control_plane.service.planner_jobs import CAPABILITY_REVIEW_MARK

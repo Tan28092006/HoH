@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
-from test_repository_sync import _tracked_repository
+from helpers.repository import _tracked_repository
 
 from hoh_control_plane import contracts
 from hoh_control_plane.domain import ValidationError

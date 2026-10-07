@@ -279,7 +279,7 @@ def test_a_supervisor_stop_during_a_slow_branch_move_leaves_ref_and_tree_consist
     service, actors, seeded, tmp_path, monkeypatch
 ):
     """The R6 acceptance check: fake Git sleeps 20 s while ``stopping`` is set."""
-    from test_integration_async import _candidate_ready_for_integration, _claimed_for_integration
+    from helpers.integration import _candidate_ready_for_integration, _claimed_for_integration
     from hoh_control_plane.supervisor import Supervisor
     from hoh_control_plane.uncancellable import is_uncancellable, marker_path
 

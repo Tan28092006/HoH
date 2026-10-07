@@ -15,7 +15,7 @@ import pytest
 from hoh_control_plane.domain import ValidationError
 from hoh_control_plane.git_worktrees import GitWorktreeManager
 
-from test_candidate_submission import _prepared_candidate
+from helpers.candidate import _prepared_candidate
 
 UNUSUAL = ["src/checkout/tiếng việt.txt", "src/checkout/émoji 🙂.txt", "src/checkout/ñ/日本.md"]
 

@@ -7,7 +7,7 @@ now closes the job's request.
 """
 from __future__ import annotations
 
-from test_capability_preflight import CAPABILITIES, _open_jobs, blocked  # noqa: F401
+from helpers.capability import CAPABILITIES, _open_jobs, blocked  # noqa: F401
 from helpers.planner import _blocked_ticket
 
 from hoh_control_plane.domain import Actor, Role

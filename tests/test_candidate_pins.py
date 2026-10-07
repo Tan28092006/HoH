@@ -17,8 +17,8 @@ from hoh_control_plane.domain import Actor, Role, ValidationError
 from hoh_control_plane.git_worktrees import CANDIDATE_REF_PREFIX, GitWorktreeManager
 from hoh_control_plane.service._common import CANDIDATE_PIN_RETENTION_SECONDS
 
-from test_candidate_submission import _prepared_candidate
-from test_integration_async import (
+from helpers.candidate import _prepared_candidate
+from helpers.integration import (
     _candidate_ready_for_integration,
     _claimed_for_integration,
 )
