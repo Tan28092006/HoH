@@ -808,6 +808,7 @@ class QaMixin:
             )
             if candidate["commit_sha"] != ticket["candidate_commit"]:
                 raise ConflictError("Candidate does not match the frozen ticket artifact")
+            self._refuse_self_review(connection, actor, candidate, "judge")
             # Re-checked at the write: a re-registration under another family
             # after the claim must not let a same-family verdict through.
             family_check = self._maker_checker_family_check(

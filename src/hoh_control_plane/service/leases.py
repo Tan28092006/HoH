@@ -277,6 +277,12 @@ class LeaseMixin:
                 self._maker_checker_family_check(connection, actor, project_id, ticket_id)
                 if actor.role is Role.QA else None
             )
+            if actor.role in {Role.QA, Role.INTEGRATOR} and ticket.get("candidate_commit"):
+                self._refuse_self_review(connection, actor, _row(connection.execute(
+                    "SELECT * FROM candidates WHERE ticket_id = ? AND commit_sha = ? "
+                    "ORDER BY submitted_at DESC LIMIT 1",
+                    (ticket_id, ticket["candidate_commit"]),
+                ).fetchone()), "claim")
             existing = connection.execute(
                 "SELECT * FROM leases WHERE ticket_id = ?", (ticket_id,)
             ).fetchone()

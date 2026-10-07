@@ -8,7 +8,8 @@ import tomllib
 
 from hoh_control_plane.domain import Actor, Role
 from hoh_control_plane.local_agent import checked_project, profile_actor
-from hoh_control_plane.local_credentials import register_local_credential
+from hoh_control_plane.local_credentials import (
+    deliver_token, register_local_credential, token_delivery_available, token_env_var)
 
 
 def recognized_actor(name, profile, root, legacy_repository=None):
@@ -62,10 +63,7 @@ def replace_codex_table(text, name, profile):
             break
     lines = [f'[{target}]']
     for key, value in profile.items():
-        if key == 'http_headers':
-            encoded = '{ Authorization = ' + json.dumps(value['Authorization']) + ' }'
-        else:
-            encoded = json.dumps(value)
+        encoded = json.dumps(value)
         lines.append(f'{key} = {encoded}')
     segment = text[headers[index].start():end]
     trailing = re.search(r'\n(?:[ \t]*(?:#[^\n]*)?\n)*\Z', segment)
@@ -98,16 +96,22 @@ def migrate(root, home, client, legacy_repository=None, apply=False):
                         'project_ids': sorted(actor.project_ids)})
         if not apply:
             continue
+        if not token_delivery_available():
+            raise ValueError('shared-http profiles deliver their token through the Windows user environment')
+        # The profile names an environment variable, never the token (wave 8A, R4).
+        token_var = token_env_var(actor.agent_id)
         token = register_local_credential(root, actor)
+        if token is not None:
+            deliver_token(token_var, token)
         config = json.loads((root / 'config/settings.json').read_text(encoding='utf-8'))
         updated = {key: value for key, value in profile.items() if key not in {'command', 'args', 'env', 'type'}}
         updated['url'] = f"http://127.0.0.1:{int(config['mcp_port'])}/mcp"
         if client == 'codex':
-            updated['http_headers'] = {'Authorization': 'Bearer ' + token}
+            updated['bearer_token_env_var'] = token_var
             updated['tool_timeout_sec'] = max(updated.get('tool_timeout_sec', 86400), 86400)
             text = replace_codex_table(text, name, updated)
         else:
-            updated.update(type='http', headers={'Authorization': 'Bearer ' + token})
+            updated.update(type='http', headers={'Authorization': 'Bearer ${' + token_var + '}'})
             updated['timeout'] = max(updated.get('timeout', 86400000), 86400000)
             profiles[name] = updated
     backup = None

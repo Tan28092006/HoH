@@ -111,7 +111,8 @@ def test_drain_waits_for_workers_and_reopen_restores_admission(desktop):
 
 
 @pytest.mark.parametrize('client_name', ['codex', 'claude-code'])
-def test_shared_http_upgrades_only_generated_profile_and_keeps_identity(desktop, tmp_path, client_name):
+def test_shared_http_upgrades_only_generated_profile_and_keeps_identity(desktop, tmp_path, client_name,
+                                                                      delivered_tokens):
     import tomllib
     from hoh_control_plane.auth import credentials_from_environment
     from hoh_control_plane.local_agent import install_profile
@@ -132,7 +133,22 @@ def test_shared_http_upgrades_only_generated_profile_and_keeps_identity(desktop,
     assert credentials[0].actor.agent_id == new['agent_id']
     assert credentials[0].actor.project_ids == frozenset({'shop'})
     assert credentials[0].token not in json.dumps(new)
-    install_profile(root, 'shop', 'qa', 'primary', client_name, home, transport='shared-http')
+    # Wave 8A, R4: the config names an environment variable; the token went to
+    # that variable once, and the credential file keeps only its digest.
+    from hoh_control_plane.auth import resolve_actor
+    variable = new['token_env_var']
+    assert new['token_issued'] is True and variable == 'HOH_MCP_TOKEN_' + new['agent_id'].upper().replace('-', '_')
+    token = delivered_tokens[variable]
+    assert token not in content and 'Bearer ' + token not in content
+    assert token not in (root / 'config/agent-credentials.json').read_text()
+    assert credentials[0].hashed
+    if client_name == 'codex':
+        assert profile['bearer_token_env_var'] == variable and 'http_headers' not in profile
+    else:
+        assert profile['headers'] == {'Authorization': 'Bearer ${' + variable + '}'}
+    assert resolve_actor(credentials, 'Bearer ' + token).agent_id == new['agent_id']
+    repeated = install_profile(root, 'shop', 'qa', 'primary', client_name, home, transport='shared-http')
+    assert repeated['token_issued'] is False and delivered_tokens[variable] == token
     assert path.read_text() == content
 
 
@@ -163,6 +179,10 @@ def test_legacy_migration_preserves_actor_and_unrelated_config(desktop, tmp_path
     assert 'command' not in parsed['mcp_servers']['hoh-developer']
     credentials = credentials_from_environment((root / 'config/agent-credentials.json').read_text())
     assert credentials[0].actor.agent_id == 'original-dev'
+    # Wave 8A, R4: no literal bearer token in the migrated profile.
+    assert parsed['mcp_servers']['hoh-developer']['bearer_token_env_var'] == 'HOH_MCP_TOKEN_ORIGINAL_DEV'
+    assert 'http_headers' not in parsed['mcp_servers']['hoh-developer'] and 'Bearer' not in path.read_text()
+    assert credentials[0].hashed
     assert not migrate(root, home, 'codex', legacy, apply=True)['profiles']
 
 

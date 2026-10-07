@@ -44,6 +44,23 @@ from hoh_control_plane.store import SQLiteStore
 
 
 @pytest.fixture(autouse=True)
+def delivered_tokens(monkeypatch) -> dict[str, str]:
+    """No test writes the operator's real user environment (wave 8A, R4).
+
+    A shared-http profile delivers its token to a Windows user environment
+    variable; under test the delivery lands in this dict instead.
+    """
+    delivered: dict[str, str] = {}
+    monkeypatch.setattr("hoh_control_plane.local_credentials.deliver_token",
+                        lambda name, token: delivered.__setitem__(name, token))
+    monkeypatch.setattr("hoh_control_plane.local_credentials.token_delivery_available", lambda: True)
+    import hoh_control_plane.profile_migration as migration
+    monkeypatch.setattr(migration, "deliver_token", delivered.__setitem__)
+    monkeypatch.setattr(migration, "token_delivery_available", lambda: True)
+    return delivered
+
+
+@pytest.fixture(autouse=True)
 def _git_has_no_wall_clock_budget_in_tests(monkeypatch):
     """Tests assert what Git did, not how fast this machine ran it.
 

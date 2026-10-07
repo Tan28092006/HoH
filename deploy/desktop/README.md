@@ -71,9 +71,17 @@ conversation cannot be reopened by MCP.
 
 New desktop setup prompts use `--transport shared-http`. Each chat connects
 directly to the existing loopback MCP host, so no Python/PowerShell server is
-spawned per chat. Setup provisions a private role/project credential in
-`config/agent-credentials.json` and the client configuration. Never paste those
-files into a chat or include them in a release archive. The host reloads this
+spawned per chat. Setup provisions a private role/project credential:
+`config/agent-credentials.json` keeps only `sha256:<digest>` of each token, the
+token goes once to the Windows user environment variable
+`HOH_MCP_TOKEN_<AGENT_ID>`, and the client configuration names that variable
+(`bearer_token_env_var` for Codex, `Bearer ${...}` for Claude Code) instead of
+holding the token. Restart the client after setup so it inherits the variable.
+Repeating setup keeps the issued token; `--rotate-token` issues a new one and
+revokes the old. An older plaintext entry is re-keyed to its digest the next
+time that profile is set up. Never paste the variable's value into a chat or a
+release archive. The server, not the client, refuses an agent that claims,
+judges or merges a candidate it submitted (`self_review`). The host reloads this
 map before authenticating each request and lazily builds one tool surface per
 identity. HTTP sessions are stateless; idle GUI connections do not accumulate
 server-side session managers. Revoked credentials cannot reuse a cached actor.

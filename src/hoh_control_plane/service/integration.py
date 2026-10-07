@@ -610,6 +610,7 @@ class IntegrationMixin:
             candidate = self._current_integration_candidate(connection, ticket)
             if candidate["candidate_id"] != snapshot["candidate"]["candidate_id"]:
                 raise ConflictError("Candidate changed after integration policy validation")
+            self._refuse_self_review(connection, actor, candidate, "merge")
             # Risk tier gate (wave 7C3): medium needs adversarial review evidence,
             # high also needs policy.approve_high_risk on this candidate.
             self._require_risk_tier_cleared(connection, project_id, ticket, candidate)

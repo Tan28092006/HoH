@@ -7,6 +7,7 @@ come from a presented credential rather than from this process's environment.
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import os
@@ -25,12 +26,38 @@ NETWORK_TRANSPORTS = ("streamable-http", "sse")
 _MINIMUM_TOKEN_CHARS = 32
 
 
+#: A credential map key with this prefix holds sha256(token) as hex, not the
+#: token itself (wave 8A, R4). A generated token never contains ':'.
+HASHED_TOKEN_PREFIX = "sha256:"
+_HEX_DIGEST_CHARS = 64
+
+
+def token_digest(token: str) -> str:
+    """The stored form of a token: ``sha256:<hex>``."""
+    return HASHED_TOKEN_PREFIX + hashlib.sha256(token.encode("ascii")).hexdigest()
+
+
+def _is_token_digest(key: str) -> bool:
+    digest = key[len(HASHED_TOKEN_PREFIX):]
+    return (key.startswith(HASHED_TOKEN_PREFIX) and len(digest) == _HEX_DIGEST_CHARS
+            and all(char in "0123456789abcdef" for char in digest))
+
+
 @dataclass(frozen=True)
 class AgentCredential:
-    """One bearer token and the identity it authenticates as."""
+    """One bearer token, or its sha256 digest, and the identity it authenticates as."""
 
     token: str
     actor: Actor
+
+    @property
+    def hashed(self) -> bool:
+        return _is_token_digest(self.token)
+
+    @property
+    def digest(self) -> str:
+        """The digest form, whichever form is stored; comparable across both."""
+        return self.token if self.hashed else token_digest(self.token)
 
 
 def credentials_from_environment(raw: str | None = None) -> tuple[AgentCredential, ...]:
@@ -92,9 +119,13 @@ def resolve_actor(
     presented = authorization[len(prefix) :]
     if not presented.isascii():
         raise AuthorizationError("Unknown credential")
+    presented_digest = token_digest(presented)
     matched: Actor | None = None
     for credential in credentials:
-        if hmac.compare_digest(credential.token, presented) and matched is None:
+        # A stored digest is compared with the presented token's digest; a
+        # plaintext entry (static map, or a file written before 8A) as before.
+        expected = presented_digest if credential.hashed else presented
+        if hmac.compare_digest(credential.token, expected) and matched is None:
             matched = credential.actor
     if matched is None:
         raise AuthorizationError("Unknown credential")
