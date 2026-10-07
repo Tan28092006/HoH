@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hoh_control_plane.capability_probe import machine_fingerprint
 from hoh_control_plane.service._common import (
     _audit_event_has_field,
     Actor,
@@ -31,8 +32,123 @@ from hoh_control_plane.service._common import (
 )
 
 
+# Evidence ref that marks a job as a pure QA capability review for one agent
+# (``capability_review:<agent_id>``); capability approval closes only those.
+CAPABILITY_REVIEW_MARK = "capability_review:"
+# Evidence ref that groups QA failures by machine and class
+# (``qa_machine:<machine fingerprint>:<failure_class>``). While a job carrying
+# it is open, that machine is quarantined from QA offers and claims.
+QA_MACHINE_MARK = "qa_machine:"
+# The failure classes grouped per machine; any other class is the ticket's own.
+QA_MACHINE_FAILURE_CLASSES = frozenset({"infrastructure"})
+_QA_MACHINE_JOB_REF_LIMIT = 100
+# Who closes a wake-up request whose Planner job was resolved.
+JOB_RESOLVED_ACKNOWLEDGER = "system:planner-job-resolved"
+
+
 class PlannerJobMixin:
     """Planner job queue and intervention outbox."""
+
+    def _qa_machine_job(
+        self, connection: Connection, project_id: str, pattern: str
+    ) -> dict[str, Any] | None:
+        return _row(connection.execute(
+            """
+            SELECT * FROM planner_jobs
+            WHERE project_id = ? AND status IN ('READY', 'IN_PROGRESS') AND evidence_refs LIKE ?
+            ORDER BY created_at ASC LIMIT 1
+            """,
+            (project_id, pattern),
+        ).fetchone())
+
+    def _qa_machine_quarantined(
+        self, connection: Connection, project_id: str, machine_id: str | None
+    ) -> bool:
+        """True while an open machine failure job names this QA machine."""
+        fingerprint = machine_fingerprint(machine_id)
+        if fingerprint is None:
+            return False
+        return self._qa_machine_job(
+            connection, project_id, f'%"{QA_MACHINE_MARK}{fingerprint}:%'
+        ) is not None
+
+    def _group_qa_machine_failure(
+        self,
+        connection: Connection,
+        actor: Actor,
+        project_id: str,
+        ticket: dict[str, Any],
+        failure_class: str,
+        evidence_refs: list[str],
+    ) -> dict[str, Any] | None:
+        """Route a QA infrastructure failure to its machine, not to the ticket (review C3).
+
+        One broken QA machine used to block every ticket it touched. Now the
+        machine's capability approvals are revoked and one Planner job per
+        ``(machine, failure_class)`` collects the failures. Returns None when the
+        failure is not a groupable QA one; ``planner_job`` None when this is the
+        machine's first failure, which the caller records on this ticket with
+        ``mark`` in its evidence; otherwise the group job, already updated, and
+        the caller returns the ticket to QA instead of blocking it.
+        """
+        if actor.role is not Role.QA or failure_class not in QA_MACHINE_FAILURE_CLASSES:
+            return None
+        presence = _row(connection.execute(
+            "SELECT machine_id FROM agent_presence WHERE agent_id = ?", (actor.agent_id,)
+        ).fetchone())
+        fingerprint = machine_fingerprint((presence or {}).get("machine_id"))
+        if fingerprint is None:
+            return None
+        mark = f"{QA_MACHINE_MARK}{fingerprint}:{failure_class}"
+        self._revoke_qa_machine_approvals(connection, actor, project_id, fingerprint)
+        job = self._qa_machine_job(connection, project_id, f'%"{mark}"%')
+        if (
+            job is None
+            or job["ticket_id"] == ticket["ticket_id"]
+            or ticket["status"] != TicketStatus.QA_IN_PROGRESS.value
+        ):
+            return {"mark": mark, "planner_job": None}
+        merged = list(dict.fromkeys(
+            [*job["evidence_refs"], f"ticket:{ticket['ticket_id']}", *evidence_refs]
+        ))[:_QA_MACHINE_JOB_REF_LIMIT]
+        connection.execute(
+            "UPDATE planner_jobs SET evidence_refs = ?, updated_at = ? WHERE planner_job_id = ?",
+            (json.dumps(merged), _iso(), job["planner_job_id"]),
+        )
+        self._event(
+            connection, actor, project_id, "planner_job.evidence_added", "planner_job",
+            job["planner_job_id"], ticket["version"],
+            {"ticket_id": ticket["ticket_id"], "job_type": job["job_type"], "grouped_by": mark},
+        )
+        refreshed = self._planner_job(connection, job["planner_job_id"])
+        self._record_planner_intervention(
+            connection, actor, refreshed, event_class=PlannerJobType(refreshed["job_type"]),
+            severity=InterventionSeverity.NORMAL, artifact_commit=None,
+        )
+        return {"mark": mark, "planner_job": refreshed}
+
+    def _return_ticket_to_qa(
+        self, connection: Connection, actor: Actor, project_id: str,
+        ticket: dict[str, Any], planner_job: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Release a QA lease lost to a machine fault and offer the ticket again."""
+        timestamp = _iso()
+        connection.execute(
+            "DELETE FROM leases WHERE ticket_id = ? AND role = ?", (ticket["ticket_id"], Role.QA.value)
+        )
+        next_version = _transition_ticket(
+            connection, ticket["ticket_id"], actor=actor, expected_version=ticket["version"],
+            from_statuses=(TicketStatus.QA_IN_PROGRESS,),
+            changes={"status": TicketStatus.QA_READY, "updated_at": timestamp},
+        )
+        self._event(
+            connection, actor, project_id, "qa.machine_failure_grouped", "ticket",
+            ticket["ticket_id"], next_version,
+            {"planner_job_id": planner_job["planner_job_id"], "next_role": "qa"},
+        )
+        returned = self._ticket(connection, ticket["ticket_id"])
+        self._queue_ticket(connection, actor, project_id, returned)
+        return returned
 
     def _open_planner_job(
         self,
@@ -67,6 +183,11 @@ class PlannerJobMixin:
         )
         if existing is not None:
             merged = list(dict.fromkeys([*existing["evidence_refs"], *evidence_refs]))
+            if not any(ref.startswith(CAPABILITY_REVIEW_MARK) for ref in evidence_refs):
+                # Failure evidence turns a capability review into a failure
+                # job. Without the mark, a later capability approval cannot
+                # close it while the failure still holds the ticket (review C2).
+                merged = [ref for ref in merged if not ref.startswith(CAPABILITY_REVIEW_MARK)]
             connection.execute(
                 """
                 UPDATE planner_jobs
@@ -299,6 +420,7 @@ class PlannerJobMixin:
             ).fetchone())
             deduplicated = context is not None
             timestamp = _iso()
+            machine_mark = None
             if context is None:
                 if TicketStatus(ticket["status"]) in CLOSED_TICKET_STATUSES or (
                     ticket["status"] == TicketStatus.DONE.value
@@ -322,6 +444,26 @@ class PlannerJobMixin:
                 context = self._one(
                     connection, "SELECT * FROM context_entries WHERE entry_id = ?", (entry_id,)
                 )
+                grouped = self._group_qa_machine_failure(
+                    connection, actor, project_id, ticket, failure_class,
+                    [f"context:{entry_id}", source_ref, *evidence_refs],
+                )
+                if grouped is not None and grouped["planner_job"] is not None:
+                    return {
+                        "ticket": self._return_ticket_to_qa(
+                            connection, actor, project_id, ticket, grouped["planner_job"]
+                        ),
+                        "failure_context": context,
+                        "planner_job": grouped["planner_job"],
+                        "deduplicated": False,
+                        "grouped_by_machine": True,
+                        "next_action": (
+                            "this QA machine is quarantined until Planner resolves its "
+                            "infrastructure job; stop claiming here and wait_for_planner_direction"
+                        ),
+                    }
+                if grouped is not None:
+                    machine_mark = grouped["mark"]
                 if ticket["status"] not in {
                     TicketStatus.BLOCKED.value,
                     TicketStatus.REWORK.value,
@@ -354,6 +496,7 @@ class PlannerJobMixin:
                 job_type=job_type,
                 summary=summary,
                 evidence_refs=list(dict.fromkeys([
+                    *([machine_mark] if machine_mark else []),
                     f"context:{context['entry_id']}", source_ref, *evidence_refs
                 ])),
                 context_entry_id=context["entry_id"],
@@ -523,6 +666,7 @@ class PlannerJobMixin:
                 """,
                 (resolution, actor.agent_id, timestamp, timestamp, planner_job_id),
             )
+            self._close_job_interventions(connection, [planner_job_id])
             connection.execute(
                 "DELETE FROM planner_job_leases WHERE lease_id = ?", (lease_id,)
             )
@@ -726,6 +870,29 @@ class PlannerJobMixin:
         )
         return self._planner_intervention(connection, intervention_id)
 
+    def _close_job_interventions(
+        self, connection: Connection, planner_job_ids: list[str] | tuple[str, ...]
+    ) -> None:
+        """Close the wake-up requests of resolved jobs (review C4).
+
+        A request left PENDING or DELIVERED after its job resolved kept showing in
+        ``dispatch_overview`` and the adapter queue, which taught operators to
+        ignore that list. The schema's closed state is ACKNOWLEDGED; the system
+        acknowledger says it was the resolution, not a Planner, that closed it.
+        """
+        if not planner_job_ids:
+            return
+        timestamp = _iso()
+        placeholders = ", ".join("?" for _ in planner_job_ids)
+        connection.execute(
+            f"""
+            UPDATE planner_interventions
+            SET status = 'ACKNOWLEDGED', acknowledged_at = ?, acknowledged_by = ?, updated_at = ?
+            WHERE planner_job_id IN ({placeholders}) AND status IN ('PENDING', 'DELIVERED')
+            """,
+            (timestamp, JOB_RESOLVED_ACKNOWLEDGER, timestamp, *planner_job_ids),
+        )
+
     def _planner_intervention(
         self, connection: Connection, intervention_id: str
     ) -> dict[str, Any]:
@@ -846,13 +1013,42 @@ class PlannerJobMixin:
                 "planner_intervention", intervention_id, 1,
                 {"planner_job_id": intervention["planner_job_id"]},
             )
+            # Acknowledging a delivery report is reading it; a decision job stays open.
+            self._close_acknowledged_delivery_report(
+                connection, actor, intervention["planner_job_id"]
+            )
             return self._planner_intervention(connection, intervention_id)
 
+    # Packets are bounded (AGENTS.md); a discovery result is one too. The count
+    # beside the list says how much more is waiting.
+    PLANNER_JOB_DISCOVERY_LIMIT = 10
+    # Open jobs first, high severity before normal, then oldest first.
+    _PLANNER_JOB_ORDER = """
+        CASE WHEN j.status = 'RESOLVED' THEN 1 ELSE 0 END,
+        CASE WHEN EXISTS (
+            SELECT 1 FROM planner_interventions i
+            WHERE i.planner_job_id = j.planner_job_id AND i.severity = 'high'
+              AND i.status IN ('PENDING', 'DELIVERED')
+        ) THEN 0 ELSE 1 END,
+        j.created_at ASC, j.planner_job_id ASC"""
+
     def discover_planner_jobs(
-        self, actor: Actor, project_id: str, *, include_resolved: bool = False
+        self,
+        actor: Actor,
+        project_id: str,
+        *,
+        include_resolved: bool = False,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """List planning work separately from the executable Developer/QA queue."""
+        """List planning work separately from the executable Developer/QA queue.
+
+        At most ``limit`` jobs (default ``PLANNER_JOB_DISCOVERY_LIMIT``), high
+        severity first; ``count_planner_jobs`` gives the total.
+        """
         require_project(actor, project_id)
+        limit = self.PLANNER_JOB_DISCOVERY_LIMIT if limit is None else limit
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValidationError("limit must be an integer from 1 to 100")
         with self.store.connection(immediate=True) as connection:
             self._expire_planner_job_leases(connection)
             statuses = (
@@ -862,15 +1058,87 @@ class PlannerJobMixin:
             )
             rows = connection.execute(
                 f"""
-                SELECT planner_job_id FROM planner_jobs
-                WHERE project_id = ? AND status IN ({', '.join('?' for _ in statuses)})
-                ORDER BY created_at ASC
+                SELECT j.planner_job_id FROM planner_jobs j
+                WHERE j.project_id = ? AND j.status IN ({', '.join('?' for _ in statuses)})
+                ORDER BY {self._PLANNER_JOB_ORDER}
+                LIMIT ?
                 """,
-                (project_id, *statuses),
+                (project_id, *statuses, limit),
             ).fetchall()
             return [
                 self._planner_job(connection, str(row["planner_job_id"])) for row in rows
             ]
+
+    def count_planner_jobs(self, actor: Actor, project_id: str) -> int:
+        """How many planning jobs are open, whatever discovery returned."""
+        require_project(actor, project_id)
+        with self.store.connection() as connection:
+            return int(connection.execute(
+                "SELECT COUNT(*) AS n FROM planner_jobs "
+                "WHERE project_id = ? AND status IN ('READY', 'IN_PROGRESS')",
+                (project_id,),
+            ).fetchone()["n"])
+
+    def _resolve_planner_job_row(
+        self,
+        connection: Connection,
+        actor: Actor,
+        planner_job_id: str,
+        resolution: str,
+        *,
+        event_payload: dict[str, Any] | None = None,
+    ) -> bool:
+        """Close one open planning job and its lease; False if it was already closed."""
+        timestamp = _iso()
+        job = _row(connection.execute(
+            "SELECT project_id, ticket_id, status FROM planner_jobs WHERE planner_job_id = ?",
+            (planner_job_id,),
+        ).fetchone())
+        if job is None or job["status"] == PlannerJobStatus.RESOLVED.value:
+            return False
+        connection.execute(
+            """
+            UPDATE planner_jobs
+            SET status = 'RESOLVED', resolution = ?, resolved_by = ?, resolved_at = ?,
+                updated_at = ?
+            WHERE planner_job_id = ? AND status IN ('READY', 'IN_PROGRESS')
+            """,
+            (resolution, actor.agent_id, timestamp, timestamp, planner_job_id),
+        )
+        self._close_job_interventions(connection, [planner_job_id])
+        connection.execute(
+            "DELETE FROM planner_job_leases WHERE planner_job_id = ?", (planner_job_id,)
+        )
+        self._event(
+            connection, actor, job["project_id"], "planner_job.resolved", "planner_job",
+            planner_job_id, 1, {"ticket_id": job["ticket_id"], **(event_payload or {})},
+        )
+        return True
+
+    def _close_acknowledged_delivery_report(
+        self, connection: Connection, actor: Actor, planner_job_id: str
+    ) -> bool:
+        """A delivery report is information: reading it is all it asks for.
+
+        Left open, every merge would add one READY job that nothing closes, and
+        the Planner's wake-up and discovery would fill with them (review R3).
+        Only an unleased report closes; one a Planner claimed stays theirs.
+        """
+        job = _row(connection.execute(
+            "SELECT job_type, status FROM planner_jobs WHERE planner_job_id = ?",
+            (planner_job_id,),
+        ).fetchone())
+        if (
+            job is None
+            or job["job_type"] != PlannerJobType.DELIVERY_COMPLETED.value
+            or job["status"] != PlannerJobStatus.READY.value
+        ):
+            return False
+        return self._resolve_planner_job_row(
+            connection, actor, planner_job_id,
+            f"Delivery report acknowledged by {actor.agent_id}.",
+            event_payload={"resolution": "delivery_acknowledged"},
+        )
 
     def claim_planner_job(
         self, actor: Actor, planner_job_id: str, lease_seconds: int = 900
@@ -952,6 +1220,7 @@ class PlannerJobMixin:
                 """,
                 (resolution, actor.agent_id, timestamp, timestamp, planner_job_id),
             )
+            self._close_job_interventions(connection, [planner_job_id])
             connection.execute(
                 "DELETE FROM planner_job_leases WHERE lease_id = ?", (lease_id,)
             )

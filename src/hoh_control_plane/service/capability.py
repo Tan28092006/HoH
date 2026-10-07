@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 
 from hoh_control_plane.capability_probe import machine_fingerprint
+from hoh_control_plane.service.planner_jobs import CAPABILITY_REVIEW_MARK
 from hoh_control_plane.service._common import (
     Actor,
     Any,
@@ -24,6 +25,7 @@ from hoh_control_plane.service._common import (
     InterventionSeverity,
     PlannerJobType,
     Role,
+    TicketStatus,
     ValidationError,
     _id,
     _iso,
@@ -36,7 +38,7 @@ from hoh_control_plane.service._common import (
 # A preflight is re-run only when what it depends on changes; otherwise the
 # existing record is the evidence, and asking again returns it unchanged.
 _PREFLIGHT_REF = "preflight:"
-_REVIEW_MARK = "capability_review:"
+_REVIEW_MARK = CAPABILITY_REVIEW_MARK
 # Wave 7A: the server approves what a host preflight proves; a configuration or
 # declaration change revokes that approval until the next preflight.
 HOST_PREFLIGHT_APPROVER = "system:host-preflight"
@@ -293,6 +295,10 @@ class CapabilityMixin:
             ticket = self._ticket(connection, row["ticket_id"])
             if not self._required_execution_capabilities_of(ticket) <= approved:
                 continue
+            if ticket["status"] in {TicketStatus.BLOCKED.value, TicketStatus.REWORK.value}:
+                # A failure holds this ticket; approval is not its resolution,
+                # and closing the job would leave it with no wake-up (C2).
+                continue
             connection.execute(
                 """
                 UPDATE planner_jobs
@@ -302,6 +308,7 @@ class CapabilityMixin:
                 """,
                 (summary, actor.agent_id, timestamp, timestamp, row["planner_job_id"]),
             )
+            self._close_job_interventions(connection, [row["planner_job_id"]])
             connection.execute(
                 "DELETE FROM planner_job_leases WHERE planner_job_id = ?", (row["planner_job_id"],)
             )
@@ -367,6 +374,45 @@ class CapabilityMixin:
             f"Capability approved by the server from host preflight {ref}.",
         )
         return {"approved": approved, "resolved_planner_jobs": resolved}
+
+    def _revoke_qa_machine_approvals(
+        self, connection: Connection, actor: Actor, project_id: str, fingerprint: str,
+    ) -> list[str]:
+        """Withdraw every QA approval held on one machine after it failed (review C3).
+
+        Whoever approved it, the approval was for equipment on a machine that
+        has just failed as infrastructure. Its QA agents rerun the preflight
+        once the machine is repaired and its Planner job is resolved.
+        """
+        revoked: list[str] = []
+        timestamp = _iso()
+        for row in connection.execute(
+            "SELECT agent_id, project_ids, machine_id, approved_execution_capabilities "
+            "FROM agent_presence WHERE role = ?",
+            (Role.QA.value,),
+        ).fetchall():
+            presence = _row(row)
+            if machine_fingerprint(presence.get("machine_id")) != fingerprint:
+                continue
+            if project_id not in set(presence.get("project_ids") or []):
+                continue
+            if not presence.get("approved_execution_capabilities"):
+                continue
+            connection.execute(
+                """UPDATE agent_presence
+                   SET approved_execution_capabilities = '[]', capability_approval_refs = '[]',
+                       capability_approved_machine_id = NULL, capability_approved_by = ?,
+                       capability_approved_at = ?, updated_at = ?
+                   WHERE agent_id = ?""",
+                (APPROVAL_REVOKED, timestamp, timestamp, presence["agent_id"]),
+            )
+            self._event(
+                connection, actor, project_id, "qa.capability_approval_revoked",
+                "agent_presence", presence["agent_id"], 1,
+                {"reason": "qa_machine_infrastructure_failure", "decided_by": APPROVAL_REVOKED},
+            )
+            revoked.append(presence["agent_id"])
+        return revoked
 
     def _revoke_host_preflight_approvals(
         self, connection: Connection, actor: Actor, project_id: str,
@@ -443,7 +489,13 @@ class CapabilityMixin:
                 """,
                 (ticket["ticket_id"],),
             ).fetchone())
-            if existing is not None and ref in existing["evidence_refs"]:
+            if existing is not None and (
+                ref in existing["evidence_refs"]
+                or not any(item.startswith(_REVIEW_MARK) for item in existing["evidence_refs"])
+            ):
+                # Already cited, or the open job is a failure decision: a review
+                # merged into it would let a capability approval close it (C2).
+                # The review opens once that job resolves and QA polls again.
                 continue
             missing = sorted(blocker["missing_approval"])
             approvable = sorted(set(missing) & proven)

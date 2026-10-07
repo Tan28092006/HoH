@@ -157,8 +157,11 @@ helper you are about to change across `service/`.
   compares every project a Planner has observed with Git, at most once per
   `REPOSITORY_OBSERVE_SECONDS` per project (the stored `observed_at`, which the
   Planner wait checks too, so the two processes never fetch twice in a window).
-  It runs the ordinary `sync_repository`, so a commit opens its reconciliation
-  with no Planner chat open; it never takes a project's first observation,
+  It runs `sync_repository(detect_only=True)`: a commit that reaches only some
+  tickets opens their ticket-scoped reconciliation with no Planner chat open,
+  but one that would close the whole project is only recorded
+  (`repository.change_detected`) and left for the next Planner sync to open
+  (wave 8B, C4). It never takes a project's first observation,
   which opens the baseline and belongs to a Planner. An open ticket whose
   candidate Git already has (by ancestry, or by patch-id: a default-branch
   commit whose diff equals `git diff base candidate`) is recorded through
@@ -474,6 +477,72 @@ with the ordinary tools.
   `policy.approve_high_risk(ticket_id, reason)` record (Planner or Admin) bound
   to the current candidate, so a rework needs a fresh sign-off. The merge queue
   refuses with `adversarial_review_missing` or `high_risk_signoff_missing`.
+
+### Liveness: nothing waits silently (wave 8B)
+
+From the 2026-10-06 re-review: a ticket that can never move, or a Planner that
+is never woken, is a fault of the harness itself, so each case below is closed
+by a dependency edge, a job or a refusal rather than by prose.
+
+- **Dependents of retired work (R2).** Only DONE satisfies a dependency, so
+  retiring a ticket (cancel, supersede, split, or retirement through a
+  reconciliation) runs `_rescue_dependents_of_retired` in
+  `ticket_retirement.py` in the same transaction. With a replacement the
+  dependent's edge moves to it (every replacement, for a split) and
+  `ticket.dependency_rewired` is logged. Without one, or when the replacement is
+  retired, is the dependent itself or would close a cycle, the dependent gets a
+  `developer_blocker` Planner job whose summary starts `dependency_retired:`.
+  Closed dependents are left alone. The edge is not rewritten when it cannot be
+  moved: the Planner decides it with `planner.update_ticket_fields`.
+- **Old Planner jobs never starve the wait (R3).** `_planner_job_events` in
+  `event_wait.py` excludes, in SQL, every job whose current event this Planner
+  acknowledged, and puts high-severity jobs first; an unacknowledged event is
+  still replayed. Acknowledging a `delivery_completed` report, through the wait
+  or its intervention, closes it unless a Planner holds its lease.
+  `discover_planner_jobs` returns at most 10 jobs, urgent first, beside
+  `planning_job_count`.
+- **A barrier does not hide urgent work; no offer is unclaimable (A6).** A
+  pending reconciliation's Planner event is followed by that Planner's
+  high-severity READY jobs, within its capacity. The inbox query, dispatch
+  fanout and live offer list skip a READY or REWORK ticket whose dependencies
+  are not all DONE (`_QUEUE_DEPENDENCIES_MET` in `discovery.py`); its queue row
+  stays pending and is offered once they are.
+- **Each merge interruption has its own outcome (A7).** A barrier, lost lease,
+  changed ticket or changed release evidence found before Git is touched fails
+  the merge as `precondition_failed:<outcome>` through
+  `_fail_merge_precondition` in `integration.py`: the ticket stays
+  MERGE_READY, no Planner job opens, and the ticket is requeued when nobody
+  holds it. A dirty or wrongly checked-out shared checkout raises
+  `GitPreconditionError` and fails as `git_precondition_failed` without
+  reconciliation. An unparseable candidate `pyproject.toml` is the runner's
+  `candidate_config_invalid` outcome, a candidate failure sent back as rework.
+- **Capability approval never closes a failure job (C2).** A review is not
+  opened onto a ticket whose open job is not a review, failure evidence strips
+  the `capability_review:` mark from a merged job, and
+  `_resolve_capability_review_jobs` skips any job whose ticket is BLOCKED or
+  REWORK.
+- **One broken QA machine (C3).** A QA `infrastructure` failure, reported or
+  parked by the runner, goes through `_group_qa_machine_failure` in
+  `planner_jobs.py`. It revokes every QA approval held on that machine and
+  marks the Planner job `qa_machine:<fingerprint>:infrastructure`. The first
+  failure blocks its ticket as before; a later one from the same machine and
+  class joins that job, and its ticket returns to QA_READY. While the job is
+  open, `_qa_machine_quarantined` keeps the machine out of QA offers and
+  `claim_qa` refuses it with `qa_machine_quarantined`. Resolving the job lifts
+  the quarantine; the QA reruns its preflight to be approved again.
+- **The sweep detects; a Planner closes the project (C4, gap G11).** With no
+  Planner present, nobody could resolve a project-wide barrier the scheduler
+  opened, and nobody was told the project was frozen. `sync_repository` with
+  `detect_only` (the sweep's mode) records such a change as one
+  `repository.change_detected` event per observation and leaves the observed
+  refs unchanged, so a Planner's own sync opens the barrier. Ticket-scoped
+  observations, and extensions of a barrier already open, are recorded as
+  before; a merge onto an unobserved `main` still closes the project.
+- **Wake-ups close with their job (C4).** Every path that resolves a Planner
+  job calls `_close_job_interventions` in `planner_jobs.py`, which marks its
+  PENDING or DELIVERED `planner_interventions` ACKNOWLEDGED by
+  `system:planner-job-resolved`, so `dispatch_overview` and the adapter queue
+  list only open problems.
 
 ## Change routing
 

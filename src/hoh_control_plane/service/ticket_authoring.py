@@ -543,8 +543,6 @@ class TicketAuthoringMixin:
                     timestamp,
                 ),
             )
-            # Dependents of retired work stay blocked until a Planner rewires them;
-            # naming them here keeps that consequence visible instead of silent.
             dependents = [
                 str(row["ticket_id"])
                 for row in connection.execute(
@@ -555,6 +553,11 @@ class TicketAuthoringMixin:
                     (ticket_id,),
                 ).fetchall()
             ]
+            # A dependent now waits on every narrower ticket that carries the work.
+            rescue = self._rescue_dependents_of_retired(
+                connection, actor, project_id, ticket_id, TicketStatus.SUPERSEDED.value,
+                list(replacement_ticket_ids),
+            )
             self._event(
                 connection,
                 actor,
@@ -569,6 +572,8 @@ class TicketAuthoringMixin:
                     "replacement_ticket_ids": replacement_ticket_ids,
                     "closed_offers": closed_offers,
                     "dependent_ticket_ids": dependents,
+                    "rewired_dependent_ticket_ids": rescue["rewired"],
+                    "escalated_dependent_ticket_ids": rescue["escalated"],
                 },
             )
             return {
@@ -576,6 +581,8 @@ class TicketAuthoringMixin:
                 "replacements": replacements,
                 "closed_offers": closed_offers,
                 "dependent_ticket_ids": dependents,
+                "rewired_dependent_ticket_ids": rescue["rewired"],
+                "dependent_planner_job_ids": rescue["planner_job_ids"],
                 "context_entry": self._one(
                     connection, "SELECT * FROM context_entries WHERE entry_id = ?", (entry_id,)
                 ),

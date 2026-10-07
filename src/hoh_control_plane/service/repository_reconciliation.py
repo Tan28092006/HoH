@@ -5,6 +5,7 @@ from hoh_control_plane.service._common import (
     PROJECT_SCOPE,
     TICKETS_SCOPE,
     ExecutionGate,
+    _audit_event_has_field,
     Actor,
     Any,
     ConflictError,
@@ -30,22 +31,33 @@ class _RepositoryObservationMoved(ConflictError):
 class RepositoryReconciliationMixin:
     """Repository sync and the reconciliation barrier that follows every observed commit."""
 
-    def sync_repository(self, actor: Actor, project_id: str) -> dict[str, Any]:
+    def sync_repository(
+        self, actor: Actor, project_id: str, *, detect_only: bool = False
+    ) -> dict[str, Any]:
         """Fetch remote truth and open a mandatory Planner reconciliation boundary.
 
         The observation is compare-and-set against both the remote refs and the
         observed mainline commit. A merge that completes while the fetch runs
         advances the mainline; the sync then retries once from fresh state rather
         than writing the stale SHA back and opening a spurious reconciliation.
+
+        ``detect_only`` is the scheduler sweep's mode (review C4, gap G11): a
+        change that would close the whole project is recorded as a
+        ``repository.change_detected`` event and left unobserved, so the next
+        Planner sync opens that barrier with a Planner present to resolve it.
+        A ticket-scoped observation, or one extending a barrier already open,
+        is recorded as usual.
         """
         require_role(actor, Role.PLANNER, Role.ADMIN)
         require_project(actor, project_id)
         try:
-            return self._sync_repository_once(actor, project_id)
+            return self._sync_repository_once(actor, project_id, detect_only=detect_only)
         except _RepositoryObservationMoved:
-            return self._sync_repository_once(actor, project_id)
+            return self._sync_repository_once(actor, project_id, detect_only=detect_only)
 
-    def _sync_repository_once(self, actor: Actor, project_id: str) -> dict[str, Any]:
+    def _sync_repository_once(
+        self, actor: Actor, project_id: str, *, detect_only: bool = False
+    ) -> dict[str, Any]:
         with self.store.connection() as connection:
             project = self._one(
                 connection, "SELECT * FROM projects WHERE project_id = ?", (project_id,)
@@ -218,6 +230,13 @@ class RepositoryReconciliationMixin:
             manifest["changed"] = changed
             manifest["context_ref"] = None
             manifest["reconciliation_id"] = None
+            if detect_only and changed and self._observation_would_close_project(
+                connection, project_id, manifest, baseline_reconciliation,
+                current.get("observed_upstream_commit") != manifest["upstream_commit"],
+            ):
+                return self._record_change_detected(
+                    connection, actor, project_id, manifest, timestamp
+                )
             connection.execute(
                 """UPDATE project_repositories
                    SET observed_mainline_commit = ?, observed_upstream_commit = ?,
@@ -862,6 +881,82 @@ class RepositoryReconciliationMixin:
             "frozen_ticket_ids": frozen,
             "flowing_ticket_ids": [ticket_id for ticket_id in ordered if ticket_id not in frozen],
             "changed_path_count": len(paths),
+        }
+
+    def _observation_would_close_project(
+        self,
+        connection: Connection,
+        project_id: str,
+        manifest: dict[str, Any],
+        baseline_reconciliation: bool,
+        upstream_changed: bool,
+    ) -> bool:
+        """Whether recording this observation would open a project-wide barrier."""
+        if baseline_reconciliation:
+            return True
+        if connection.execute(
+            "SELECT 1 FROM repository_reconciliations "
+            "WHERE project_id = ? AND status = 'PENDING' AND scope = ? LIMIT 1",
+            (project_id, PROJECT_SCOPE),
+        ).fetchone() is not None:
+            # The project is already closed; extending that barrier closes nothing new.
+            return False
+        open_ticket_ids = [
+            str(row["ticket_id"]) for row in connection.execute(
+                """
+                SELECT t.ticket_id FROM tickets t
+                JOIN features f ON f.feature_id = t.feature_id
+                WHERE f.project_id = ? AND t.status NOT IN ('DONE', 'CANCELLED', 'SUPERSEDED')
+                ORDER BY t.ticket_id
+                """,
+                (project_id,),
+            ).fetchall()
+        ]
+        return self._outside_commit_frozen_tickets(
+            connection, open_ticket_ids, manifest, upstream_changed
+        ) is None
+
+    def _record_change_detected(
+        self,
+        connection: Connection,
+        actor: Actor,
+        project_id: str,
+        manifest: dict[str, Any],
+        timestamp: str,
+    ) -> dict[str, Any]:
+        """Record what the sweep saw without observing it (review C4, gap G11).
+
+        The observed commits and refs stay as they were, so the next Planner
+        sync sees the same change and opens its barrier. Only ``observed_at``
+        moves, which keeps the sweep at its one-per-window cadence. One event
+        per distinct observation.
+        """
+        connection.execute(
+            "UPDATE project_repositories SET observed_at = ? WHERE project_id = ?",
+            (timestamp, project_id),
+        )
+        observation = f"{manifest['local_commit']}...{manifest['upstream_commit']}"
+        if not _audit_event_has_field(
+            connection, project_id, "repository.change_detected", "observation", observation
+        ):
+            project = self._one(
+                connection, "SELECT version FROM projects WHERE project_id = ?", (project_id,)
+            )
+            self._event(
+                connection, actor, project_id, "repository.change_detected", "project",
+                project_id, project["version"],
+                {
+                    "observation": observation,
+                    "observed_commit_count": len(manifest.get("observed_commits") or []),
+                    "next_action": "a Planner sync opens the reconciliation for this change",
+                },
+            )
+        pending = self._repository_reconciliation_state(connection, project_id)
+        return {
+            **manifest,
+            "detected_only": True,
+            "reconciliation_required": bool(pending["pending"]),
+            "pending_reconciliations": pending["pending"],
         }
 
     def _outside_commit_frozen_tickets(

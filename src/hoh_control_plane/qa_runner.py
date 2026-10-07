@@ -160,6 +160,12 @@ def provenance_modules_from(pyproject_text: str | None, src_packages: list[str])
     return validate_provenance_modules(modules)
 
 
+def _unparseable_pyproject(error: Exception) -> bool:
+    """Whether a provenance lookup failed because pyproject.toml does not parse."""
+    return isinstance(error, (tomllib.TOMLDecodeError, UnicodeDecodeError)) or isinstance(
+        error.__cause__, (tomllib.TOMLDecodeError, UnicodeDecodeError))
+
+
 class ProjectTestRunner:
     """Run only Planner-registered commands without a shell and retain bounded evidence."""
 
@@ -356,14 +362,25 @@ class ProjectTestRunner:
         requested_workers = xdist_workers(arguments)
         started = time.perf_counter()
         digest = hashlib.sha256("\0".join(command).encode()).hexdigest()
+        config_error = None
         if frozen_modules is not None:
             # The Planner-owned profile decides what is attested; the candidate's
             # own declaration is retained only as a fact (wave 8A, R8).
             modules = validate_provenance_modules(frozen_modules)
             modules_source = "frozen_profile"
         else:
-            modules = self._provenance_modules(worktree)
             modules_source = "candidate_tree"
+            try:
+                modules = self._provenance_modules(worktree)
+            except (ValidationError, tomllib.TOMLDecodeError, UnicodeDecodeError) as error:
+                # The candidate's own pyproject.toml is broken: a source defect for
+                # the Developer, never an infrastructure fault (review A7).
+                if not _unparseable_pyproject(error):
+                    raise
+                modules = []
+                config_error = (
+                    "candidate_config_invalid: pyproject.toml cannot be parsed: "
+                    f"{error.__cause__ or error}")
         resources = resource_snapshot()
         manifest = {"schema_version": 1, "command": command, "command_digest": digest,
                     "provenance_modules": modules, "provenance_modules_source": modules_source,
@@ -373,8 +390,12 @@ class ProjectTestRunner:
         if frozen_modules is not None:
             try:
                 declared = self._provenance_modules(worktree)
-            except (ValidationError, ValueError, OSError):
+            except (ValidationError, ValueError, OSError) as error:
                 declared = None
+                if _unparseable_pyproject(error):
+                    config_error = (
+                        "candidate_config_invalid: pyproject.toml cannot be parsed: "
+                        f"{error.__cause__ or error}")
             if declared != modules:
                 manifest["candidate_declared_modules"] = declared
         if retry_of is not None:
@@ -385,7 +406,7 @@ class ProjectTestRunner:
             arguments = with_xdist_workers(arguments, memory_sized_workers(resources))
         effective_workers = xdist_workers(arguments)
         manifest["xdist_workers"] = {"requested": requested_workers, "effective": effective_workers}
-        def result(reason, *, child=None, completed=None):
+        def result(reason, *, child=None, completed=None, detail=None):
             child = child or {}
             manifest["child"] = child
             paths = [v["path"] for v in child.get("source_modules", {}).values()]
@@ -395,7 +416,7 @@ class ProjectTestRunner:
                 exit_code=(None if completed is None or completed.timed_out else completed.returncode),
                 timed_out=bool(completed and completed.timed_out),
                 duration_ms=round((time.perf_counter() - started) * 1000),
-                stdout=completed.stdout if completed else "", stderr=completed.stderr if completed else reason,
+                stdout=completed.stdout if completed else "", stderr=completed.stderr if completed else (detail or reason),
                 resolved_source=paths[0] if paths else None, environment_digest=hashlib.sha256(material).hexdigest(),
                 artifact_mismatch=provenance in {"mismatch", "unresolved"}, provenance_status=provenance,
                 termination_reason=reason, environment_manifest={
@@ -406,6 +427,8 @@ class ProjectTestRunner:
                 stdout_truncated=bool(completed and completed.stdout_truncated),
                 stderr_truncated=bool(completed and completed.stderr_truncated),
                 capture_errors=completed.capture_errors if completed else ())
+        if config_error is not None:
+            return result("candidate_config_invalid", detail=config_error)
         # This is an admission floor, not a promise that every test fits. Retain
         # the measured facts so a later allocation failure is diagnosable.
         if resources.get("available_physical_bytes", 2**63) < 256 * 1024**2 or resources.get(

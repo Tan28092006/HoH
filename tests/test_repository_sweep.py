@@ -61,38 +61,90 @@ def _observed_baseline(service, actors, repository: Path | None, tmp_path) -> Pa
     return repository
 
 
-def test_the_sweep_opens_a_reconciliation_for_a_commit_no_planner_saw(
+def _change_detected_events(service) -> list[dict]:
+    with service.store.connection() as connection:
+        return [dict(row) for row in connection.execute(
+            "SELECT * FROM audit_events WHERE event_type = 'repository.change_detected'"
+        )]
+
+
+def test_the_sweep_only_detects_a_commit_that_would_close_the_project(
     service, store, actors, seeded, tmp_path
 ) -> None:
+    """Review C4 (gap G11): no Planner present, so no project-wide barrier."""
     repository = _observed_baseline(service, actors, None, tmp_path)
-    commit = _external_commit(repository, "hotfix.txt")
+    commit = _external_commit(repository, "hotfix.txt")  # a root file closes the project
     _age_observation(service)
 
     swept = sweep_once(store.path)
 
     observed = swept["repositories"]["observed"]
     assert [item["project_id"] for item in observed] == ["project-1"]
-    assert observed[0]["changed"] is True
-    pending = _pending_reconciliations(service, actors["planner"])
-    assert len(pending) == 1
-    assert pending[0]["reconciliation_id"] == observed[0]["reconciliation_id"]
-    assert commit in [item["commit"] for item in pending[0]["observed_commits"]]
-    # Execution is held until Planner reconciles, as it would be after a Planner sync.
-    with pytest.raises(ConflictError):
-        service.claim_ticket(
-            actors["developer"], seeded["ticket"]["ticket_id"], seeded["ticket"]["version"], 900
-        )
+    assert observed[0]["changed"] is True and observed[0]["detected_only"] is True
+    assert observed[0]["reconciliation_id"] is None
+    assert _pending_reconciliations(service, actors["planner"]) == []
+    assert len(_change_detected_events(service)) == 1
+    # Execution is not frozen by a sweep nobody is present to resolve.
+    claimed = service.claim_ticket(
+        actors["developer"], seeded["ticket"]["ticket_id"], seeded["ticket"]["version"], 900
+    )
+    assert claimed["ticket"]["status"] == "DEV_IN_PROGRESS"
 
     # The observation is throttled for every observer: the sweep and a waiting Planner.
     assert service.repository_observation_due("project-1") is False
     assert sweep_once(store.path)["repositories"]["observed"] == []
+    _age_observation(service)
+    sweep_once(store.path)
+    assert len(_change_detected_events(service)) == 1, "one event per distinct observation"
+
+    # The Planner's own sync still sees the commit and opens the barrier.
+    synced = service.sync_repository(actors["planner"], "project-1")
+    [pending] = _pending_reconciliations(service, actors["planner"])
+    assert pending["reconciliation_id"] == synced["reconciliation_id"]
+    assert pending["scope"] == "project"
+    assert commit in [item["commit"] for item in pending["observed_commits"]]
+
+
+def test_the_sweep_still_opens_a_ticket_scoped_reconciliation(
+    service, store, actors, seeded, tmp_path
+) -> None:
+    repository = _observed_baseline(service, actors, None, tmp_path)
+    (repository / "src" / "checkout").mkdir(parents=True)
+    commit = _external_commit(repository, "src/checkout/retry.py")
+    _age_observation(service)
+
+    observed = sweep_once(store.path)["repositories"]["observed"]
+
+    [pending] = _pending_reconciliations(service, actors["planner"])
+    assert observed[0]["detected_only"] is False
+    assert pending["reconciliation_id"] == observed[0]["reconciliation_id"]
+    assert pending["scope"] == "tickets"
+    assert commit in [item["commit"] for item in pending["observed_commits"]]
+    assert _change_detected_events(service) == []
+
+
+def test_a_sweep_extends_a_barrier_that_is_already_open(
+    service, store, actors, seeded, tmp_path
+) -> None:
+    repository = _observed_baseline(service, actors, None, tmp_path)
+    _external_commit(repository, "first.txt")
+    opened = service.sync_repository(actors["planner"], "project-1")
+    second = _external_commit(repository, "second.txt")
+    _age_observation(service)
+
+    observed = sweep_once(store.path)["repositories"]["observed"]
+
+    [pending] = _pending_reconciliations(service, actors["planner"])
+    assert observed[0]["reconciliation_id"] == opened["reconciliation_id"]
+    assert second in [item["commit"] for item in pending["observed_commits"]]
 
 
 def test_a_sweep_then_a_planner_sync_leave_one_pending_reconciliation(
     service, store, actors, seeded, tmp_path
 ) -> None:
     repository = _observed_baseline(service, actors, None, tmp_path)
-    first = _external_commit(repository, "first.txt")
+    (repository / "src" / "checkout").mkdir(parents=True)
+    first = _external_commit(repository, "src/checkout/first.txt")
     _age_observation(service)
     swept = sweep_once(store.path)["repositories"]["observed"]
     second = _external_commit(repository, "second.txt")
