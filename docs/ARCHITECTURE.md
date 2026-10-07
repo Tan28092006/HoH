@@ -155,8 +155,11 @@ helper you are about to change across `service/`.
   compares every project a Planner has observed with Git, at most once per
   `REPOSITORY_OBSERVE_SECONDS` per project (the stored `observed_at`, which the
   Planner wait checks too, so the two processes never fetch twice in a window).
-  It runs the ordinary `sync_repository`, so a commit opens its reconciliation
-  with no Planner chat open; it never takes a project's first observation,
+  It runs `sync_repository(detect_only=True)`: a commit that reaches only some
+  tickets opens their ticket-scoped reconciliation with no Planner chat open,
+  but one that would close the whole project is only recorded
+  (`repository.change_detected`) and left for the next Planner sync to open
+  (wave 8B, C4). It never takes a project's first observation,
   which opens the baseline and belongs to a Planner. An open ticket whose
   candidate Git already has (by ancestry, or by patch-id: a default-branch
   commit whose diff equals `git diff base candidate`) is recorded through
@@ -498,6 +501,19 @@ by a dependency edge, a job or a refusal rather than by prose.
   open, `_qa_machine_quarantined` keeps the machine out of QA offers and
   `claim_qa` refuses it with `qa_machine_quarantined`. Resolving the job lifts
   the quarantine; the QA reruns its preflight to be approved again.
+- **The sweep detects; a Planner closes the project (C4, gap G11).** With no
+  Planner present, nobody could resolve a project-wide barrier the scheduler
+  opened, and nobody was told the project was frozen. `sync_repository` with
+  `detect_only` (the sweep's mode) records such a change as one
+  `repository.change_detected` event per observation and leaves the observed
+  refs unchanged, so a Planner's own sync opens the barrier. Ticket-scoped
+  observations, and extensions of a barrier already open, are recorded as
+  before; a merge onto an unobserved `main` still closes the project.
+- **Wake-ups close with their job (C4).** Every path that resolves a Planner
+  job calls `_close_job_interventions` in `planner_jobs.py`, which marks its
+  PENDING or DELIVERED `planner_interventions` ACKNOWLEDGED by
+  `system:planner-job-resolved`, so `dispatch_overview` and the adapter queue
+  list only open problems.
 
 ## Change routing
 

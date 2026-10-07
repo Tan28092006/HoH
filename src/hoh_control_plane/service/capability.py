@@ -308,6 +308,7 @@ class CapabilityMixin:
                 """,
                 (summary, actor.agent_id, timestamp, timestamp, row["planner_job_id"]),
             )
+            self._close_job_interventions(connection, [row["planner_job_id"]])
             connection.execute(
                 "DELETE FROM planner_job_leases WHERE planner_job_id = ?", (row["planner_job_id"],)
             )

@@ -68,8 +68,10 @@ class RepositorySweepMixin:
         """One pass of state reconciliation against Git, run by the scheduler.
 
         For each project whose repository a Planner has observed before and that
-        is due (``REPOSITORY_OBSERVE_SECONDS``): run the ordinary repository sync,
-        so a new commit opens its reconciliation even with no Planner chat open;
+        is due (``REPOSITORY_OBSERVE_SECONDS``): run the repository sync in
+        ``detect_only`` mode, so a commit reaching some tickets opens their
+        ticket-scoped reconciliation even with no Planner chat open, while one
+        that would close the whole project is only recorded for a Planner sync;
         record, as ungated landings attributed to ``system:sweep``, open tickets
         whose candidate work is already on the default branch (by ancestry or by
         patch-id); and escalate merge jobs that outlived the worker timeout and
@@ -121,10 +123,13 @@ class RepositorySweepMixin:
         return summary
 
     def _sweep_observation(self, actor: Actor, project_id: str) -> dict[str, Any]:
-        manifest = self.sync_repository(actor, project_id)
+        # Detect only: a change that would close the whole project waits for a
+        # Planner sync to open that barrier (review C4, gap G11).
+        manifest = self.sync_repository(actor, project_id, detect_only=True)
         return {
             "project_id": project_id,
             "changed": bool(manifest.get("changed")),
+            "detected_only": bool(manifest.get("detected_only")),
             "reconciliation_id": manifest.get("reconciliation_id"),
         }
 

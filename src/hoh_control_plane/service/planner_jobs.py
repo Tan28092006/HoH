@@ -42,6 +42,8 @@ QA_MACHINE_MARK = "qa_machine:"
 # The failure classes grouped per machine; any other class is the ticket's own.
 QA_MACHINE_FAILURE_CLASSES = frozenset({"infrastructure"})
 _QA_MACHINE_JOB_REF_LIMIT = 100
+# Who closes a wake-up request whose Planner job was resolved.
+JOB_RESOLVED_ACKNOWLEDGER = "system:planner-job-resolved"
 
 
 class PlannerJobMixin:
@@ -664,6 +666,7 @@ class PlannerJobMixin:
                 """,
                 (resolution, actor.agent_id, timestamp, timestamp, planner_job_id),
             )
+            self._close_job_interventions(connection, [planner_job_id])
             connection.execute(
                 "DELETE FROM planner_job_leases WHERE lease_id = ?", (lease_id,)
             )
@@ -866,6 +869,29 @@ class PlannerJobMixin:
             },
         )
         return self._planner_intervention(connection, intervention_id)
+
+    def _close_job_interventions(
+        self, connection: Connection, planner_job_ids: list[str] | tuple[str, ...]
+    ) -> None:
+        """Close the wake-up requests of resolved jobs (review C4).
+
+        A request left PENDING or DELIVERED after its job resolved kept showing in
+        ``dispatch_overview`` and the adapter queue, which taught operators to
+        ignore that list. The schema's closed state is ACKNOWLEDGED; the system
+        acknowledger says it was the resolution, not a Planner, that closed it.
+        """
+        if not planner_job_ids:
+            return
+        timestamp = _iso()
+        placeholders = ", ".join("?" for _ in planner_job_ids)
+        connection.execute(
+            f"""
+            UPDATE planner_interventions
+            SET status = 'ACKNOWLEDGED', acknowledged_at = ?, acknowledged_by = ?, updated_at = ?
+            WHERE planner_job_id IN ({placeholders}) AND status IN ('PENDING', 'DELIVERED')
+            """,
+            (timestamp, JOB_RESOLVED_ACKNOWLEDGER, timestamp, *planner_job_ids),
+        )
 
     def _planner_intervention(
         self, connection: Connection, intervention_id: str
@@ -1079,6 +1105,7 @@ class PlannerJobMixin:
             """,
             (resolution, actor.agent_id, timestamp, timestamp, planner_job_id),
         )
+        self._close_job_interventions(connection, [planner_job_id])
         connection.execute(
             "DELETE FROM planner_job_leases WHERE planner_job_id = ?", (planner_job_id,)
         )
@@ -1193,6 +1220,7 @@ class PlannerJobMixin:
                 """,
                 (resolution, actor.agent_id, timestamp, timestamp, planner_job_id),
             )
+            self._close_job_interventions(connection, [planner_job_id])
             connection.execute(
                 "DELETE FROM planner_job_leases WHERE lease_id = ?", (lease_id,)
             )

@@ -451,6 +451,7 @@ class TicketRetirementMixin:
                             *open_planner_jobs,
                         ),
                     )
+                    self._close_job_interventions(connection, open_planner_jobs)
                 rescue = self._rescue_dependents_of_retired(
                     connection,
                     Actor(request["requested_by"], Role.PLANNER, frozenset({request["project_id"]})),
