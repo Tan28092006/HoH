@@ -23,7 +23,7 @@ def test_queue_binds_current_candidate_not_older_row_with_same_sha(service,actor
           (candidate_id,ticket_id,base_commit,commit_sha,branch_ref,developer_claims,submitted_by,submitted_at,frozen_at)
           SELECT 'cand_current',ticket_id,base_commit,commit_sha,branch_ref,developer_claims,submitted_by,
           '2099-01-01T00:00:00Z','2099-01-01T00:00:00Z' FROM candidates WHERE candidate_id=?""",(old,))
-        c.execute("""INSERT INTO candidate_test_profiles SELECT 'cand_current',test_command,
+        c.execute("""INSERT INTO candidate_test_profiles (candidate_id,test_command,timeout_seconds,configured_at) SELECT 'cand_current',test_command,
           timeout_seconds,configured_at FROM candidate_test_profiles WHERE candidate_id=?""",(old,))
         for table in ('qa_findings','qa_test_runs','evidence'):
             c.execute(f"UPDATE {table} SET candidate_id='cand_current' WHERE candidate_id=?",(old,))

@@ -795,7 +795,8 @@ class IntegrationMixin:
                 repository_path=repository["repository_path"], project_id=job["project_id"],
                 ticket_id=job["ticket_id"], candidate_commit=candidate["commit_sha"],
             ) as integration_path:
-                execution = self.project_tests.execute(command, integration_path, profile["timeout_seconds"])
+                execution = self._execute_frozen_profile(
+                    command, integration_path, profile["timeout_seconds"], job["candidate_id"])
             execution = replace(execution, environment_manifest={**execution.environment_manifest,
                 "merge_job_id": merge_job_id,
                 "frozen_profile": {"configured_at": profile["configured_at"],
@@ -928,8 +929,9 @@ class IntegrationMixin:
                     "INSERT INTO candidate_changed_paths (candidate_id, path) VALUES (?, ?)",
                     (derived_id, path))
             connection.execute(
-                """INSERT INTO candidate_test_profiles (candidate_id, test_command, timeout_seconds, configured_at)
-                   SELECT ?, test_command, timeout_seconds, configured_at
+                """INSERT INTO candidate_test_profiles
+                       (candidate_id, test_command, timeout_seconds, configured_at, provenance_modules)
+                   SELECT ?, test_command, timeout_seconds, configured_at, provenance_modules
                    FROM candidate_test_profiles WHERE candidate_id = ?""",
                 (derived_id, candidate["candidate_id"]))
             payload = {"candidate_id": derived_id, "derived_from": candidate["candidate_id"],

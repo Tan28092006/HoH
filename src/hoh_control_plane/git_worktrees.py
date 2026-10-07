@@ -653,6 +653,27 @@ class GitWorktreeManager:
         )
         return sorted({line.strip().replace("\\", "/") for line in result.stdout.splitlines() if line.strip()})
 
+    def declared_provenance_modules(self, *, repository_path: str, commit: str) -> list[str]:
+        """The provenance modules ``commit`` declares (pyproject, wheel, src/).
+
+        Read from Git objects, not from any checkout, so a candidate frozen on
+        this base cannot choose its own import-attestation list (wave 8A, R8).
+        """
+        from hoh_control_plane.qa_runner import provenance_modules_from
+
+        repository = Path(self.validate_repository(repository_path))
+        resolved = self._resolve_commit(repository, commit)
+        shown = self._git(repository, "show", f"{resolved}:pyproject.toml", check=False)
+        pyproject = shown.stdout if shown.returncode == 0 else None
+        listed = self._git(repository, "ls-tree", "-d", "--name-only", resolved, "src/", check=False)
+        packages = []
+        for line in listed.stdout.splitlines() if listed.returncode == 0 else []:
+            name = line.strip().replace("\\", "/").rsplit("/", 1)[-1]
+            if name and self._git(repository, "cat-file", "-e",
+                                  f"{resolved}:src/{name}/__init__.py", check=False).returncode == 0:
+                packages.append(name)
+        return provenance_modules_from(pyproject, packages)
+
     @contextmanager
     def qa_checkout(self, *, repository_path: str, test_run_id: str, candidate_commit: str) -> Iterator[str]:
         """Run the frozen SHA with private objects, refs and configuration."""

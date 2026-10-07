@@ -405,7 +405,8 @@ class RunGuardrailsMixin:
                 return check
             project_id = check["project_id"]
             profile = _row(connection.execute(
-                "SELECT test_command, timeout_seconds FROM project_test_profiles WHERE project_id = ?",
+                "SELECT test_command, timeout_seconds, provenance_modules "
+                "FROM project_test_profiles WHERE project_id = ?",
                 (project_id,),
             ).fetchone())
             repository = _row(connection.execute(
@@ -428,8 +429,11 @@ class RunGuardrailsMixin:
                 repository_path=repository["repository_path"], project_id=project_id,
                 ticket_id="mainline-check", candidate_commit=check["mainline_commit"],
             ) as checkout_path:
+                # Main is Planner truth; a Planner-set list still applies (8A, R8).
+                modules = profile.get("provenance_modules")
                 execution = self.project_tests.execute(
-                    command, checkout_path, int(profile["timeout_seconds"])
+                    command, checkout_path, int(profile["timeout_seconds"]),
+                    **({"provenance_modules": modules} if modules else {}),
                 )
         except DomainError as error:
             return self.fail_queued_mainline_check(check_id, str(error))

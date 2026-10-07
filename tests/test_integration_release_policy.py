@@ -79,7 +79,7 @@ def test_release_policy_selects_latest_submission_when_sha_was_resubmitted(servi
             (candidate_id,ticket_id,base_commit,commit_sha,branch_ref,developer_claims,submitted_by,submitted_at,frozen_at)
             SELECT 'cand_current_policy',ticket_id,base_commit,commit_sha,branch_ref,developer_claims,submitted_by,
                    '2099-01-01T00:00:00Z','2099-01-01T00:00:00Z' FROM candidates WHERE candidate_id=?""", (original_id,))
-        connection.execute("""INSERT INTO candidate_test_profiles SELECT 'cand_current_policy',test_command,
+        connection.execute("""INSERT INTO candidate_test_profiles (candidate_id,test_command,timeout_seconds,configured_at) SELECT 'cand_current_policy',test_command,
             timeout_seconds,configured_at FROM candidate_test_profiles WHERE candidate_id=?""", (original_id,))
     snapshot = service._release_policy_snapshot(actors['integrator'],ticket['ticket_id'])
     assert snapshot['candidate']['candidate_id'] == 'cand_current_policy'

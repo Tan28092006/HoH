@@ -84,7 +84,8 @@ def test_a_memory_error_is_infrastructure_and_retried_once_with_half_the_workers
 
 
 def test_a_retry_that_passes_is_the_recorded_result(tmp_path, monkeypatch) -> None:
-    calls = _fake_runs(monkeypatch, [(3221225773, _child()), (0, _child())])
+    passed = {"passed": 3, "failed": 0, "skipped": 0, "collection_errors": 0}
+    calls = _fake_runs(monkeypatch, [(3221225773, _child()), (0, _child(test_counts=passed))])
 
     execution = _run(tmp_path, ["-n", "2"])
 

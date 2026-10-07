@@ -486,21 +486,39 @@ class QaMixin:
                         "SELECT * FROM project_repositories WHERE project_id = ?", (job["project_id"],))
                 with self.git_worktrees.qa_checkout(repository_path=repository["repository_path"],
                         test_run_id=test_run_id, candidate_commit=job["candidate_commit"]) as path:
-                    execution = self.project_tests.execute(job["test_command"], path, job["timeout_seconds"])
+                    execution = self._execute_frozen_profile(
+                        job["test_command"], path, job["timeout_seconds"], job["candidate_id"])
                     if execution.artifact_mismatch and execution.termination_reason == "unclassified":
                         return self._fail_with_artifact_mismatch(test_run_id, job, execution)
                     return self._complete_queued_project_test(test_run_id, execution)
             worktree_path = self.git_worktrees.verify_frozen_candidate(
                 job["worktree_path"], job["candidate_commit"]
             )
-            execution = self.project_tests.execute(
-                job["test_command"], worktree_path, job["timeout_seconds"]
+            execution = self._execute_frozen_profile(
+                job["test_command"], worktree_path, job["timeout_seconds"], job["candidate_id"]
             )
             if execution.artifact_mismatch and execution.termination_reason == "unclassified":
                 return self._fail_with_artifact_mismatch(test_run_id, job, execution)
             return self._complete_queued_project_test(test_run_id, execution)
         except (DomainError, OSError) as error:
             return self.fail_queued_project_test(test_run_id, str(error))
+
+    def _execute_frozen_profile(self, command, path, timeout_seconds, candidate_id):
+        """Run the candidate's registered command with its frozen provenance list.
+
+        The list comes from candidate_test_profiles, never from the candidate's
+        tree (wave 8A, R8). An empty or missing list leaves the runner to read
+        the tree, which can only add packages to attest, never remove one.
+        """
+        with self.store.connection() as connection:
+            profile = _row(connection.execute(
+                "SELECT provenance_modules FROM candidate_test_profiles WHERE candidate_id = ?",
+                (candidate_id,),
+            ).fetchone())
+        modules = (profile or {}).get("provenance_modules")
+        if modules:
+            return self.project_tests.execute(command, path, timeout_seconds, provenance_modules=modules)
+        return self.project_tests.execute(command, path, timeout_seconds)
 
     def _fail_with_artifact_mismatch(
         self, test_run_id: str, job: dict[str, Any], execution: TestExecution

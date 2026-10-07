@@ -156,6 +156,7 @@ class CandidateMixin:
         try:
             repository, worktree = self._candidate_submission_git_inputs(submission_id)
             commit_sha, base_commit, changed_paths = job["commit_sha"], job["base_commit"], []
+            base_modules = None
             if repository is not None:
                 if self._service_owns_the_workspace(repository):
                     assert worktree is not None
@@ -177,12 +178,14 @@ class CandidateMixin:
                 changed_paths = self.git_worktrees.changed_paths(
                     repository_path=repository["repository_path"], base_commit=base_commit, candidate_commit=commit_sha
                 )
+                base_modules = self._base_provenance_modules(repository, base_commit)
             with self.store.connection() as connection:
                 ticket = self._ticket(connection, job["ticket_id"])
                 outside_scope = [path for path in changed_paths if not self._path_is_in_any_scope(path, ticket["file_scope"])]
             if outside_scope:
                 raise ValidationError("Candidate changes paths outside ticket write scope: " + ", ".join(outside_scope))
-            return self._complete_queued_candidate_submission(submission_id, commit_sha, base_commit, changed_paths)
+            return self._complete_queued_candidate_submission(submission_id, commit_sha, base_commit, changed_paths,
+                                                              base_modules)
         except DomainError as error:
             return self.fail_queued_candidate_submission(submission_id, str(error))
 
@@ -200,8 +203,41 @@ class CandidateMixin:
             worktree = _row(connection.execute("SELECT * FROM worktrees WHERE ticket_id = ?", (job["ticket_id"],)).fetchone())
             return repository, worktree
 
+    def _base_provenance_modules(self, repository: dict[str, Any], base_commit: str) -> list[str] | None:
+        """What the candidate's base commit declares for import attestation.
+
+        Read before the write lock. None when the base declares nothing usable;
+        the run then falls back to the candidate's tree, as before 8A.
+        """
+        try:
+            return self.git_worktrees.declared_provenance_modules(
+                repository_path=repository["repository_path"], commit=base_commit)
+        except ValidationError:
+            return None
+
+    @staticmethod
+    def _freeze_candidate_test_profile(connection: Connection, candidate_id: str, project_id: str,
+                                       base_modules: list[str] | None, timestamp: str) -> None:
+        """Copy the project's test profile onto the candidate, with the import
+        attestation list the Planner owns: the project's own list when it set
+        one, otherwise the base commit's declaration (wave 8A, R8)."""
+        profile = _row(connection.execute(
+            "SELECT * FROM project_test_profiles WHERE project_id = ?", (project_id,)).fetchone())
+        if profile is None:
+            return
+        modules = profile.get("provenance_modules")
+        if modules is None:
+            modules = base_modules
+        connection.execute(
+            """INSERT INTO candidate_test_profiles
+                   (candidate_id, test_command, timeout_seconds, configured_at, provenance_modules)
+               VALUES (?, ?, ?, ?, ?)""",
+            (candidate_id, json.dumps(profile["test_command"]), profile["timeout_seconds"], timestamp,
+             None if modules is None else json.dumps(modules)))
+
     def _complete_queued_candidate_submission(self, submission_id: str, commit_sha: str, base_commit: str,
-                                              changed_paths: list[str]) -> dict[str, Any]:
+                                              changed_paths: list[str],
+                                              base_modules: list[str] | None = None) -> dict[str, Any]:
         with self.store.connection(immediate=True) as connection:
             job = self._candidate_submission_job(connection, submission_id)
             if job["status"] != "RUNNING":
@@ -222,10 +258,7 @@ class CandidateMixin:
             self._stamp_candidate_maker(connection, candidate_id, actor.agent_id)
             for path in changed_paths:
                 connection.execute("INSERT INTO candidate_changed_paths (candidate_id, path) VALUES (?, ?)", (candidate_id, path))
-            profile = _row(connection.execute("SELECT * FROM project_test_profiles WHERE project_id = ?", (job["project_id"],)).fetchone())
-            if profile is not None:
-                connection.execute("""INSERT INTO candidate_test_profiles (candidate_id, test_command, timeout_seconds, configured_at)
-                    VALUES (?, ?, ?, ?)""", (candidate_id, json.dumps(profile["test_command"]), profile["timeout_seconds"], timestamp))
+            self._freeze_candidate_test_profile(connection, candidate_id, job["project_id"], base_modules, timestamp)
             next_version = _transition_ticket(
                 connection, job["ticket_id"], actor=actor, expected_version=ticket["version"],
                 from_statuses=(TicketStatus.DEV_IN_PROGRESS,),
@@ -331,6 +364,7 @@ class CandidateMixin:
                 if branch_ref != worktree["branch_ref"]:
                     raise ValidationError("Submitted branch does not match the assigned worktree branch")
         changed_paths: list[str] = []
+        base_modules: list[str] | None = None
         if repository is not None:
             if worktree is None:
                 # The Developer holds its own checkout, so there is no service-side
@@ -356,6 +390,7 @@ class CandidateMixin:
                 base_commit=base_commit,
                 candidate_commit=commit_sha,
             )
+            base_modules = self._base_provenance_modules(repository, base_commit)
             paths_outside_scope = [
                 path
                 for path in changed_paths
@@ -415,25 +450,7 @@ class CandidateMixin:
                     "INSERT INTO candidate_changed_paths (candidate_id, path) VALUES (?, ?)",
                     (candidate_id, path),
                 )
-            test_profile = _row(
-                connection.execute(
-                    "SELECT * FROM project_test_profiles WHERE project_id = ?", (project_id,)
-                ).fetchone()
-            )
-            if test_profile is not None:
-                connection.execute(
-                    """
-                    INSERT INTO candidate_test_profiles
-                        (candidate_id, test_command, timeout_seconds, configured_at)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (
-                        candidate_id,
-                        json.dumps(test_profile["test_command"]),
-                        test_profile["timeout_seconds"],
-                        timestamp,
-                    ),
-                )
+            self._freeze_candidate_test_profile(connection, candidate_id, project_id, base_modules, timestamp)
             next_version = _transition_ticket(
                 connection, ticket_id, actor=actor, expected_version=ticket["version"],
                 from_statuses=(TicketStatus.DEV_IN_PROGRESS,),

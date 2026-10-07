@@ -50,7 +50,8 @@ class SchemaVersionError(SchemaMigrationError):
 #        mainline_checks (7C-2); agent model_family, ticket risk tiers and
 #        high-risk approvals (7C-3). Wave 8A adds, still under 3 (every
 #        column is additive and nullable, so a wave 7 build reads it safely):
-#        qa_test_runs.termination_reason and provenance_status (R1).
+#        qa_test_runs.termination_reason and provenance_status (R1);
+#        project_ and candidate_test_profiles.provenance_modules (R8).
 SCHEMA_VERSION = 3
 
 
@@ -205,6 +206,9 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # only 'passed' counts for reuse or the merge gate.
     ("qa_test_runs", "termination_reason", "TEXT"),
     ("qa_test_runs", "provenance_status", "TEXT"),
+    # Wave 8A, R8: the import-attestation list, frozen outside the candidate.
+    ("project_test_profiles", "provenance_modules", "TEXT"),
+    ("candidate_test_profiles", "provenance_modules", "TEXT"),
 )
 
 

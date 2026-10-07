@@ -62,12 +62,15 @@ CREATE TABLE IF NOT EXISTS repository_reconciliations (
 CREATE INDEX IF NOT EXISTS repository_reconciliations_project_status
     ON repository_reconciliations(project_id, status, created_at);
 
+-- provenance_modules (JSON list, nullable): the packages every QA and gate run
+-- must attest, frozen by the Planner, never read from the candidate (8A, R8).
 CREATE TABLE IF NOT EXISTS project_test_profiles (
     project_id TEXT PRIMARY KEY REFERENCES projects(project_id),
     test_command TEXT NOT NULL,
     timeout_seconds INTEGER NOT NULL,
     configured_by TEXT NOT NULL,
-    configured_at TEXT NOT NULL
+    configured_at TEXT NOT NULL,
+    provenance_modules TEXT
 );
 
 CREATE TABLE IF NOT EXISTS features (
@@ -267,11 +270,14 @@ CREATE TABLE IF NOT EXISTS candidate_changed_paths (
     PRIMARY KEY (candidate_id, path)
 );
 
+-- candidate_test_profiles.provenance_modules: the project's list, or else the
+-- one the candidate's base commit declares, frozen with the candidate (8A, R8).
 CREATE TABLE IF NOT EXISTS candidate_test_profiles (
     candidate_id TEXT PRIMARY KEY REFERENCES candidates(candidate_id),
     test_command TEXT NOT NULL,
     timeout_seconds INTEGER NOT NULL,
-    configured_at TEXT NOT NULL
+    configured_at TEXT NOT NULL,
+    provenance_modules TEXT
 );
 
 CREATE TABLE IF NOT EXISTS worktrees (
