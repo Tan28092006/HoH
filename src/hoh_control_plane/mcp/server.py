@@ -6,7 +6,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from hoh_control_plane.domain import Actor
 from hoh_control_plane.service import ControlPlaneService
-from hoh_control_plane.mcp.invoke import _CompactFastMCP, make_invoke
+from hoh_control_plane.mcp.invoke import _CompactFastMCP, make_failure_audit, make_invoke
 from hoh_control_plane.mcp.tools import common, developer, integrator, planner, qa
 
 
@@ -29,6 +29,7 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
             "Every MCP invocation is audit logged with redacted arguments."
         ),
     )
+    server.audit_failure = make_failure_audit(service, actor)
     invoke = make_invoke(service, actor)
     # Registration order is the order clients list the tools in.
     common.register(server, service, actor, invoke)

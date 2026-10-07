@@ -7,10 +7,10 @@ import time
 from collections.abc import Callable
 from typing import Any
 from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
 from hoh_control_plane import contracts
 from hoh_control_plane.observability import correlation_scope
-from hoh_control_plane.domain import Actor, DomainError, Role
+from hoh_control_plane.domain import Actor, Role
+from hoh_control_plane.mcp.errors import tool_error
 from hoh_control_plane.service import ControlPlaneService
 from hoh_control_plane.mcp.invoke import _safe_input_summary
 
@@ -178,12 +178,11 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
                                                   keepalive=keepalive if has_transport else None)
                 outcome, error_code = 'succeeded', None
                 return result
-            except ConnectionError as error:
-                error_code = 'connection_lost'
-                raise ToolError('[connection_lost] Reconnect MCP and resume the same identity via session.bootstrap') from error
-            except DomainError as error:
-                outcome, error_code = 'rejected', error.code
-                raise ToolError(f'[{error.code}] {error}') from error
+            except Exception as raised:
+                # The same mapping as every other tool; the finally below audits it.
+                error = tool_error(raised, audited=True)
+                outcome, error_code = error.outcome, error.payload['code']
+                raise error from raised
             finally:
                 service.record_tool_call(actor, tool_name='work.wait_for_event',
                     project_id=project_id, input_summary=_safe_input_summary(arguments),
