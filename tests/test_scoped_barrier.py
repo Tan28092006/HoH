@@ -5,6 +5,10 @@ until Planner had reconciled every open ticket. Neither moves main, so no other
 ticket's plan can be wrong because of it: only the judged ticket and the tickets
 that depend on it, transitively, wait for Planner. Every other ticket keeps its
 offers and claims. Observed commits and merges keep the project-wide barrier.
+
+Since wave 7A the server resolves an ordinary rejection's or regression's
+ticket-scoped reconciliation itself. The rejection that spends the rework budget
+still waits for Planner, so it drives the freeze tests here.
 """
 from __future__ import annotations
 
@@ -14,7 +18,7 @@ import pytest
 from barrier_helpers import keep_open_tickets
 
 from hoh_control_plane.domain import ConflictError, Role
-from hoh_control_plane.service._common import ExecutionGate
+from hoh_control_plane.service._common import MAX_QA_REJECTIONS, ExecutionGate
 
 
 def _ticket(service, ticket_id: str) -> dict:
@@ -63,6 +67,15 @@ def _reject(service, actors, ticket_id: str = "DEV-142", attempt: int = 1,
     )
 
 
+def _reject_until_planner(service, actors, ticket_id: str = "DEV-142",
+                          first_attempt: int = 1, developer: str = "developer") -> dict:
+    """Spend the rework budget: the server resolves every rejection but the last."""
+    for attempt in range(first_attempt, first_attempt + MAX_QA_REJECTIONS):
+        verdict = _reject(service, actors, ticket_id, attempt, developer)
+    assert verdict["rework_budget_exhausted"] is True
+    return verdict
+
+
 def _pending(service, actors) -> list[dict]:
     return service.list_repository_reconciliations(
         actors["planner"], "project-1"
@@ -81,7 +94,7 @@ def test_a_qa_rejection_freezes_only_the_ticket_and_its_dependents(
 ) -> None:
     _board(service, actors)
 
-    verdict = _reject(service, actors)
+    verdict = _reject_until_planner(service, actors)
 
     [reconciliation] = _pending(service, actors)
     assert verdict["reconciliation_id"] == reconciliation["reconciliation_id"]
@@ -97,12 +110,8 @@ def test_a_qa_rejection_freezes_only_the_ticket_and_its_dependents(
         actors["developer_2"], "DEV-B", _ticket(service, "DEV-B")["version"], 900
     )
     assert unrelated["ticket"]["status"] == "DEV_IN_PROGRESS"
-    # The rejected ticket waits for Planner, although REWORK is claimable status.
-    rework = _ticket(service, "DEV-142")
-    assert rework["status"] == "REWORK"
-    _refused_for_reconciliation(
-        lambda: service.claim_ticket(actors["developer"], "DEV-142", rework["version"], 900)
-    )
+    # The rejected ticket waits for Planner.
+    assert _ticket(service, "DEV-142")["status"] == "BLOCKED"
     # A dependent is frozen by the barrier itself, not only by its unmet dependency.
     _refused_for_reconciliation(
         lambda: service.claim_ticket(
@@ -127,10 +136,9 @@ def test_a_qa_rejection_freezes_only_the_ticket_and_its_dependents(
 
     keep_open_tickets(service, actors["planner"])
 
-    resumed = service.claim_ticket(
-        actors["developer"], "DEV-142", _ticket(service, "DEV-142")["version"], 900
-    )
-    assert resumed["ticket"]["status"] == "DEV_IN_PROGRESS"
+    with service.store.connection() as connection:
+        for ticket_id in ("DEV-142", "DEV-C", "DEV-D"):
+            assert not ExecutionGate.is_closed(connection, "project-1", ticket_id)
 
 
 def test_a_rejection_elsewhere_does_not_stale_a_packet_in_flight(
@@ -142,7 +150,7 @@ def test_a_rejection_elsewhere_does_not_stale_a_packet_in_flight(
     )
     snapshot = service.get_ticket_context(actors["developer_2"], "DEV-B")["context_snapshot_id"]
 
-    _reject(service, actors)
+    _reject_until_planner(service, actors)
 
     with service.store.connection() as connection:
         service.require_fresh_context(connection, "DEV-B", snapshot)
@@ -155,7 +163,7 @@ def test_a_rejection_elsewhere_does_not_stale_a_packet_in_flight(
 
 def test_offers_skip_frozen_tickets_and_reach_the_rest(service, actors, seeded) -> None:
     _board(service, actors)
-    _reject(service, actors)
+    _reject_until_planner(service, actors)
     service.register_agent(actors["developer_2"], skills=["hoh-developer"], capacity=1)
 
     inbox = service.get_agent_inbox(actors["developer_2"], "project-1")
@@ -168,8 +176,10 @@ def test_unrelated_rejections_are_decided_apart_and_never_shrink_a_freeze(
     service, actors, seeded
 ) -> None:
     _board(service, actors)
-    first = _reject(service, actors)
-    second = _reject(service, actors, "DEV-B", attempt=2, developer="developer_2")
+    first = _reject_until_planner(service, actors)
+    second = _reject_until_planner(
+        service, actors, "DEV-B", first_attempt=4, developer="developer_2"
+    )
     assert first["reconciliation_id"] != second["reconciliation_id"]
 
     # The newer one shares no ticket with the older, so it need not wait for it.
@@ -190,7 +200,7 @@ def test_unrelated_rejections_are_decided_apart_and_never_shrink_a_freeze(
 def test_a_project_wide_observation_waits_for_an_older_ticket_scoped_one(
     service, actors, seeded
 ) -> None:
-    rejection = _reject(service, actors)
+    rejection = _reject_until_planner(service, actors)
     with service.store.connection(immediate=True) as connection:
         newer = service._open_commit_reconciliation(
             connection, actors["planner"], "project-1", commit="e" * 40,
@@ -221,7 +231,7 @@ def test_execution_roles_are_not_woken_by_a_ticket_scoped_barrier(
     from hoh_control_plane.event_wait import _pending as wait_candidates
 
     _open(service, actors, "DEV-B", ["src/reporting/**"])
-    _reject(service, actors)
+    _reject_until_planner(service, actors)
     service.register_agent(actors["developer_2"], skills=["hoh-developer"], capacity=1)
 
     developer_events = wait_candidates(service, actors["developer_2"], "project-1")
@@ -241,7 +251,7 @@ def test_a_ticket_scoped_planner_event_names_only_the_frozen_tickets(
     from hoh_control_plane.event_wait import _pending as wait_candidates
 
     _board(service, actors)
-    _reject(service, actors)
+    _reject_until_planner(service, actors)
 
     [(_key, planner_event)] = wait_candidates(service, actors["planner"], "project-1")
 
@@ -267,29 +277,36 @@ def _gate_regression(service, actors, seeded, tmp_path: Path) -> dict:
     return _merge(service, actors["integrator"], ticket, integration)
 
 
-def test_a_gate_regression_freezes_only_the_ticket_and_its_dependents(
+def test_a_gate_regression_resolves_its_own_ticket_scoped_reconciliation(
     service, actors, seeded, tmp_path: Path
 ) -> None:
+    """Wave 7A: rework for the judged ticket, keep for its dependents, no Planner wait."""
     gated = _gate_regression(service, actors, seeded, tmp_path)
 
     assert gated["ticket"]["status"] == "REWORK"
-    [reconciliation] = _pending(service, actors)
+    assert _pending(service, actors) == []
+    [reconciliation] = [
+        item for item in service.list_repository_reconciliations(
+            actors["planner"], "project-1", status="RESOLVED"
+        )["reconciliations"]
+        if item["resolved_by"] == "system:gate-regression"
+    ]
     assert reconciliation["scope"] == "tickets"
     assert reconciliation["frozen_ticket_ids"] == ["DEV-142", "DEV-C", "DEV-D"]
+    decisions = {
+        item["ticket_id"]: item["disposition"]
+        for item in reconciliation["decision_manifest"]["ticket_decisions"]
+    }
+    assert decisions == {"DEV-142": "rework", "DEV-C": "keep", "DEV-D": "keep"}
     unrelated = service.claim_ticket(
         actors["developer_2"], "DEV-B", _ticket(service, "DEV-B")["version"], 900
     )
     assert unrelated["ticket"]["status"] == "DEV_IN_PROGRESS"
-    _refused_for_reconciliation(
-        lambda: service.claim_ticket(
-            actors["developer"], "DEV-142", _ticket(service, "DEV-142")["version"], 900
-        )
+    # The Developer can take the rework at once.
+    rework = service.claim_ticket(
+        actors["developer"], "DEV-142", _ticket(service, "DEV-142")["version"], 900
     )
-    _refused_for_reconciliation(
-        lambda: service.claim_ticket(
-            actors["developer"], "DEV-C", _ticket(service, "DEV-C")["version"], 900
-        )
-    )
+    assert rework["ticket"]["status"] == "DEV_IN_PROGRESS"
     with service.store.connection() as connection:
         planner_jobs = connection.execute(
             "SELECT job_type FROM planner_jobs WHERE ticket_id = 'DEV-142'"
@@ -297,7 +314,7 @@ def test_a_gate_regression_freezes_only_the_ticket_and_its_dependents(
     assert [row["job_type"] for row in planner_jobs] == ["integration_conflict"]
 
 
-def _queued_merge(service, actors, seeded, tmp_path: Path):
+def _queued_merge(service, actors, seeded, tmp_path: Path, teammate_path: str = "teammate.txt"):
     from test_integration_async import (
         _candidate_ready_for_integration, _claimed_for_integration, _git,
     )
@@ -313,8 +330,10 @@ def _queued_merge(service, actors, seeded, tmp_path: Path):
             actors["integrator"], ticket["ticket_id"]
         )["context_snapshot_id"],
     )
-    (repository / "teammate.txt").write_text("pushed meanwhile\n", encoding="utf-8")
-    _git(repository, "add", "teammate.txt")
+    change = repository / teammate_path
+    change.parent.mkdir(parents=True, exist_ok=True)
+    change.write_text("pushed meanwhile\n", encoding="utf-8")
+    _git(repository, "add", teammate_path)
     _git(repository, "commit", "-m", "Teammate change")
     return repository, queued["merge_job"]["merge_job_id"], _git(repository, "rev-parse", "main")
 
@@ -335,7 +354,11 @@ def test_drift_onto_a_commit_hoh_never_observed_keeps_the_project_barrier(
 def test_drift_onto_an_observed_main_freezes_only_the_drifted_ticket(
     service, actors, seeded, tmp_path: Path
 ) -> None:
-    _repository, merge_job_id, main = _queued_merge(service, actors, seeded, tmp_path)
+    # The teammate wrote the candidate's own file, so the server cannot rebase
+    # the candidate onto main (wave 7B) and the drift goes to Planner.
+    _repository, merge_job_id, main = _queued_merge(
+        service, actors, seeded, tmp_path, teammate_path="src/checkout/retry.txt"
+    )
     # HoH has already seen main at this commit (a merge or a sync recorded it),
     # and that observation opened, and Planner resolved, its own reconciliation.
     with service.store.connection(immediate=True) as connection:
