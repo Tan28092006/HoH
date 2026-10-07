@@ -284,7 +284,12 @@ _CURRENT_AGENT_PRESENCE_COLUMNS = (
     "    -- which stays a complete path on its own.\n"
     "    endpoint TEXT,\n"
     "    -- When this agent last registered, i.e. when its current chat began.\n"
-    "    session_started_at TEXT\n"
+    "    session_started_at TEXT,\n"
+    "    -- Which model family runs this session (anthropic, openai, google, other),\n"
+    "    -- as the launcher reports it. NULL means unknown: checker/maker\n"
+    "    -- distinctness is then unverified, never assumed.\n"
+    "    model_family TEXT,\n"
+    "    model TEXT\n"
     ");"
 )
 _LEGACY_AGENT_PRESENCE_COLUMNS = "    updated_at TEXT NOT NULL\n);"
@@ -326,6 +331,7 @@ def test_a_legacy_database_without_skill_columns_upgrades_cleanly(tmp_path: Path
         after.close()
     assert {
         "skill_manifest", "protocol_version", "skill_compatibility", "session_started_at",
+        "model_family", "model",
     } <= columns_after
 
     service = ControlPlaneService(SQLiteStore(path))
