@@ -122,13 +122,15 @@ def test_concurrent_developer_and_qa_activity_on_different_tickets_completes_cle
     qa = _actor("qa-01", Role.QA)
     service.create_project(planner, "project-1", "Project", "Description", "main")
     service.create_feature(planner, "project-1", "feature-1", "Feature", "Objective")
+    # Disjoint scopes: these are independent workflows. With one shared scope,
+    # the ticket awaiting QA would rightly keep the other from being claimed.
     dev_ticket = service.create_ticket(
         planner, "feature-1", "DEV-CONTENTION-1", "Dev work", "Observable result",
-        Role.DEVELOPER, ["Behavior is visible"], [], ["src/**"], ready=True,
+        Role.DEVELOPER, ["Behavior is visible"], [], ["src/dev/**"], ready=True,
     )
     qa_ticket = service.create_ticket(
         planner, "feature-1", "DEV-CONTENTION-2", "QA-bound work", "Observable result",
-        Role.DEVELOPER, ["Behavior is visible"], [], ["src/**"], ready=True,
+        Role.DEVELOPER, ["Behavior is visible"], [], ["src/qa/**"], ready=True,
     )
 
     errors: list[BaseException] = []
