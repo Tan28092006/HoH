@@ -129,7 +129,11 @@ class IntegrationMixin:
         with self.store.connection() as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             if actor.role is Role.PLANNER:
-                pending = self._repository_reconciliation_state(connection, project_id)
+                # Outside commits may freeze only the tickets they reach (wave
+                # 7C), so ask whether a pending reconciliation covers this one.
+                pending = self._repository_reconciliation_state(
+                    connection, project_id, ticket_id
+                )
                 if not pending["repository_reconciliation_required"]:
                     raise ConflictError(
                         "Planner may record an external landing only while reconciling observed Git movement",
@@ -190,7 +194,9 @@ class IntegrationMixin:
             if current_project_id != project_id:
                 raise ConflictError("Ticket changed while its landing was being verified")
             if actor.role is Role.PLANNER:
-                pending = self._repository_reconciliation_state(connection, project_id)
+                pending = self._repository_reconciliation_state(
+                    connection, project_id, ticket_id
+                )
                 if not pending["repository_reconciliation_required"]:
                     raise ConflictError(
                         "Repository reconciliation finished while the landing was being verified"
