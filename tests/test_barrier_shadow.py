@@ -1,13 +1,14 @@
-"""Shadow mode for a scope-partitioned merge barrier (wave 6D, part 2).
+"""The scope partition of a merge (wave 6D shadow mode, acted on since wave 7C).
 
-A merge Planner has to review still closes the whole project. Beside it HoH
-records the tickets a scope rule would have frozen, and when Planner resolves
-the reconciliation, whether every ticket Planner changed fell inside that set.
-The prediction is never used to admit work; it is evidence for deciding later
-whether partitioning merges is safe.
+Wave 6D recorded, beside a merge Planner reviewed, the tickets a scope rule
+would have frozen, and scored that prediction when Planner resolved it. Wave 7C
+acts on the same partition: HoH's own merge resolves its reconciliation at once
+and flags the tickets the partition reaches with planning_base_stale. Scoring
+still applies to a shadow-mode reconciliation that was pending at upgrade.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -86,13 +87,28 @@ def test_only_a_changed_ticket_outside_the_prediction_is_a_disagreement(service)
     assert missed == {"agreed": False, "changed_ticket_ids": ["DEV-B"], "missed_ticket_ids": ["DEV-B"]}
 
 
-def _merge_needing_review(service, actors, seeded, tmp_path: Path) -> dict:
-    from test_integration_async import _merge
-
+def _board(service, actors) -> None:
     _open(service, actors, "DEV-OVER", ["src/checkout/**"])
     _open(service, actors, "DEV-FREE", ["src/reporting/**"])
     _open(service, actors, "DEV-NEXT", ["src/emails/**"], ["DEV-142"])
-    assert _merge(service, actors, seeded, tmp_path)["merge_status"] == "merged"
+
+
+def _shadow_review_pending_at_upgrade(service, actors) -> dict:
+    """A merge reconciliation as wave 6D left it: project-wide, with a prediction."""
+    _board(service, actors)
+    partition = _partition(
+        service, ["DEV-FREE", "DEV-NEXT", "DEV-OVER"], ["src/checkout/retry.py"]
+    )
+    with service.store.connection(immediate=True) as connection:
+        reconciliation_id = service._open_commit_reconciliation(
+            connection, actors["planner"], "project-1", commit="e" * 40,
+            subject="Merged DEV-142", relation="merged", observation_ref="test:merge",
+        )
+        connection.execute(
+            "UPDATE repository_reconciliations SET shadow_partition = ? "
+            "WHERE reconciliation_id = ?",
+            (json.dumps(partition, sort_keys=True), reconciliation_id),
+        )
     [reconciliation] = service.list_repository_reconciliations(
         actors["planner"], "project-1"
     )["reconciliations"]
@@ -119,20 +135,47 @@ def _resolve(service, actors, reconciliation, revised: str) -> dict:
     )["reconciliation"]
 
 
-def test_a_reviewed_merge_records_its_partition_but_still_closes_the_project(
+def test_a_merge_acts_on_its_partition_instead_of_closing_the_project(
     service, actors, seeded, tmp_path: Path
 ) -> None:
-    reconciliation = _merge_needing_review(service, actors, seeded, tmp_path)
+    from test_integration_async import _merge
+
+    _board(service, actors)
+    assert _merge(service, actors, seeded, tmp_path)["merge_status"] == "merged"
+
+    [reconciliation] = service.list_repository_reconciliations(
+        actors["planner"], "project-1", status="RESOLVED"
+    )["reconciliations"]
+    assert reconciliation["resolved_by"] == "system:merge-advisory"
+    partition = reconciliation["decision_manifest"]["planning_base_stale"]
+    assert partition["project_wide"] is False
+    assert partition["frozen_ticket_ids"] == ["DEV-NEXT", "DEV-OVER"]
+    assert partition["flowing_ticket_ids"] == ["DEV-FREE"]
+    with service.store.connection() as connection:
+        assert not ExecutionGate.is_closed(connection, "project-1")
+        flags = {
+            row["ticket_id"]: row["planning_base_stale"]
+            for row in connection.execute(
+                "SELECT ticket_id, planning_base_stale FROM tickets "
+                "WHERE ticket_id IN ('DEV-FREE', 'DEV-NEXT', 'DEV-OVER')"
+            )
+        }
+        version = service._ticket(connection, "DEV-OVER")["version"]
+    assert flags["DEV-FREE"] is None
+    assert json.loads(flags["DEV-OVER"])["intent_check"] == "required"
+    assert json.loads(flags["DEV-NEXT"])["intent_check"] == "required"
+    # Flagged, not frozen: the reached ticket is still claimable.
+    claimed = service.claim_ticket(actors["developer"], "DEV-OVER", version, 900)
+    assert claimed["ticket"]["status"] == "DEV_IN_PROGRESS"
+
+
+def test_a_pending_shadow_review_still_closes_the_project(service, actors, seeded) -> None:
+    reconciliation = _shadow_review_pending_at_upgrade(service, actors)
 
     assert reconciliation["scope"] == "project"
-    shadow = reconciliation["shadow_partition"]
-    assert shadow["project_wide"] is False
-    assert shadow["frozen_ticket_ids"] == ["DEV-NEXT", "DEV-OVER"]
-    assert shadow["flowing_ticket_ids"] == ["DEV-FREE"]
+    assert reconciliation["shadow_partition"]["flowing_ticket_ids"] == ["DEV-FREE"]
     assert reconciliation["shadow_agreed"] is None
-    # Not acted on: a ticket the partition would let flow is still refused.
     with service.store.connection() as connection:
-        assert ExecutionGate.is_closed(connection, "project-1", "DEV-FREE")
         version = service._ticket(connection, "DEV-FREE")["version"]
     with pytest.raises(ConflictError) as refused:
         service.claim_ticket(actors["developer"], "DEV-FREE", version, 900)
@@ -140,9 +183,9 @@ def test_a_reviewed_merge_records_its_partition_but_still_closes_the_project(
 
 
 def test_agreement_is_scored_when_planner_resolves_and_summarized_in_metrics(
-    service, actors, seeded, tmp_path: Path
+    service, actors, seeded
 ) -> None:
-    reconciliation = _merge_needing_review(service, actors, seeded, tmp_path)
+    reconciliation = _shadow_review_pending_at_upgrade(service, actors)
 
     resolved = _resolve(service, actors, reconciliation, revised="DEV-OVER")
 
@@ -160,9 +203,9 @@ def test_agreement_is_scored_when_planner_resolves_and_summarized_in_metrics(
 
 
 def test_a_change_outside_the_prediction_is_reported_as_a_disagreement(
-    service, actors, seeded, tmp_path: Path
+    service, actors, seeded
 ) -> None:
-    reconciliation = _merge_needing_review(service, actors, seeded, tmp_path)
+    reconciliation = _shadow_review_pending_at_upgrade(service, actors)
 
     resolved = _resolve(service, actors, reconciliation, revised="DEV-FREE")
 

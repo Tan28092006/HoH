@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import hashlib
 import subprocess
@@ -763,9 +764,10 @@ def test_a_merge_outside_every_open_scope_resolves_its_own_reconciliation(
     (["src/reporting/**"], True),    # depends on the merged ticket
     ([], False),                     # unknown scope
 ])
-def test_a_merge_that_may_affect_open_work_waits_for_planner(
+def test_a_merge_that_may_affect_open_work_flags_it_for_an_intent_check(
     service, actors, seeded, tmp_path: Path, scope, depends
 ) -> None:
+    """Wave 7C: HoH's own merge never waits for Planner; reachable work is flagged."""
     _open_ticket(service, actors, "DEV-201", scope or ["placeholder/**"],
                  depends_on=["DEV-142"] if depends else None)
     if not scope:
@@ -774,7 +776,13 @@ def test_a_merge_that_may_affect_open_work_waits_for_planner(
 
     _merge(service, actors, seeded, tmp_path)
 
-    assert _latest_reconciliation(service)["status"] == "PENDING"
+    latest = _latest_reconciliation(service)
+    assert (latest["status"], latest["resolved_by"]) == ("RESOLVED", "system:merge-advisory")
+    with service.store.connection() as connection:
+        flag = connection.execute(
+            "SELECT planning_base_stale FROM tickets WHERE ticket_id = 'DEV-201'"
+        ).fetchone()["planning_base_stale"]
+    assert json.loads(flag)["intent_check"] == "required"
 
 
 def _snapshot(service, actor, ticket):
