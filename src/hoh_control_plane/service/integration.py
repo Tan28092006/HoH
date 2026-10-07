@@ -1017,6 +1017,21 @@ class IntegrationMixin:
                         expected_base_commit=candidate["base_commit"],
                         candidate_commit=candidate["commit_sha"],
                     )
+            if not merged and self.git_worktrees.commit_is_on_branch(
+                repository_path=repository["repository_path"],
+                default_branch=project["default_branch"],
+                commit=candidate["commit_sha"],
+            ):
+                # Main moved because the candidate itself landed outside this job
+                # while the gate ran (R7). That is delivered work, not drift:
+                # close the job without rework, as the pre-gate check does, so
+                # the landing is recorded as ungated rather than as this gate.
+                return self.fail_queued_merge(
+                    merge_job_id,
+                    "candidate_already_on_main: the candidate reached the default branch "
+                    "outside this merge job while its gate ran; record the landing with "
+                    "record_external_landing.",
+                )
             return self._complete_queued_merge(merge_job_id, merged, mainline_commit)
         except DomainError as error:
             # Git may already have changed. Preserve the intent and reconcile
