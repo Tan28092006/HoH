@@ -58,6 +58,7 @@ browser tests skip without `--run-ui`.
   Give the process or job something to report (a PID, a terminal status) and
   wait for that with a deadline.
 - A gap whose fix belongs to another open branch is a strict `xfail` that says
-  which branch owns it (`tests/test_known_gaps.py`).
+  which branch owns it, collected in `tests/test_known_gaps.py`. Whoever merges
+  the fix removes the test or the marker (and the file when it empties).
 - Every reconciliation-barrier call site has a test in
   `tests/test_barrier_guards.py`; its inventory test fails on a new site without one.

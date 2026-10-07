@@ -9,7 +9,11 @@ from hoh_control_plane.agent_wakeup import SECRET_VARIABLE, deliver_pending_offe
 from hoh_control_plane.domain import Actor, Role
 from hoh_control_plane.planner_wakeup import deliver_pending
 from hoh_control_plane.service import ControlPlaneService
-from hoh_control_plane.store_factory import database_path_from_environment, store_from_environment
+from hoh_control_plane.store_factory import (
+    DATABASE_PATH_VARIABLE,
+    DATABASE_URL_VARIABLE,
+    store_from_environment,
+)
 
 
 def sweep_once(database_path: str | Path | None) -> dict[str, object]:
@@ -41,6 +45,30 @@ def sweep_once(database_path: str | Path | None) -> dict[str, object]:
     }
 
 
+def database_path_from_environment() -> Path | None:
+    """The SQLite file to sweep, or None when HOH_DATABASE_URL names a server.
+
+    There is no default: a relative ``data/control-plane.db`` resolves against
+    whatever directory the process was started in, and a scheduler started in
+    the wrong one silently creates and sweeps a stray database.
+    """
+    if (os.getenv(DATABASE_URL_VARIABLE) or "").strip():
+        return None
+    value = (os.getenv(DATABASE_PATH_VARIABLE) or "").strip()
+    if not value:
+        raise SystemExit(
+            f"Set {DATABASE_PATH_VARIABLE} to the absolute path of the control-plane "
+            f"database (or {DATABASE_URL_VARIABLE}); the scheduler has no default."
+        )
+    path = Path(value)
+    if not path.is_absolute():
+        raise SystemExit(
+            f"{DATABASE_PATH_VARIABLE} must be absolute; a relative path depends on "
+            "the directory the scheduler was started in."
+        )
+    return path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sweep expired Harness Control leases")
     parser.add_argument("--once", action="store_true", help="Run one sweep then exit")
@@ -57,7 +85,18 @@ def main() -> None:
     database_path = database_path_from_environment()
 
     while True:
-        result = sweep_once(database_path)
+        try:
+            result = sweep_once(database_path)
+        except Exception as error:  # noqa: BLE001 - one failed pass must not end the scheduler
+            # Contention or a transient Git/database fault: report the type only
+            # (a message can carry a DSN or remote URL) and try again next pass.
+            if arguments.once:
+                print(f"Sweep failed ({type(error).__name__}).", flush=True)
+                raise SystemExit(1) from None
+            print(f"Sweep failed ({type(error).__name__}); retrying in "
+                  f"{arguments.interval_seconds} s.", flush=True)
+            time.sleep(arguments.interval_seconds)
+            continue
         if result["count"]:
             print(f"Requeued {result['count']} expired lease(s).", flush=True)
         repositories = result["repositories"]

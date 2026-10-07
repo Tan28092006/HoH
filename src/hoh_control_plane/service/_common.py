@@ -126,6 +126,11 @@ REPOSITORY_OBSERVE_SECONDS = 60
 # close it.
 MERGE_JOB_STUCK_SECONDS = 2100
 
+# A frozen candidate's pin (refs/hoh/candidates/<id>) outlives its ticket's DONE
+# by this long, so evidence that names the commit stays resolvable while anyone
+# still reviews the delivery. Tickets that end any other way keep their pins.
+CANDIDATE_PIN_RETENTION_SECONDS = 30 * 86_400
+
 # Retention policy for idempotency records: a replay is honored for this long,
 # after which purge_expired_idempotency_records may delete the row and the same
 # key behaves like a fresh request. Long enough to outlive any worker restart

@@ -258,6 +258,31 @@ def test_delivery_without_an_endpoint_writes_a_bounded_local_notification(
     assert "observation" not in json.dumps(envelope)
 
 
+def test_a_server_backed_store_writes_notifications_under_its_artifact_root(
+    service, actors, seeded, monkeypatch, tmp_path
+) -> None:
+    """A PostgreSQL store's ``path`` is its DSN string, which has no parent."""
+    _blocked(service, actors, seeded)
+    monkeypatch.delenv(planner_wakeup.ENDPOINT_VARIABLE, raising=False)
+    monkeypatch.setenv(planner_wakeup.SECRET_VARIABLE, "local-secret")
+    artifacts = tmp_path / "server-artifacts"
+
+    class ServerBackedStore:
+        path = "postgresql://hoh@db.example.invalid/hoh"
+        artifact_root = artifacts
+
+        def __getattr__(self, name):
+            return getattr(store, name)
+
+    store = service.store
+    monkeypatch.setattr(service, "store", ServerBackedStore())
+
+    result = deliver_pending(service)
+
+    assert len(result["delivered"]) == 1
+    assert len(list((artifacts / "notifications").glob("*.json"))) == 1
+
+
 def test_a_registered_endpoint_is_never_sent_an_unsigned_envelope(
     service, actors, seeded, monkeypatch
 ) -> None:

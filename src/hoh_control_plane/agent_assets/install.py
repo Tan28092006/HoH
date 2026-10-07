@@ -2,23 +2,114 @@
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
+import stat
 import tempfile
+import time
 import tomllib
+from contextlib import contextmanager
 from pathlib import Path
 
 
-def install(kit: Path, home: Path, client: str) -> None:
-    manifest = json.loads((kit / "manifest.json").read_text(encoding="utf-8"))
-    for relative, expected in manifest["files"].items():
-        source = (kit / relative).resolve()
-        if not source.is_relative_to(kit.resolve()) or hashlib.sha256(source.read_bytes()).hexdigest() != expected:
-            raise ValueError("Kit checksum validation failed")
-    config = home / (".codex/config.toml" if client == "codex" else ".claude.json")
-    skill_root = home / (".codex/skills" if client == "codex" else ".claude/skills")
-    text = config.read_text(encoding="utf-8") if config.exists() else ""
-    original_text = text
+_LOCK_WAIT_SECONDS = 30
+_REPLACE_ATTEMPTS = 5
+
+
+def _read_config(config: Path) -> str:
+    return config.read_text(encoding="utf-8") if config.exists() else ""
+
+
+@contextmanager
+def _config_lock(config: Path):
+    """One installer at a time per config file; the OS releases it if we die.
+
+    The lock file is empty and sits beside the config; it holds no settings.
+    """
+    lock_path = config.parent / f".{config.name}.hoh-install.lock"
+    with lock_path.open("a+b") as stream:
+        deadline = time.monotonic() + _LOCK_WAIT_SECONDS
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise ValueError(
+                        f"Another HoH install is updating {config.name}; try again"
+                    ) from None
+                time.sleep(0.1)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def _replace_atomically(config: Path, text: str) -> None:
+    """Write ``text`` to a private temp file beside ``config``, then rename it over.
+
+    A reader sees the old file or the new one, never a half-written one, and
+    the temp file is removed on any failure. No backup copy is kept: the
+    config holds tokens, and a stray copy of it in the home directory is a
+    credential leak that the atomic replace makes unnecessary.
+    """
+    descriptor, temporary = tempfile.mkstemp(dir=config.parent, prefix=f".{config.name}.hoh-tmp-")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if config.exists():
+            os.chmod(temporary, stat.S_IMODE(config.stat().st_mode))
+        for attempt in range(_REPLACE_ATTEMPTS):
+            try:
+                os.replace(temporary, config)
+                return
+            except PermissionError:
+                # Windows refuses the rename while another process has the file
+                # open for a moment (the client itself saving its state).
+                if attempt == _REPLACE_ATTEMPTS - 1:
+                    raise
+                time.sleep(0.2 * (attempt + 1))
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _write_config(config: Path, kit: Path, manifest: dict, client: str,
+                  original_text: str, new_text: str) -> None:
+    """Write the merged config under the lock, re-merging if it changed meanwhile.
+
+    The client rewrites its own config while it runs. Writing back the text
+    merged at the start would silently drop whatever the client saved in
+    between, so the file is read again under the lock and the kit's server is
+    merged into what is there now.
+    """
+    config.parent.mkdir(parents=True, exist_ok=True)
+    with _config_lock(config):
+        current = _read_config(config)
+        if current != original_text:
+            new_text = _merged_config(kit, manifest, client, current)
+        if new_text != current:
+            _replace_atomically(config, new_text)
+        # Earlier installers left full copies of the config, tokens included.
+        for stale in config.parent.glob(config.name + ".hoh-backup-*"):
+            if stale.is_file():
+                stale.unlink(missing_ok=True)
+
+
+def _merged_config(kit: Path, manifest: dict, client: str, text: str) -> str:
+    """The client config with this kit's MCP server merged in; raises on a conflict."""
     name = manifest["server_name"]
     if client == "codex":
         parsed = tomllib.loads(text)
@@ -75,6 +166,21 @@ def install(kit: Path, home: Path, client: str) -> None:
             raise ValueError("Existing HoH MCP configuration differs; review before replacing it")
         parsed["mcpServers"][name] = supplied
         new_text = json.dumps(parsed, indent=2) + "\n"
+    return new_text
+
+
+def install(kit: Path, home: Path, client: str) -> None:
+    manifest = json.loads((kit / "manifest.json").read_text(encoding="utf-8"))
+    for relative, expected in manifest["files"].items():
+        source = (kit / relative).resolve()
+        if not source.is_relative_to(kit.resolve()) or hashlib.sha256(source.read_bytes()).hexdigest() != expected:
+            raise ValueError("Kit checksum validation failed")
+    config = home / (".codex/config.toml" if client == "codex" else ".claude.json")
+    skill_root = home / (".codex/skills" if client == "codex" else ".claude/skills")
+    # Every conflict check runs before the first write, and the config is
+    # written last, atomically, under a lock (see _write_config).
+    original_text = _read_config(config)
+    new_text = _merged_config(kit, manifest, client, original_text)
     agent = manifest.get("claude_agent")
     agent_destination = None
     if agent is not None:
@@ -100,12 +206,7 @@ def install(kit: Path, home: Path, client: str) -> None:
     if agent_destination is not None and not agent_destination.exists():
         agent_destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(kit / agent, agent_destination)
-    config.parent.mkdir(parents=True, exist_ok=True)
-    if new_text != original_text:
-        if config.exists():
-            with tempfile.NamedTemporaryFile(dir=config.parent, prefix=config.name + ".hoh-backup-", delete=False) as stream:
-                stream.write(config.read_bytes())
-        config.write_text(new_text, encoding="utf-8")
+    _write_config(config, kit, manifest, client, original_text, new_text)
 
 
 if __name__ == "__main__":

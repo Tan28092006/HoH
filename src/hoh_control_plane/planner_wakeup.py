@@ -125,7 +125,8 @@ def deliver_pending(service: ControlPlaneService, *, limit: int = 20) -> dict[st
     """Deliver every pending wakeup once; safe to call repeatedly."""
     endpoint = os.getenv(ENDPOINT_VARIABLE) or None
     secret = os.getenv(SECRET_VARIABLE) or None
-    notification_root = service.store.path.parent / "notifications"
+    # artifact_root, not path.parent: a Postgres store's path is its DSN string.
+    notification_root = Path(service.store.artifact_root) / "notifications"
     delivered: list[str] = []
     failed: list[str] = []
     for intervention in service.pending_planner_interventions(limit=limit):

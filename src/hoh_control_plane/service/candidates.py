@@ -184,10 +184,13 @@ class CandidateMixin:
                 outside_scope = [path for path in changed_paths if not self._path_is_in_any_scope(path, ticket["file_scope"])]
             if outside_scope:
                 raise ValidationError("Candidate changes paths outside ticket write scope: " + ", ".join(outside_scope))
-            return self._complete_queued_candidate_submission(submission_id, commit_sha, base_commit, changed_paths,
-                                                              base_modules)
+            completed = self._complete_queued_candidate_submission(submission_id, commit_sha, base_commit,
+                                                                   changed_paths, base_modules)
         except DomainError as error:
             return self.fail_queued_candidate_submission(submission_id, str(error))
+        if completed.get("status") == "COMPLETED" and completed.get("candidate_id"):
+            self._pin_frozen_candidate(completed["candidate_id"])
+        return completed
 
     @staticmethod
     def _service_owns_the_workspace(repository: dict[str, Any]) -> bool:
@@ -470,7 +473,7 @@ class CandidateMixin:
             )
             qa_ready_ticket = self._ticket(connection, ticket_id)
             self._queue_ticket(connection, actor, project_id, qa_ready_ticket)
-            return {
+            submitted = {
                 "ticket": qa_ready_ticket,
                 "candidate": self._candidate_with_changed_paths(connection, self._one(
                     connection,
@@ -478,3 +481,31 @@ class CandidateMixin:
                     (candidate_id,),
                 )),
             }
+        self._pin_frozen_candidate(candidate_id)
+        return submitted
+
+    def _pin_frozen_candidate(self, candidate_id: str) -> bool:
+        """Pin a just-frozen candidate at ``refs/hoh/candidates/<id>``; True when pinned.
+
+        Runs after the freeze commits, outside the write lock, because it is
+        Git. A miss (Git busy, a crash right here) is repaired by the
+        repository sweep, which pins every candidate still missing its ref.
+        """
+        with self.store.connection() as connection:
+            row = connection.execute(
+                """SELECT c.commit_sha, r.repository_path FROM candidates c
+                   JOIN tickets t ON t.ticket_id = c.ticket_id
+                   JOIN features f ON f.feature_id = t.feature_id
+                   JOIN project_repositories r ON r.project_id = f.project_id
+                   WHERE c.candidate_id = ?""",
+                (candidate_id,),
+            ).fetchone()
+        if row is None:
+            return False
+        try:
+            self.git_worktrees.pin_candidate(
+                repository_path=row["repository_path"], candidate_id=candidate_id,
+                commit=row["commit_sha"])
+        except (DomainError, OSError):
+            return False
+        return True

@@ -73,3 +73,97 @@ def test_only_the_internal_admin_scheduler_can_sweep_leases(service, actors) -> 
         pass
     else:
         raise AssertionError("Developer must not sweep every agent lease")
+
+
+def test_scheduler_refuses_to_start_without_a_database_path(monkeypatch, tmp_path) -> None:
+    import pytest
+    from hoh_control_plane import scheduler
+
+    monkeypatch.delenv("HOH_DATABASE_URL", raising=False)
+    monkeypatch.delenv("HOH_DATABASE_PATH", raising=False)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit, match="no default"):
+        scheduler.database_path_from_environment()
+    # Nothing was created relative to the start directory.
+    assert not (tmp_path / "data").exists()
+
+
+def test_scheduler_refuses_a_relative_database_path(monkeypatch) -> None:
+    import pytest
+    from hoh_control_plane import scheduler
+
+    monkeypatch.delenv("HOH_DATABASE_URL", raising=False)
+    monkeypatch.setenv("HOH_DATABASE_PATH", "data/control-plane.db")
+    with pytest.raises(SystemExit, match="absolute"):
+        scheduler.database_path_from_environment()
+
+
+def test_scheduler_uses_an_absolute_path_or_the_database_url(monkeypatch, tmp_path) -> None:
+    from hoh_control_plane import scheduler
+
+    monkeypatch.delenv("HOH_DATABASE_URL", raising=False)
+    monkeypatch.setenv("HOH_DATABASE_PATH", str(tmp_path / "control-plane.db"))
+    assert scheduler.database_path_from_environment() == tmp_path / "control-plane.db"
+    monkeypatch.setenv("HOH_DATABASE_URL", "postgresql://example.invalid/hoh")
+    assert scheduler.database_path_from_environment() is None
+
+
+def test_one_failed_sweep_does_not_end_the_scheduler(monkeypatch, tmp_path, capsys) -> None:
+    import sys
+
+    import pytest
+    from hoh_control_plane import scheduler
+    from hoh_control_plane.store import ContentionError
+
+    monkeypatch.delenv("HOH_DATABASE_URL", raising=False)
+    monkeypatch.setenv("HOH_DATABASE_PATH", str(tmp_path / "control-plane.db"))
+    monkeypatch.setattr(sys, "argv", ["hoh-scheduler", "--interval-seconds", "5"])
+    passes = []
+
+    def sweep(_path):
+        passes.append(_path)
+        if len(passes) == 1:
+            raise ContentionError("database is locked at postgresql://user:secret@host")
+        return {"count": 0, "repositories": {"candidates_already_on_main": [],
+                "stuck_merge_jobs": [], "failed": []},
+                "dispatch": {"offered_count": 0}, "agent_wakeups": {"delivered": []}}
+
+    class Stop(Exception):
+        pass
+
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            raise Stop
+
+    monkeypatch.setattr(scheduler, "sweep_once", sweep)
+    monkeypatch.setattr(scheduler.time, "sleep", sleep)
+    with pytest.raises(Stop):
+        scheduler.main()
+
+    assert len(passes) == 2
+    output = capsys.readouterr().out
+    assert "Sweep failed (ContentionError); retrying in 5 s." in output
+    # Only the error type is printed: a message can carry a DSN.
+    assert "secret" not in output
+
+
+def test_a_failed_single_sweep_exits_nonzero(monkeypatch, tmp_path) -> None:
+    import sys
+
+    import pytest
+    from hoh_control_plane import scheduler
+
+    monkeypatch.delenv("HOH_DATABASE_URL", raising=False)
+    monkeypatch.setenv("HOH_DATABASE_PATH", str(tmp_path / "control-plane.db"))
+    monkeypatch.setattr(sys, "argv", ["hoh-scheduler", "--once"])
+
+    def sweep(_path):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(scheduler, "sweep_once", sweep)
+    with pytest.raises(SystemExit) as stopped:
+        scheduler.main()
+    assert stopped.value.code == 1

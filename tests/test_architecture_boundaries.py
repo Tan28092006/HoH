@@ -21,6 +21,7 @@ STORAGE = {"store", "store_schema", "store_migrations", "postgres_store", "store
 ADAPTERS = {
     "git_worktrees", "qa_runner", "managed_process", "resource_lock",
     "resource_probe", "capability_probe", "pytest_probe", "observability",
+    "uncancellable",
 }
 ORCHESTRATION = {
     "event_wait", "supervisor", "scheduler", "agent_wakeup", "planner_wakeup",

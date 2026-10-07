@@ -59,6 +59,9 @@ class ProcessResult:
     stdout_truncated: bool = False
     stderr_truncated: bool = False
     capture_errors: tuple[str, ...] = ()
+    # The bytes behind ``stdout``, for output that must not be re-encoded (a
+    # recovery patch of a file that is not UTF-8). Bounded like ``stdout``.
+    stdout_bytes: bytes = b''
 
 
 class _WindowsJob:
@@ -112,7 +115,15 @@ class _WindowsJob:
 
 def run_managed(command: list[str], *, cwd: str | Path, timeout: float,
                 env: dict[str, str] | None = None, output_limit: int = 200_000,
-                cancel=None) -> ProcessResult:
+                cancel=None, hold=None, hold_limit: float = 1800) -> ProcessResult:
+    """Run ``command`` as an owned process tree with bounded output.
+
+    ``cancel`` is polled; a true answer stops the tree. ``hold`` is polled
+    first: while it answers true the process is in a phase that must finish
+    (a branch move, R6), so neither ``cancel`` nor the ``timeout`` stops it.
+    ``hold_limit`` seconds past the deadline the tree is stopped regardless,
+    so a hung phase cannot hold a worker slot forever.
+    """
     if timeout <= 0 or output_limit < 0 or not command:
         raise ValueError('A command, positive timeout and nonnegative output limit are required')
     # -I -S prevents ambient sitecustomize/PYTHONPATH from running code before
@@ -161,6 +172,14 @@ def run_managed(command: list[str], *, cwd: str | Path, timeout: float,
         process.stdin.flush()
         deadline = time.monotonic() + timeout
         while process.poll() is None:
+            if hold is not None and time.monotonic() < deadline + hold_limit:
+                try:
+                    holding = bool(hold())
+                except Exception:
+                    holding = False
+                if holding:
+                    time.sleep(0.05)
+                    continue
             if cancel is not None:
                 try:
                     cancelled = bool(cancel())
@@ -188,4 +207,5 @@ def run_managed(command: list[str], *, cwd: str | Path, timeout: float,
               for data, clipped in zip(buffers, truncated)]
     if cancelled:
         output[1] += '\n[hoh:cancelled] Execution authority was revoked or unavailable.'
-    return ProcessResult(process.returncode, *output, timed_out, cancelled, *truncated, tuple(capture_errors))
+    return ProcessResult(process.returncode, *output, timed_out, cancelled, *truncated, tuple(capture_errors),
+                         bytes(buffers[0]))
