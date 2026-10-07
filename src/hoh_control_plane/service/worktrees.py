@@ -644,7 +644,7 @@ class WorktreeMixin:
         self, provision_id: str, error_message: str
     ) -> dict[str, Any]:
         """Persist a worker error so the owning Developer can decide how to proceed."""
-        self._bounded_text(error_message, "worktree_provision.error_message", 4000)
+        error_message = self._failure_text(error_message, 4000)
         with self.store.connection(immediate=True) as connection:
             provision = self._worktree_provision_job(connection, provision_id)
             if provision["status"] in {"COMPLETED", "FAILED"}:

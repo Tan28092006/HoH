@@ -1327,7 +1327,7 @@ class IntegrationMixin:
 
     def fail_queued_merge(self, merge_job_id: str, error_message: str) -> dict[str, Any]:
         """Terminally record a merge worker failure without blocking Integrator polling."""
-        self._bounded_text(error_message, "merge_job.error_message", 4000)
+        error_message = self._failure_text(error_message, 4000)
         with self.store.connection(immediate=True) as connection:
             job = self._merge_job(connection, merge_job_id)
             if job["status"] in {"COMPLETED", "FAILED"}:

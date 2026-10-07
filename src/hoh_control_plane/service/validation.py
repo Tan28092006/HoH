@@ -75,6 +75,20 @@ class ValidationMixin:
         if len(value) > maximum:
             raise ValidationError(f"{field} must be at most {maximum} characters")
 
+    @staticmethod
+    def _failure_text(value: Any, maximum: int) -> str:
+        """Fit a worker's error into its column instead of refusing it.
+
+        A failure recorder runs inside a worker's ``except``. Validating the text
+        there like user input raised a second error and left the job RUNNING
+        whenever the first error was long or empty, so the text is bounded here.
+        """
+        text = str(value or "").strip() or "Worker failed without an error message"
+        if len(text) <= maximum:
+            return text
+        marker = " ... [truncated]"
+        return text[: maximum - len(marker)] + marker
+
     @classmethod
     def _bounded_list(
         cls,
