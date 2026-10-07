@@ -45,6 +45,24 @@ UNVERIFIED = "unverified"
 BASE_DRIFT = "base_drift"
 
 
+def _name_status_rows(output: str, limit: int | None = 200) -> list[dict[str, str]]:
+    """Rows of ``--name-status --no-renames -z`` output, in Git's order.
+
+    With ``-z`` Git writes ``status NUL path NUL`` and never quotes a path, so a
+    non-ASCII or otherwise unusual name arrives exactly as it is in the tree.
+    Without it Git C-quotes such a name, and the quoted text matches no scope.
+    """
+    fields = output.lstrip("\n").split("\0")
+    rows: list[dict[str, str]] = []
+    for status, path in zip(fields[0::2], fields[1::2]):
+        status = status.strip()
+        if status and path:
+            rows.append({"status": status, "path": path})
+            if limit is not None and len(rows) >= limit:
+                break
+    return rows
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedWorktree:
     repository_path: str
@@ -189,15 +207,9 @@ class GitWorktreeManager:
         ).stdout.strip()
 
         def changes(end: str) -> list[dict[str, str]]:
-            output = self._git(
-                repository, "diff", "--name-status", "--no-renames", merge_base, end
-            ).stdout
-            rows: list[dict[str, str]] = []
-            for line in output.splitlines()[:200]:
-                status, separator, path = line.partition("\t")
-                if separator and path:
-                    rows.append({"status": status, "path": path})
-            return rows
+            return _name_status_rows(self._git(
+                repository, "diff", "-z", "--name-status", "--no-renames", merge_base, end
+            ).stdout)
 
         incoming_log = self._git(
             repository, "log", "--format=%H%x09%s", "--max-count=100",
@@ -246,18 +258,13 @@ class GitWorktreeManager:
         def changes(start: str | None, end: str) -> list[dict[str, str]]:
             if start is None:
                 output = self._git(
-                    repository, "show", "--format=", "--name-status", "--no-renames", end
+                    repository, "show", "--format=", "-z", "--name-status", "--no-renames", end
                 ).stdout
             else:
                 output = self._git(
-                    repository, "diff", "--name-status", "--no-renames", start, end
+                    repository, "diff", "-z", "--name-status", "--no-renames", start, end
                 ).stdout
-            result = []
-            for line in output.splitlines()[:200]:
-                status, separator, path = line.partition("\t")
-                if separator and path:
-                    result.append({"status": status, "path": path})
-            return result
+            return _name_status_rows(output)
 
         if previous_commit is None:
             if baseline_commit is not None:
@@ -445,7 +452,7 @@ class GitWorktreeManager:
             # --untracked-files=all names each abandoned file instead of collapsing
             # a whole directory to one entry, so nothing is silently lost.
             status = self._git(
-                worktree, "status", "--porcelain", "--untracked-files=all", check=False
+                worktree, "status", "--porcelain", "-z", "--untracked-files=all", check=False
             )
             if status.returncode != 0:
                 return WorktreeCheckpoint(
@@ -490,10 +497,12 @@ class GitWorktreeManager:
             worktree = self._existing_directory(worktree_path, "worktree")
         except ValidationError:
             return None
-        patch = self._git(worktree, "diff", "HEAD", "--binary", check=False)
+        patch = self._git(worktree, "diff", "HEAD", "--binary", check=False, binary=True)
         if patch.returncode != 0 or not patch.stdout:
             return None
-        payload = patch.stdout.encode("utf-8")
+        # Git's own bytes: a patch of a file that is not UTF-8 must apply again,
+        # so it is never decoded and re-encoded.
+        payload = patch.stdout
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(payload)
         return RecoveryArtifact(
@@ -517,11 +526,23 @@ class GitWorktreeManager:
 
     @staticmethod
     def _untracked_paths(status_output: str) -> tuple[str, ...]:
-        paths = {
-            line[3:].strip().strip('"').replace("\\", "/")
-            for line in status_output.splitlines()
-            if line.startswith("?? ")
-        }
+        """Untracked paths from ``status --porcelain -z``, unquoted.
+
+        Each entry is ``XY path``; a rename or copy is followed by one more
+        field, its source path, which is skipped.
+        """
+        fields = status_output.split("\0")
+        paths: set[str] = set()
+        index = 0
+        while index < len(fields):
+            entry = fields[index]
+            index += 1
+            if len(entry) < 4:
+                continue
+            if "R" in entry[:2] or "C" in entry[:2]:
+                index += 1
+            elif entry.startswith("?? "):
+                paths.add(entry[3:])
         return tuple(sorted(paths))
 
     def verify_candidate(
@@ -662,15 +683,18 @@ class GitWorktreeManager:
         repository = Path(self.validate_repository(repository_path))
         base = self._resolve_commit(repository, base_commit)
         candidate = self._resolve_commit(repository, candidate_commit)
+        # -z: unquoted paths, so a non-ASCII name is checked against the scope as
+        # it is, not as Git's C-quoted rendering of it.
         result = self._git(
             repository,
             "diff",
+            "-z",
             "--name-only",
             "--no-renames",
             base,
             candidate,
         )
-        return sorted({line.strip().replace("\\", "/") for line in result.stdout.splitlines() if line.strip()})
+        return sorted({path for path in result.stdout.split("\0") if path})
 
     @contextmanager
     def qa_checkout(self, *, repository_path: str, test_run_id: str, candidate_commit: str) -> Iterator[str]:
@@ -1198,7 +1222,7 @@ class GitWorktreeManager:
 
     @staticmethod
     def _git(path: Path, *arguments: str, check: bool = True,
-             timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+             timeout: float | None = None, binary: bool = False) -> subprocess.CompletedProcess:
         try:
             command = [*_GIT_PROGRAM, '-C', str(path), *arguments]
             result = run_managed(command, cwd=path, timeout=timeout or _GIT_COMMAND_TIMEOUT_SECONDS,
@@ -1207,7 +1231,9 @@ class GitWorktreeManager:
                 raise ValidationError('Git operation timed out; its process tree was stopped')
             if any(output.endswith('\n[output truncated]') for output in (result.stdout, result.stderr)):
                 raise ValidationError('Git output exceeded the capture limit; refusing incomplete evidence')
-            completed = subprocess.CompletedProcess(command, result.returncode, result.stdout, result.stderr)
+            completed = subprocess.CompletedProcess(
+                command, result.returncode, result.stdout_bytes if binary else result.stdout,
+                result.stderr)
         except subprocess.TimeoutExpired as exc:
             raise ValidationError("Git operation timed out") from exc
         except OSError as exc:

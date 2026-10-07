@@ -59,6 +59,9 @@ class ProcessResult:
     stdout_truncated: bool = False
     stderr_truncated: bool = False
     capture_errors: tuple[str, ...] = ()
+    # The bytes behind ``stdout``, for output that must not be re-encoded (a
+    # recovery patch of a file that is not UTF-8). Bounded like ``stdout``.
+    stdout_bytes: bytes = b''
 
 
 class _WindowsJob:
@@ -204,4 +207,5 @@ def run_managed(command: list[str], *, cwd: str | Path, timeout: float,
               for data, clipped in zip(buffers, truncated)]
     if cancelled:
         output[1] += '\n[hoh:cancelled] Execution authority was revoked or unavailable.'
-    return ProcessResult(process.returncode, *output, timed_out, cancelled, *truncated, tuple(capture_errors))
+    return ProcessResult(process.returncode, *output, timed_out, cancelled, *truncated, tuple(capture_errors),
+                         bytes(buffers[0]))
