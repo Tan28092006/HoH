@@ -32,6 +32,11 @@ _STALE_INDEX_LOCK_SECONDS = 600
 # A marker in the shared checkout's Git directory that records a branch move
 # in flight. Present on entry means an earlier move was interrupted.
 FAST_FORWARD_MARKER = "hoh-fast-forward.json"
+# Every frozen candidate is pinned by a ref of its own in the shared checkout,
+# so a force-push, fetch --prune and gc cannot drop the commit a ticket's
+# evidence names. fetch --prune only touches refs/remotes; these are never
+# pruned by Git, only by HoH once the ticket is DONE and its retention passed.
+CANDIDATE_REF_PREFIX = "refs/hoh/candidates/"
 
 CLEAN_CHECKPOINT = "clean_checkpoint"
 DIRTY = "dirty"
@@ -995,6 +1000,61 @@ class GitWorktreeManager:
                 raise ValidationError('Repository must be clean before integration')
         return self._move_branch(repository, ref, old, new, checked_out=checked_out,
                                  message="hoh: land rebased candidate")
+
+    @staticmethod
+    def _candidate_ref(candidate_id: str) -> str:
+        if not _SAFE_SEGMENT_RE.fullmatch(candidate_id or ""):
+            raise ValidationError("Candidate id is not a safe ref segment")
+        return CANDIDATE_REF_PREFIX + candidate_id
+
+    def pin_candidate(self, *, repository_path: str, candidate_id: str, commit: str) -> bool:
+        """Create ``refs/hoh/candidates/<id>`` at ``commit``; True when it was created.
+
+        Create-only: the old value given to update-ref is the zero id, so Git
+        refuses if the ref already exists. A pin already at this commit is
+        fine (a retry); a pin at another commit is refused, never moved,
+        because a frozen candidate's commit does not change.
+        """
+        repository = Path(self.validate_repository(repository_path))
+        ref = self._candidate_ref(candidate_id)
+        resolved = self._resolve_commit(repository, commit)
+        created = self._git(repository, "update-ref", "-m", "hoh: pin frozen candidate",
+                            ref, resolved, "0" * len(resolved), check=False)
+        if created.returncode == 0:
+            return True
+        current = self._git(repository, "rev-parse", "--verify", "-q", ref, check=False)
+        if current.returncode == 0 and current.stdout.strip() == resolved:
+            return False
+        if current.returncode == 0:
+            raise ValidationError("A different commit is already pinned for this candidate",
+                                  {"reason": "candidate_pin_conflict"})
+        raise ValidationError("Git refused to pin the candidate commit")
+
+    def unpin_candidate(self, *, repository_path: str, candidate_id: str, commit: str) -> bool:
+        """Delete the pin only while it still names ``commit``; True when deleted."""
+        repository = Path(self.validate_repository(repository_path))
+        ref = self._candidate_ref(candidate_id)
+        deleted = self._git(repository, "update-ref", "-m", "hoh: retention passed",
+                            "-d", ref, commit, check=False)
+        return deleted.returncode == 0
+
+    def candidate_pins(self, *, repository_path: str) -> dict[str, str]:
+        """Candidate id to pinned commit, for every pin in the repository."""
+        repository = Path(self.validate_repository(repository_path))
+        # A ref name cannot contain a space, so one separates the two fields.
+        listed = self._git(repository, "for-each-ref", "--format=%(refname) %(objectname)",
+                           CANDIDATE_REF_PREFIX.rstrip("/"))
+        pins: dict[str, str] = {}
+        for line in listed.stdout.splitlines():
+            name, _, commit = line.rpartition(" ")
+            if name.startswith(CANDIDATE_REF_PREFIX) and commit:
+                pins[name[len(CANDIDATE_REF_PREFIX):]] = commit
+        return pins
+
+    def commit_exists(self, *, repository_path: str, commit: str) -> bool:
+        repository = Path(self.validate_repository(repository_path))
+        return self._git(repository, "cat-file", "-e", f"{commit}^{{commit}}",
+                         check=False).returncode == 0
 
     def commit_is_on_branch(
         self, *, repository_path: str, default_branch: str, commit: str

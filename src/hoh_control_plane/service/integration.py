@@ -846,11 +846,20 @@ class IntegrationMixin:
         carry_qa = not shared and not any(
             self._scope_roots_overlap(left, right) for left in main_paths for right in candidate_paths)
         try:
-            return self._record_rebased_candidate(
+            recorded = self._record_rebased_candidate(
                 merge_job_id, job, actor, candidate, current_main, rebased, rebased_paths,
                 main_paths, carry_qa, rebases, derived_id_hint)
         except DomainError as error:
             return self.fail_queued_merge(merge_job_id, str(error))
+        # The derived candidate is frozen like any other, so it gets its own pin.
+        with self.store.connection() as connection:
+            derived = connection.execute(
+                "SELECT candidate_id FROM candidates WHERE derived_from = ? AND commit_sha = ?",
+                (candidate["candidate_id"], rebased),
+            ).fetchone()
+        if derived is not None:
+            self._pin_frozen_candidate(derived["candidate_id"])
+        return recorded
 
     def _record_rebased_candidate(self, merge_job_id, job, actor, candidate, current_main, rebased,
                                   rebased_paths, main_paths, carry_qa, rebases,

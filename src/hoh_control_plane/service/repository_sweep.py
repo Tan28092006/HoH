@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from hoh_control_plane.service._common import (
+    CANDIDATE_PIN_RETENTION_SECONDS,
     CLOSED_TICKET_STATUSES,
     MERGE_JOB_STUCK_SECONDS,
     REPOSITORY_OBSERVE_SECONDS,
@@ -95,6 +96,7 @@ class RepositorySweepMixin:
             "failed": [],
             "candidates_already_on_main": [],
             "stuck_merge_jobs": [],
+            "candidate_pins": [],
         }
         for project in projects:
             project_id = project["project_id"]
@@ -107,6 +109,7 @@ class RepositorySweepMixin:
                 ("candidates_already_on_main",
                  lambda: self._flag_candidates_already_on_main(actor, project)),
                 ("stuck_merge_jobs", lambda: self._flag_stuck_merge_jobs(actor, project_id)),
+                ("candidate_pins", lambda: [self.sync_candidate_pins(actor, project_id)]),
             )
             for key, step in steps:
                 try:
@@ -119,6 +122,56 @@ class RepositorySweepMixin:
                         "summary": str(error)[:300],
                     })
         return summary
+
+    def sync_candidate_pins(self, actor: Actor, project_id: str) -> dict[str, Any]:
+        """Pin every frozen candidate that lacks its ref; unpin DONE ones past retention.
+
+        A pin is created at submission; this repairs one a crash or a busy Git
+        missed. It is removed only when the ticket has been DONE for
+        ``CANDIDATE_PIN_RETENTION_SECONDS``, and only while it still names the
+        candidate's commit. A cancelled, superseded or blocked ticket keeps its
+        pins: its candidates are evidence. A candidate whose commit is no
+        longer in the repository is reported, since there is nothing to pin.
+        """
+        require_role(actor, Role.ADMIN)
+        with self.store.connection() as connection:
+            repository = connection.execute(
+                "SELECT repository_path FROM project_repositories WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+            rows = [dict(row) for row in connection.execute(
+                """SELECT c.candidate_id, c.commit_sha, t.status, t.updated_at
+                   FROM candidates c
+                   JOIN tickets t ON t.ticket_id = c.ticket_id
+                   JOIN features f ON f.feature_id = t.feature_id
+                   WHERE f.project_id = ?
+                   ORDER BY c.submitted_at""",
+                (project_id,),
+            ).fetchall()]
+        result: dict[str, Any] = {"project_id": project_id, "pinned": [], "unpinned": [],
+                                  "missing_commits": []}
+        if repository is None:
+            return result
+        repository_path = repository["repository_path"]
+        pins = self.git_worktrees.candidate_pins(repository_path=repository_path)
+        for row in rows:
+            candidate_id, commit = row["candidate_id"], row["commit_sha"]
+            expired = (row["status"] == TicketStatus.DONE.value
+                       and _age_seconds(row["updated_at"]) >= CANDIDATE_PIN_RETENTION_SECONDS)
+            if expired:
+                if pins.get(candidate_id) == commit and self.git_worktrees.unpin_candidate(
+                        repository_path=repository_path, candidate_id=candidate_id, commit=commit):
+                    result["unpinned"].append(candidate_id)
+                continue
+            if candidate_id in pins:
+                continue
+            if not self.git_worktrees.commit_exists(repository_path=repository_path, commit=commit):
+                result["missing_commits"].append(candidate_id)
+                continue
+            if self.git_worktrees.pin_candidate(
+                    repository_path=repository_path, candidate_id=candidate_id, commit=commit):
+                result["pinned"].append(candidate_id)
+        return result
 
     def _sweep_observation(self, actor: Actor, project_id: str) -> dict[str, Any]:
         manifest = self.sync_repository(actor, project_id)
