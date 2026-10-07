@@ -167,6 +167,37 @@ def test_revoked_lease_stops_running_qa(service, actors, seeded, tmp_path):
         assert service._qa_test_job(db, job['test_run_id'])['status'] == 'FAILED'
 
 
+def test_a_job_closed_from_outside_stops_its_worker_after_the_exit_grace(
+    service, actors, seeded, tmp_path, monkeypatch
+):
+    # A worker whose job reached a terminal status is given a short grace to
+    # exit (it usually published that status itself), then stopped.
+    from hoh_control_plane import supervisor as supervisor_module
+    from hoh_control_plane.supervisor import Supervisor
+    monkeypatch.setattr(supervisor_module, 'TERMINAL_EXIT_GRACE_SECONDS', 1)
+    ready, escaped = tmp_path / 'ready', tmp_path / 'escaped'
+    command = [sys.executable, '-c', f"from pathlib import Path;import time;Path({str(ready)!r}).touch();time.sleep(600);Path({str(escaped)!r}).touch()"]
+    job = make_job(service, actors, seeded, tmp_path, command)
+    with Supervisor(service, max_workers=1) as supervisor:
+        supervisor.tick()
+        deadline = time.monotonic() + 120
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert ready.exists()
+        with service.store.connection(immediate=True) as db:
+            db.execute("UPDATE qa_test_jobs SET status = 'FAILED' WHERE test_run_id = ?", (job['test_run_id'],))
+        closed = time.monotonic()
+        supervisor.run_until_idle(timeout=120)
+        stopped_after = time.monotonic() - closed
+    assert not escaped.exists()
+    assert 1 <= stopped_after < 60
+    with service.store.connection() as db:
+        outcome = db.execute(
+            "SELECT outcome FROM worker_executions WHERE job_id = ?", (job['test_run_id'],)
+        ).fetchone()['outcome']
+    assert outcome == 'cancelled'
+
+
 def _wait_for_exit(pid: int, timeout: float) -> bool:
     """Block until process ``pid`` has exited, or ``timeout`` seconds pass."""
     if os.name == 'nt':

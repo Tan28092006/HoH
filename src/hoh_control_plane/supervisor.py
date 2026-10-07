@@ -32,6 +32,10 @@ JOBS = {
 }
 ADMIN = Actor('hoh-supervisor', Role.ADMIN, frozenset({'*'}))
 TEST_LANE, MERGE_LANE, GIT_LANE = 'test', 'merge', 'git'
+# Seconds a worker may keep running after its job reached a terminal status
+# before the supervisor stops it: long enough to exit after publishing its own
+# result, short enough that a job closed from outside still stops its worker.
+TERMINAL_EXIT_GRACE_SECONDS = 5
 
 
 def now():
@@ -205,16 +209,25 @@ class Supervisor:
         else:
             database = str(self.service.store.path.resolve())
         next_guard = 0.0
+        terminal_since = None
         def revoked():
-            nonlocal next_guard
+            nonlocal next_guard, terminal_since
             if self.stopping.is_set():
                 return True
             if time.monotonic() < next_guard:
                 return False
             next_guard = time.monotonic() + 1
             job = self._job(kind, identifier)
-            if job is None or job['status'] not in {'QUEUED', 'RUNNING'}:
+            if job is None:
                 return True
+            if job['status'] not in {'QUEUED', 'RUNNING'}:
+                # Usually the worker published its own result and is exiting;
+                # stopping it now records a finished run as cancelled. The
+                # first check after an uncancellable phase lands right there.
+                # A job closed from outside still stops its worker after this.
+                if terminal_since is None:
+                    terminal_since = time.monotonic()
+                return time.monotonic() - terminal_since >= TERMINAL_EXIT_GRACE_SECONDS
             with self.service.store.connection(immediate=True) as db:
                 db.execute('UPDATE worker_executions SET heartbeat_at = ? WHERE execution_id = ?', (now(), execution_id))
                 if 'lease_id' not in job:
