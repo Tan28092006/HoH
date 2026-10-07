@@ -146,6 +146,13 @@ def test_folding_the_transition_events_reproduces_every_ticket(
     first = _develop(service, developer, main_id, "src/checkout/retry.txt", "first try\n")
     rejected = _assess(service, actors["qa"], main_id, first, "failed")
     assert rejected["ticket"]["status"] == "REWORK"
+    # The rejection resolves its own ticket-scoped reconciliation (wave 7A), so
+    # a teammate push that leaves main alone opens the one DEV-160 retires through.
+    with service.store.connection(immediate=True) as connection:
+        service._open_commit_reconciliation(
+            connection, planner, "project-1", commit="e" * 40,
+            subject="Teammate push", relation="incoming", observation_ref="test:push",
+        )
     pending = [
         item for item in service.list_repository_reconciliations(planner, "project-1")["reconciliations"]
         if item["status"] == "PENDING"
