@@ -492,6 +492,33 @@ by a dependency edge, a job or a refusal rather than by prose.
   `developer_blocker` Planner job whose summary starts `dependency_retired:`.
   Closed dependents are left alone. The edge is not rewritten when it cannot be
   moved: the Planner decides it with `planner.update_ticket_fields`.
+- **Old Planner jobs never starve the wait (R3).** `_planner_job_events` in
+  `event_wait.py` excludes, in SQL, every job whose current event this Planner
+  acknowledged, and puts high-severity jobs first; an unacknowledged event is
+  still replayed. Acknowledging a `delivery_completed` report, through the wait
+  or its intervention, closes it unless a Planner holds its lease.
+  `discover_planner_jobs` returns at most 10 jobs, urgent first, beside
+  `planning_job_count`.
+- **A barrier does not hide urgent work; no offer is unclaimable (A6).** A
+  pending reconciliation's Planner event is followed by that Planner's
+  high-severity READY jobs, within its capacity. The inbox query, dispatch
+  fanout and live offer list skip a READY or REWORK ticket whose dependencies
+  are not all DONE (`_QUEUE_DEPENDENCIES_MET` in `discovery.py`); its queue row
+  stays pending and is offered once they are.
+- **Each merge interruption has its own outcome (A7).** A barrier, lost lease,
+  changed ticket or changed release evidence found before Git is touched fails
+  the merge as `precondition_failed:<outcome>` through
+  `_fail_merge_precondition` in `integration.py`: the ticket stays
+  MERGE_READY, no Planner job opens, and the ticket is requeued when nobody
+  holds it. A dirty or wrongly checked-out shared checkout raises
+  `GitPreconditionError` and fails as `git_precondition_failed` without
+  reconciliation. An unparseable candidate `pyproject.toml` is the runner's
+  `candidate_config_invalid` outcome, a candidate failure sent back as rework.
+- **Capability approval never closes a failure job (C2).** A review is not
+  opened onto a ticket whose open job is not a review, failure evidence strips
+  the `capability_review:` mark from a merged job, and
+  `_resolve_capability_review_jobs` skips any job whose ticket is BLOCKED or
+  REWORK.
 - **One broken QA machine (C3).** A QA `infrastructure` failure, reported or
   parked by the runner, goes through `_group_qa_machine_failure` in
   `planner_jobs.py`. It revokes every QA approval held on that machine and
