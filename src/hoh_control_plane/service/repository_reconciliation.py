@@ -1,6 +1,7 @@
 """Repository sync and the reconciliation barrier that follows every observed commit."""
 from __future__ import annotations
 
+from hoh_control_plane import contracts
 from hoh_control_plane.service._common import (
     PROJECT_SCOPE,
     TICKETS_SCOPE,
@@ -469,7 +470,7 @@ class RepositoryReconciliationMixin:
         """List immutable Git observations still awaiting a board decision."""
         require_role(actor, Role.PLANNER, Role.ADMIN)
         require_project(actor, project_id)
-        if status not in {"PENDING", "RESOLVED"}:
+        if status not in contracts.RECONCILIATION_STATUSES:
             raise ValidationError("status must be PENDING or RESOLVED")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
             raise ValidationError("limit must be an integer from 1 to 100")
@@ -1098,13 +1099,14 @@ class RepositoryReconciliationMixin:
         require_project(actor, project_id)
         self._bounded_text(decision_summary, "decision_summary", 4000)
         self._bounded_list(
-            ticket_decisions, "ticket_decisions", 500, 4000, strings_only=False
+            ticket_decisions, "ticket_decisions", contracts.MAX_TICKET_DECISIONS, 4000,
+            strings_only=False,
         )
         new_ticket_ids = new_ticket_ids or []
         self._bounded_list(new_ticket_ids, "new_ticket_ids", 100, 100)
         if len(set(new_ticket_ids)) != len(new_ticket_ids):
             raise ValidationError("new_ticket_ids cannot contain duplicates")
-        allowed = {"keep", "revise", "cancel", "supersede", "complete", "rework"}
+        allowed = contracts.DISPOSITIONS
         with self.store.connection(immediate=True) as connection:
             row = connection.execute(
                 "SELECT * FROM repository_reconciliations WHERE reconciliation_id = ?",
@@ -1136,7 +1138,9 @@ class RepositoryReconciliationMixin:
                     raise ValidationError(
                         "disposition must be keep, revise, cancel, supersede, complete or rework"
                     )
-                self._bounded_text(reason, "ticket_decisions.reason", 2000)
+                self._bounded_text(
+                    reason, "ticket_decisions.reason", contracts.DECISION_REASON_CHARS
+                )
                 decisions[ticket_id] = {**item, "ticket_id": ticket_id, "disposition": disposition, "reason": reason}
             expected = reconciliation["ticket_versions"]
             missing = sorted(set(expected) - set(decisions))

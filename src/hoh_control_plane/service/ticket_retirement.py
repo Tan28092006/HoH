@@ -1,6 +1,7 @@
 """Stopping, cancelling, superseding and retiring tickets through a pending reconciliation."""
 from __future__ import annotations
 
+from hoh_control_plane import contracts
 from hoh_control_plane.service._common import (
     Actor,
     Any,
@@ -174,10 +175,7 @@ class TicketRetirementMixin:
         """
         require_role(actor, Role.PLANNER, Role.ADMIN)
         self._bounded_text(reason, "reason", 2000)
-        if target_status not in {
-            TicketStatus.CANCELLED.value,
-            TicketStatus.SUPERSEDED.value,
-        }:
+        if target_status not in contracts.RETIREMENT_STATUSES:
             raise ValidationError("target_status must be CANCELLED or SUPERSEDED")
         if target_status == TicketStatus.SUPERSEDED.value and not replacement_ticket_id:
             raise ValidationError("SUPERSEDED retirement requires replacement_ticket_id")

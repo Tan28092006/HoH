@@ -14,7 +14,8 @@ One host process (`deploy/desktop/hoh_desktop.py --host` locally) serves:
   `mcp/server.py` builds one FastMCP per actor from the role groups in
   `mcp/tools/` (`common`, `planner`, `developer`, `qa`, `integrator`, each with
   `register(server, service, actor, invoke)`); `mcp/invoke.py` is the audited,
-  idempotent, contention-retried call wrapper and error text; `mcp/workers.py`
+  idempotent, contention-retried call wrapper; `mcp/errors.py` maps every tool
+  failure to one `isError` result `{code, message, details, retry_hint}`; `mcp/workers.py`
   spawns workers only in opt-in legacy mode; `mcp/http_app.py` authenticates the bearer. Over
   HTTP each bearer credential gets its own FastMCP instance, so tools outside the
   caller's role are absent. Over stdio the role comes from `HOH_AGENT_ROLE`.
@@ -198,11 +199,13 @@ helper you are about to change across `service/`.
 | No merge starts while the project's merge queue is paused (red main, failure budget, hourly budget) | `MergeQueueGuard` in `service/run_guardrails.py`: `require_open` in `queue_merge_candidate`; `merge_queue_admits` in `execute_queued_merge` and `Supervisor.tick` | — |
 | Retried writes do not repeat effects | `service/idempotency.py` (payload-bound key stamped with the request's correlation id; a stale IN_PROGRESS key is settled from that id's audit events, committed → `status: committed` replay, otherwise re-run; complete and release by `record_id`; contention after a committed write returns the committed outcome); `_run_with_contention_retry` in `mcp/invoke.py` retries only while nothing the call wrote has committed | `test_idempotency.py` |
 | Validation contracts fit the packet | Limits in `contracts.py`, checked in `project_policy.py` and published in the MCP and REST schemas | `test_team_quality_gates.py`, `test_contract_parity.py` |
+| An MCP parameter checked against a fixed set offers that set as its schema `enum` | `Literal` types in `contracts.py`, whose constants the service checks | `test_mcp_enum_params.py` |
+| Every MCP failure is one `isError` shape, audited once under the code the client reads, with no internal text | `map_error` in `mcp/errors.py`; `invoke` and `_CompactFastMCP.call_tool` in `mcp/invoke.py` | `test_mcp_error_shape.py` |
 | Advertised capabilities name only tools the role has | `CAPABILITY_TOOLS` and `capabilities()` in `discovery.py` | `test_contract_parity.py` |
 | The third QA rejection blocks the ticket for Planner; only a recorded resume resets the count | `MAX_QA_REJECTIONS` in `_common.py`; `submit_qa_verdict` in `qa.py`; `resume_ticket_after_failure` in `planner_jobs.py` | `test_rework_budget.py` |
 | Every ticket's status and version is explained by its logged transitions | `_record_ticket_created` and `_transition_ticket` write `ticket.transitioned` in the same transaction; `replay_ticket_states` in `_common.py` folds them | `test_ticket_replay.py`, `test_ticket_transitions.py` |
 | Agents read 12-character SHAs; the store keeps full ones; a commit input is resolved before comparison | `agent_facing` in `_common.py` (packets in `context.py`, results in `mcp/invoke.py`); `_full_commit` in `validation.py` | `test_short_shas.py` |
-| A claim hands the dispatcher a self-contained brief; QA sees Developer claims only by reference; packets name each author | `_worker_brief` in `leases.py`; `_compact_artifacts` and `_SECTION_SOURCES` in `context.py` | `test_worker_brief.py`, `test_context_provenance.py` |
+| A claim hands the dispatcher only ticket identity, lease and a self-contained brief naming the project, under a size ceiling; QA sees Developer claims only by reference; packets name each author | `_worker_brief`, `_claimed_ticket_identity` and `MAX_CLAIM_RESULT_CHARS` in `leases.py`; `_compact_artifacts` and `_SECTION_SOURCES` in `context.py` | `test_worker_brief.py`, `test_claim_result.py`, `test_context_provenance.py` |
 | Skill text names real tools and stays small | `tests/test_skill_assets.py` | — |
 | QA's model family differs from the maker's while `checker_distinct_from_maker` is on; unknown is allowed and marked `family_unverified` | `_maker_checker_family_check` in `service/risk_policy.py`, called by `_claim` (QA) in `leases.py` and `submit_qa_verdict` in `qa.py`; the maker's family is stamped on `candidates` at freeze | `test_risk_policy.py` |
 | A medium-risk candidate merges only with `adversarial_review` evidence, a high-risk one also only after `policy.approve_high_risk` on that candidate | `_require_risk_tier_cleared` in `service/risk_policy.py`, called by `queue_merge_candidate` in `integration.py` | `test_risk_policy.py` |

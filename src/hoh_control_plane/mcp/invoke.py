@@ -1,16 +1,20 @@
 """Call wrapper shared by every MCP tool: audit, idempotency, contention retry, error text."""
 from __future__ import annotations
 
-import json
-import sqlite3
 import time
 from collections.abc import Callable
 from typing import Any, TypeVar
 from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import TextContent
+from mcp.types import CallToolResult, TextContent
 from hoh_control_plane.observability import correlation_scope
-from hoh_control_plane.domain import Actor, ConflictError, DomainError
+from hoh_control_plane.domain import Actor, DomainError
+from hoh_control_plane.mcp.errors import (
+    HohToolError,
+    error_text,
+    map_error,
+    root_cause,
+    tool_error,
+)
 from hoh_control_plane.service import ControlPlaneService
 from hoh_control_plane.service._common import agent_facing, delivered_json, require_snapshot_id
 from hoh_control_plane.store import ContentionError
@@ -54,15 +58,44 @@ _TARGET_KEYS = (
 
 
 class _CompactFastMCP(FastMCP):
-    """FastMCP whose text content is compact JSON instead of `indent=2`.
+    """FastMCP whose results are compact JSON and whose failures have one shape.
 
     The structured content is unchanged. The text block is what most clients
     put in front of the model, so it is the form the packet budget measures
     (`delivered_json`); indentation alone cost about a third more tokens.
+
+    Every failure leaves `call_tool` as a HohToolError (mcp.errors), audited
+    exactly once; over a transport it becomes an `isError` result whose
+    structured content is `{code, message, details, retry_hint}`.
     """
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        #: Records a failure that never reached `invoke` (an argument the schema
+        #: refused, a check made before the call): (tool, arguments, error).
+        self.audit_failure: Callable[[str, dict[str, Any], HohToolError], None] | None = None
+        self._mcp_server.call_tool(validate_input=False)(self._call_tool_result)
+
+    async def _call_tool_result(self, name: str, arguments: dict[str, Any]) -> Any:
+        try:
+            return await self.call_tool(name, arguments)
+        except HohToolError as error:
+            return CallToolResult(
+                content=[TextContent(type="text", text=str(error))],
+                structuredContent=error.payload,
+                isError=True,
+            )
+
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        result = await super().call_tool(name, arguments)
+        try:
+            result = await super().call_tool(name, arguments)
+        except Exception as raised:
+            cause = root_cause(raised)
+            error = tool_error(cause, audited=False)
+            if not error.audited and self.audit_failure is not None:
+                self.audit_failure(name, arguments, error)
+                error.audited = True
+            raise error from cause
         if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict):
             _content, structured = result
             # Every result an agent reads names commits and digests in short form.
@@ -100,45 +133,19 @@ def make_invoke(service: ControlPlaneService, actor: Actor) -> Callable[..., Any
                 result = _run_with_contention_retry(
                     run, lambda: service.request_has_committed(actor, correlation_id)
                 )
-        except DomainError as error:
+        except Exception as raised:
+            # One mapping (mcp.errors) for every failure: the audit records the
+            # same code the client reads, and no internal text leaves the call.
+            error = tool_error(raised, audited=True)
             service.record_tool_call(
                 actor,
                 tool_name=tool_name,
                 project_id=project_id,
                 input_summary=summary,
-                outcome="rejected",
-                error_code=error.code,
+                outcome=error.outcome,
+                error_code=error.payload["code"],
             )
-            # Stable, machine-readable parity with the REST error body: a stdio
-            # client branches on the code instead of parsing the prose.
-            raise ToolError(_tool_error_text(error)) from error
-        except (sqlite3.OperationalError, sqlite3.IntegrityError) as error:
-            # Safety net: normalize any raw driver error that reaches this boundary
-            # without an existing service-layer translation (e.g. a foreign-key
-            # violation this call site has no bespoke message for), so a caller
-            # never sees internal storage-engine text through MCP.
-            service.record_tool_call(
-                actor,
-                tool_name=tool_name,
-                project_id=project_id,
-                input_summary=summary,
-                outcome="rejected",
-                error_code="database_error",
-            )
-            raise ToolError(
-                f"[{ConflictError.code}] This change conflicts with the current database "
-                "state; retry the request."
-            ) from error
-        except Exception:
-            service.record_tool_call(
-                actor,
-                tool_name=tool_name,
-                project_id=project_id,
-                input_summary=summary,
-                outcome="failed",
-                error_code="internal_error",
-            )
-            raise
+            raise error from raised
         service.record_tool_call(
             actor,
             tool_name=tool_name,
@@ -151,34 +158,30 @@ def make_invoke(service: ControlPlaneService, actor: Actor) -> Callable[..., Any
     return invoke
 
 
-_RETRY_HINTS = {
-    "context_stale": "Re-read ticket.get_context, then retry with its context_snapshot_id.",
-    "repository_reconciliation_required": (
-        "Planner must reconcile first; call work.wait_for_event, then retry."
-    ),
-    "lease_expired": "The lease is gone; call work.discover and claim again.",
-}
+def make_failure_audit(
+    service: ControlPlaneService, actor: Actor
+) -> Callable[[str, dict[str, Any], HohToolError], None]:
+    """Audit a failure that never reached `invoke`, under the code the client reads."""
 
+    def audit(tool_name: str, arguments: dict[str, Any], error: HohToolError) -> None:
+        try:
+            service.record_tool_call(
+                actor,
+                tool_name=tool_name,
+                project_id=_project_for_call(service, actor, arguments),
+                input_summary=_safe_input_summary(arguments),
+                outcome=error.outcome,
+                error_code=error.payload["code"],
+            )
+        except Exception:  # pragma: no cover - the audit never masks the refusal
+            pass
 
-def _retry_hint(error: DomainError) -> str | None:
-    if error.code in _RETRY_HINTS:
-        return _RETRY_HINTS[error.code]
-    reason = error.details.get("reason") if isinstance(error.details, dict) else None
-    return _RETRY_HINTS.get(str(reason)) if reason else None
+    return audit
 
 
 def _tool_error_text(error: DomainError) -> str:
     """`[code] message {json}`: the REST error body's details, readable by MCP clients."""
-    text = f"[{error.code}] {error}"
-    extra: dict[str, Any] = {}
-    if error.details:
-        extra["details"] = error.details
-    hint = _retry_hint(error)
-    if hint:
-        extra["retry_hint"] = hint
-    if extra:
-        text += " " + json.dumps(extra, separators=(",", ":"), sort_keys=True, default=str)
-    return text
+    return error_text(map_error(error)[0])
 
 
 def _safe_input_summary(arguments: dict[str, Any]) -> dict[str, Any]:

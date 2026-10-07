@@ -5,7 +5,8 @@ import anyio
 from collections.abc import Callable
 from typing import Any
 from mcp.server.fastmcp import FastMCP
-from hoh_control_plane.contracts import ValidationContract, as_payload
+from hoh_control_plane import contracts
+from hoh_control_plane.contracts import TicketDecisions, ValidationContract, as_payload
 from hoh_control_plane.domain import Actor, Role, ValidationError
 from hoh_control_plane.service import ControlPlaneService
 
@@ -63,7 +64,8 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
 
         @server.tool(name="planner.configure_repository", structured_output=True)
         async def planner_configure_repository(
-            project_id: str, repository_path: str, workspace_model: str = "colocated"
+            project_id: str, repository_path: str,
+            workspace_model: contracts.WorkspaceModelName = "colocated",
         ) -> dict[str, Any]:
             """Attach a verified local Git repository so Dev candidates require a bound worktree.
 
@@ -90,7 +92,7 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
 
         @server.tool(name="planner.list_repository_reconciliations", structured_output=True)
         def planner_list_repository_reconciliations(
-            project_id: str, status: str = "PENDING", limit: int = 20
+            project_id: str, status: contracts.ReconciliationStatus = "PENDING", limit: int = 20
         ) -> dict[str, Any]:
             """List commit observations whose ticket plans still require review."""
             arguments = {"project_id": project_id, "status": status, "limit": limit}
@@ -104,7 +106,7 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
         def planner_resolve_repository_reconciliation(
             project_id: str,
             reconciliation_id: str,
-            ticket_decisions: list[dict[str, Any]],
+            ticket_decisions: TicketDecisions,
             decision_summary: str,
             new_ticket_ids: list[str] | None = None,
             idempotency_key: str | None = None,
@@ -114,11 +116,25 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
             Apply ticket mutations first with cancel/supersede/update and the
             existing integration landing workflow.  The decision list is then
             checked against the actual board before the barrier can resolve.
+            Give exactly one decision per ticket in the observation's
+            ticket_versions; disposition is keep, revise, cancel, supersede,
+            complete or rework, and supersede also names replacement_ticket_id.
+
+            Example:
+                planner.resolve_repository_reconciliation(
+                    project_id="p1", reconciliation_id="recon_12",
+                    ticket_decisions=[
+                        {"ticket_id": "T-7", "disposition": "keep",
+                         "reason": "Commit touched docs only"},
+                        {"ticket_id": "T-9", "disposition": "supersede",
+                         "reason": "Split into T-11", "replacement_ticket_id": "T-11"}],
+                    decision_summary="Docs commit; T-9 replaced by T-11",
+                    new_ticket_ids=["T-11"])
             """
             arguments = {
                 "project_id": project_id,
                 "reconciliation_id": reconciliation_id,
-                "ticket_decisions": ticket_decisions,
+                "ticket_decisions": as_payload(ticket_decisions),
                 "decision_summary": decision_summary,
                 "new_ticket_ids": new_ticket_ids or [],
             }
@@ -279,7 +295,7 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
         def planner_configure_verification_profile(
             project_id: str,
             capabilities: list[str],
-            quality_policy: str = "claim-evidence-v1",
+            quality_policy: contracts.QualityPolicy = "claim-evidence-v1",
         ) -> dict[str, Any]:
             """Declare the project's portable QA equipment and evidence policy."""
             arguments = {
@@ -425,12 +441,12 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
             ticket_id: str,
             title: str,
             objective: str,
-            required_role: str,
+            required_role: contracts.ExecutionRole,
             acceptance_criteria: list[str],
             preservation_constraints: list[str],
             file_scope: list[str],
             dependency_ids: list[str] | None = None,
-            ticket_type: str = "feature_work",
+            ticket_type: contracts.TicketType = "feature_work",
             priority: int = 50,
             parent_ticket_id: str | None = None,
             validation_contract: ValidationContract | None = None,
@@ -669,7 +685,7 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
             planner_job_id: str,
             lease_id: str,
             expected_version: int,
-            resume_role: str,
+            resume_role: contracts.ExecutionRole,
             resolution: str,
             idempotency_key: str | None = None,
         ) -> dict[str, Any]:
@@ -694,7 +710,7 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
             expected_version: int,
             reconciliation_id: str,
             reason: str,
-            target_status: str = "CANCELLED",
+            target_status: contracts.RetirementStatus = "CANCELLED",
             replacement_ticket_id: str | None = None,
             idempotency_key: str | None = None,
         ) -> dict[str, Any]:
@@ -866,7 +882,7 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
 
         @server.tool(name="planner.append_context", structured_output=True)
         def planner_append_context(
-            entry_type: str,
+            entry_type: contracts.PlannerEntryType,
             content: str,
             ticket_id: str | None = None,
             feature_id: str | None = None,

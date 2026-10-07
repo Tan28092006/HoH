@@ -171,8 +171,7 @@ async def test_every_mcp_domain_failure_is_prefixed_with_its_stable_code(
 ) -> None:
     """A stdio client can branch on the code without parsing prose.
 
-    FastMCP prepends its own "Error executing tool <name>:" framing, so the
-    contract is that the bracketed code introduces the domain message inside it.
+    The bracketed code introduces the domain message (mcp.errors.error_text).
     """
     message = await _mcp_error(
         service, actors["developer"], "ticket.get_context", {"ticket_ref": "ticket:MISSING-2"}

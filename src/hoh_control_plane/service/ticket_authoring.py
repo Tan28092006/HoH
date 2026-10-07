@@ -1,6 +1,7 @@
 """Feature and ticket authoring: create, ready, scope, fields and split."""
 from __future__ import annotations
 
+from hoh_control_plane import contracts
 from hoh_control_plane.service._common import (
     Actor,
     Any,
@@ -109,7 +110,10 @@ class TicketAuthoringMixin:
         self._bounded_text(ticket_id, "ticket_id", 100)
         self._bounded_text(title, "title", 240)
         self._bounded_text(objective, "objective", 8000)
-        self._bounded_text(ticket_type, "ticket_type", 50)
+        if ticket_type not in contracts.TICKET_TYPES:
+            raise ValidationError(
+                "ticket_type must be one of " + ", ".join(sorted(contracts.TICKET_TYPES))
+            )
         self._priority(priority)
         self._bounded_list(acceptance_criteria, "acceptance_criteria", 30, 2000, required=True)
         self._bounded_list(preservation_constraints, "preservation_constraints", 30, 2000)

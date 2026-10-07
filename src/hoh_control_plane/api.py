@@ -30,6 +30,7 @@ from hoh_control_plane.contracts import (  # noqa: F401  (FindingInput etc. re-e
     EvidenceInput,
     FindingInput,
     Findings,
+    TicketType,
     ValidationContract,
     ValidationScenarioInput,
     Verdict,
@@ -77,7 +78,7 @@ class TicketCreate(StrictModel):
     preservation_constraints: list[str] = Field(default_factory=list, max_length=30)
     file_scope: list[str] = Field(default_factory=list, max_length=100)
     dependency_ids: list[str] = Field(default_factory=list, max_length=100)
-    ticket_type: str = Field(default="feature_work", min_length=1, max_length=50)
+    ticket_type: TicketType = "feature_work"
     priority: int = Field(default=50, ge=0, le=100)
     ready: bool = False
     validation_contract: ValidationContract | None = None
