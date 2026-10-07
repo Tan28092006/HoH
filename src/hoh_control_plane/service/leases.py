@@ -26,6 +26,15 @@ from hoh_control_plane.service._common import (
     timedelta,
 )
 
+#: Statuses in which a ticket's submitted candidate awaits QA or merge. The
+#: ticket keeps its write scope reserved, as it did under its Developer lease.
+_SCOPE_RESERVING_STATUSES = (
+    TicketStatus.QA_READY.value,
+    TicketStatus.QA_IN_PROGRESS.value,
+    TicketStatus.VERIFIED.value,
+    TicketStatus.MERGE_READY.value,
+)
+
 
 class LeaseMixin:
     """Leases, claims, authorization and write-scope collision."""
@@ -588,19 +597,31 @@ class LeaseMixin:
         ticket: dict[str, Any],
         now: datetime,
     ) -> str | None:
+        # A scope is reserved while a Developer holds the ticket and also while
+        # its submitted candidate awaits QA or merge: releasing it at submit let
+        # an overlapping ticket start on a base the first candidate was about to
+        # change, so its drift was predictable (8E).
+        reserved = _SCOPE_RESERVING_STATUSES
+        placeholders = ", ".join("?" for _ in reserved)
         active_tickets = connection.execute(
-            """
+            f"""
             SELECT active_ticket.ticket_id, active_ticket.file_scope
-            FROM leases lease
-            JOIN tickets active_ticket ON active_ticket.ticket_id = lease.ticket_id
+            FROM tickets active_ticket
             JOIN features feature ON feature.feature_id = active_ticket.feature_id
             WHERE feature.project_id = ?
-              AND lease.role = ?
-              AND lease.expires_at > ?
               AND active_ticket.ticket_id != ?
+              AND (
+                  active_ticket.status IN ({placeholders})
+                  OR EXISTS (
+                      SELECT 1 FROM leases lease
+                      WHERE lease.ticket_id = active_ticket.ticket_id
+                        AND lease.role = ?
+                        AND lease.expires_at > ?
+                  )
+              )
             ORDER BY active_ticket.ticket_id
             """,
-            (project_id, Role.DEVELOPER.value, _iso(now), ticket["ticket_id"]),
+            (project_id, ticket["ticket_id"], *reserved, Role.DEVELOPER.value, _iso(now)),
         ).fetchall()
         for active_ticket in active_tickets:
             active_scope = json.loads(active_ticket["file_scope"])
