@@ -99,7 +99,7 @@ def _no_host_environment(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _git_has_no_wall_clock_budget_in_tests(monkeypatch):
+def _git_has_no_wall_clock_budget_in_tests(request, monkeypatch):
     """Tests assert what Git did, not how fast this machine ran it.
 
     Production stops any Git command after 15 seconds. A test repository's
@@ -110,7 +110,10 @@ def _git_has_no_wall_clock_budget_in_tests(monkeypatch):
     fail under load and pass serially. The budget is raised here; a test that is
     about the timeout itself sets its own value, which overrides this one.
     """
-    monkeypatch.setattr("hoh_control_plane.git_worktrees._GIT_COMMAND_TIMEOUT_SECONDS", 600)
+    # A test marked production_git_timeout keeps the shipped budget, so at least
+    # one test still runs Git under the value production uses (review E5).
+    if request.node.get_closest_marker("production_git_timeout") is None:
+        monkeypatch.setattr("hoh_control_plane.git_worktrees._GIT_COMMAND_TIMEOUT_SECONDS", 600)
 
 
 @pytest.fixture
