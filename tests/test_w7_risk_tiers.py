@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import pytest
-from w7_helpers import (
+from helpers.w7 import (
     claim_integration,
     events,
     finding,
@@ -306,7 +306,7 @@ def test_a_sign_off_for_an_older_candidate_does_not_count(service, actors, seede
     first = submit_fake(service, actors, "DEV-142", attempt=1)
     service.approve_high_risk(actors["planner"], "DEV-142", "Approved the first attempt")
     criterion = ticket(service, "DEV-142")["acceptance_criteria"][0]
-    from w7_helpers import verdict
+    from helpers.w7 import verdict
     verdict(service, actors, "DEV-142", "failed", [finding(criterion, "failed")])
     with service.store.connection(immediate=True) as connection:
         # The rework is a different frozen candidate with the same scope.
@@ -337,7 +337,7 @@ def test_a_sign_off_for_an_older_candidate_does_not_count(service, actors, seede
 def test_review_evidence_on_another_candidate_does_not_count(service, actors, seeded) -> None:
     service.configure_risk_policy(actors["planner"], "project-1",
                                   medium_risk_patterns=["src/checkout/**"])
-    from w7_helpers import open_ticket
+    from helpers.w7 import open_ticket
 
     open_ticket(service, actors, "DEV-B", ["src/reporting/**"])
     other = submit_fake(service, actors, "DEV-B", developer="developer_2")

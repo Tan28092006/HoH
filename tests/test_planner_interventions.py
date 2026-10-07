@@ -16,12 +16,12 @@ import pytest
 from hoh_control_plane.domain import Actor
 from hoh_control_plane.service import ControlPlaneService
 from hoh_control_plane.store import SQLiteStore
-from test_integration_async import (
+from helpers.integration import (
     _candidate_ready_for_integration,
     _claimed_for_integration,
     _git,
 )
-from test_store_migrations import legacy_service, seed_project
+from helpers.legacy_store import legacy_service, seed_project
 
 
 @pytest.fixture

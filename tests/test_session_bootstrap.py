@@ -4,7 +4,7 @@ import pytest
 
 from hoh_control_plane.domain import Actor, AuthorizationError, Role
 from hoh_control_plane.mcp_server import create_mcp_server
-from test_git_worktrees import _repository
+from helpers.integration import _repository
 
 
 def test_fresh_session_discovers_scope_without_claiming(service, seeded, actors):
@@ -52,7 +52,7 @@ async def test_bootstrap_is_available_over_mcp(service, seeded, actors):
 
 
 def test_planner_resumes_its_existing_decision_job(service, seeded, actors):
-    from test_planner_work_queue import _blocked_ticket
+    from helpers.planner import _blocked_ticket
     _blocked_ticket(service, actors, seeded)
     jobs = service.discover_planner_jobs(actors["planner"], "project-1")
     job = jobs[0]

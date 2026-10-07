@@ -9,8 +9,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from barrier_helpers import keep_open_tickets
-from w7_helpers import (
+from helpers.barrier import keep_open_tickets
+from helpers.w7 import (
     claim_integration,
     commit_file,
     events,
@@ -32,7 +32,7 @@ from hoh_control_plane.service.run_guardrails import RED_MAIN_PAUSE
 def _observed_project(service, actors, tmp_path: Path) -> Path:
     repo = repository(tmp_path)
     service.configure_repository(actors["planner"], "project-1", str(repo))
-    from w7_helpers import REGRESSION_COMMAND
+    from helpers.w7 import REGRESSION_COMMAND
 
     service.configure_test_command(actors["planner"], "project-1", REGRESSION_COMMAND, 60)
     service.sync_repository(actors["planner"], "project-1")
@@ -338,7 +338,7 @@ def test_a_high_risk_derived_candidate_sent_to_qa_needs_a_fresh_sign_off(
     service, actors, seeded, tmp_path
 ) -> None:
     from hoh_control_plane.domain import ReleasePolicyError
-    from w7_helpers import pass_all, record_regression_run
+    from helpers.w7 import pass_all, record_regression_run
 
     service.configure_risk_policy(actors["planner"], "project-1",
                                   high_risk_patterns=["src/checkout/**"])

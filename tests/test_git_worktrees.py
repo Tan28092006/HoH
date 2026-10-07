@@ -8,8 +8,8 @@ from unittest.mock import patch
 from pathlib import Path
 
 import pytest
-from barrier_helpers import keep_open_tickets
-from merge_helpers import merge_through_queue, seed_release_regression_run
+from helpers.barrier import keep_open_tickets
+from helpers.merge import merge_through_queue, seed_release_regression_run
 
 from hoh_control_plane.domain import (
     Actor,

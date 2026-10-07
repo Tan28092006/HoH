@@ -37,7 +37,11 @@ def pytest_addoption(parser):
 # (measured with --durations on the dev host). The fast lane is
 # ``-m "not slow and not git"``. A test may also carry either marker itself.
 _GIT_SIGNS = ('["git"', "['git'", '"git", "-C"', "configure_repository(", "GitWorktreeManager",
-              "_tracked_repository(", "_repository(", "repository(tmp_path")
+              "_tracked_repository(", "_repository(", "repository(tmp_path",
+              # tests/helpers setups that build a real repository
+              "_candidate_ready_for_integration(", "_candidate_waiting_for_qa(",
+              "_gate_ready_candidate(", "queued_merge(", "_rich_ticket(",
+              "verified_with_repository(")
 SLOW_MODULES = frozenset({
     "test_integration_async", "test_integration_async_gate", "test_integration_gate",
     "test_integration_release_policy", "test_git_worktrees", "test_repository_sync",

@@ -8,7 +8,7 @@ it back for another round. Only a recorded Planner decision starts a new count.
 from __future__ import annotations
 
 import pytest
-from barrier_helpers import keep_open_tickets
+from helpers.barrier import keep_open_tickets
 
 from hoh_control_plane.domain import ConflictError
 

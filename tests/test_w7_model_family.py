@@ -5,13 +5,13 @@ import json
 
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
-from w7_helpers import events, finding, submit_fake, ticket, verdict
+from helpers.w7 import events, finding, submit_fake, ticket, verdict
 
 from hoh_control_plane.domain import AuthorizationError, ValidationError
 from hoh_control_plane.local_agent import MODEL_FAMILIES, model_family_of, worker_agent_text
 from hoh_control_plane.mcp_server import create_mcp_server
 from hoh_control_plane.service import ControlPlaneService
-from test_desktop_controls import desktop  # noqa: F401  (fixture)
+from helpers.desktop import desktop  # noqa: F401  (fixture)
 
 
 # --------------------------------------------------------- normalisation
@@ -87,7 +87,7 @@ def test_the_worker_agent_text_names_the_family_only_when_known() -> None:
 
 
 def _setup_project(desktop):
-    from test_desktop_controls import headers
+    from helpers.desktop import headers
 
     client, root = desktop
     client.post("/local/projects", json={"project_id": "shop", "name": "Shop"},

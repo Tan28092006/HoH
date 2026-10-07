@@ -12,11 +12,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from merge_helpers import merge_through_queue
+from helpers.merge import merge_through_queue
 
 from hoh_control_plane.domain import Role
 from hoh_control_plane.service._common import TICKET_TRANSITION_EVENT, replay_ticket_states
-from test_integration_async import REGRESSION_COMMAND, _git, _repository
+from helpers.integration import REGRESSION_COMMAND, _git, _repository
 
 
 def _ticket(service, ticket_id: str) -> dict:

@@ -26,7 +26,7 @@ import signal
 import time
 
 from hoh_control_plane.domain import Actor, Role
-from test_qa_runner import _candidate_waiting_for_qa
+from helpers.qa import candidate_waiting_for_qa_run as _candidate_waiting_for_qa
 
 
 def make_job(service, actors, seeded, tmp_path, command=None):

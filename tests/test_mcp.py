@@ -4,7 +4,7 @@ from pathlib import Path
 import sqlite3
 
 import pytest
-from barrier_helpers import keep_open_tickets
+from helpers.barrier import keep_open_tickets
 
 from mcp.server.fastmcp.exceptions import ToolError
 
@@ -14,7 +14,7 @@ from hoh_control_plane.domain import Actor, ConflictError, Role, ValidationError
 from hoh_control_plane.mcp_server import create_mcp_server
 from hoh_control_plane.service import ControlPlaneService
 from hoh_control_plane.store import ContentionError, SQLiteStore
-from test_store_migrations import legacy_service, seed_project
+from helpers.legacy_store import legacy_service, seed_project
 
 
 @pytest.mark.anyio
@@ -792,7 +792,7 @@ async def test_a_qa_failure_on_an_upgraded_database_is_not_reported_as_a_state_c
 async def test_planner_mcp_requeues_stale_candidate_with_audit_redaction(
     service, actors, seeded, tmp_path: Path
 ) -> None:
-    from test_integration_async import _git, _repository
+    from helpers.integration import _git, _repository
 
     repository = _repository(tmp_path)
     service.configure_repository(actors["planner"], "project-1", str(repository))

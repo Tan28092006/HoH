@@ -178,7 +178,7 @@ def test_an_existing_database_gains_the_status_check_without_losing_rows(
     tmp_path, actors
 ) -> None:
     from hoh_control_plane.service import ControlPlaneService
-    from test_store_migrations import seed_project
+    from helpers.legacy_store import seed_project
 
     path = tmp_path / "pre-check.db"
     _pre_check_database(path)
@@ -231,7 +231,7 @@ def test_an_existing_database_gains_the_status_check_without_losing_rows(
 
 def test_an_unknown_stored_status_leaves_the_table_unrebuilt(tmp_path, actors) -> None:
     from hoh_control_plane.service import ControlPlaneService
-    from test_store_migrations import seed_project
+    from helpers.legacy_store import seed_project
 
     path = tmp_path / "odd-status.db"
     _pre_check_database(path)

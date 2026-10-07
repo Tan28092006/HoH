@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from barrier_helpers import keep_open_tickets
+from helpers.barrier import keep_open_tickets
 
 from hoh_control_plane.domain import ConflictError, Role
 from hoh_control_plane.service._common import ExecutionGate
@@ -258,7 +258,7 @@ def test_a_ticket_scoped_planner_event_names_only_the_frozen_tickets(
 
 
 def _gate_regression(service, actors, seeded, tmp_path: Path) -> dict:
-    from test_integration_gate import _FAILING_REGRESSION, _gate_ready_candidate, _merge
+    from helpers.gate import _FAILING_REGRESSION, _gate_ready_candidate, _merge
 
     _repository, ticket, _candidate, integration = _gate_ready_candidate(
         service, actors, seeded, tmp_path, retry_body=_FAILING_REGRESSION
@@ -298,7 +298,7 @@ def test_a_gate_regression_freezes_only_the_ticket_and_its_dependents(
 
 
 def _queued_merge(service, actors, seeded, tmp_path: Path):
-    from test_integration_async import (
+    from helpers.integration import (
         _candidate_ready_for_integration, _claimed_for_integration, _git,
     )
 

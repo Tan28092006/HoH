@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from barrier_helpers import keep_open_tickets
+from helpers.barrier import keep_open_tickets
 
 from hoh_control_plane.domain import (
     AuthorizationError,

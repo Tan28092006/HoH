@@ -87,7 +87,7 @@ def test_only_a_changed_ticket_outside_the_prediction_is_a_disagreement(service)
 
 
 def _merge_needing_review(service, actors, seeded, tmp_path: Path) -> dict:
-    from test_integration_async import _merge
+    from helpers.integration import _merge
 
     _open(service, actors, "DEV-OVER", ["src/checkout/**"])
     _open(service, actors, "DEV-FREE", ["src/reporting/**"])
@@ -183,7 +183,7 @@ def test_a_change_outside_the_prediction_is_reported_as_a_disagreement(
 def test_an_auto_kept_merge_carries_no_prediction(
     service, actors, seeded, tmp_path: Path
 ) -> None:
-    from test_integration_async import _merge
+    from helpers.integration import _merge
 
     _open(service, actors, "DEV-FREE", ["src/reporting/**"])
     _merge(service, actors, seeded, tmp_path)

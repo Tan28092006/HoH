@@ -4,7 +4,7 @@ import pytest
 
 from hoh_control_plane.domain import ConflictError, ValidationError
 from hoh_control_plane.qa_runner import TestExecution as Execution
-from test_qa_runner import _candidate_waiting_for_qa
+from helpers.qa import candidate_waiting_for_qa_run as _candidate_waiting_for_qa
 
 
 def test_failed_worker_parks_owned_candidate_for_planner_recovery(service, actors, seeded, tmp_path):

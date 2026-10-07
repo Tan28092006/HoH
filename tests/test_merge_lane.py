@@ -69,7 +69,7 @@ def test_a_merge_that_runs_the_suite_still_holds_the_test_slot(service, monkeypa
 
 
 def _queued_reuse_merge(service, actors, seeded, tmp_path: Path):
-    from test_integration_async import (
+    from helpers.integration import (
         _candidate_ready_for_integration, _claimed_for_integration, _mark_run_as_qa_job,
     )
 
@@ -91,7 +91,7 @@ def _queued_reuse_merge(service, actors, seeded, tmp_path: Path):
 def test_a_reuse_merge_completes_while_a_long_qa_job_holds_the_slot(
     service, actors, seeded, tmp_path: Path
 ) -> None:
-    from test_integration_async import _git
+    from helpers.integration import _git
 
     repository, candidate, merge_job_id = _queued_reuse_merge(service, actors, seeded, tmp_path)
     assert service.merge_gate_reuses_qa_run(merge_job_id) is True
@@ -132,7 +132,7 @@ def test_a_reuse_merge_completes_while_a_long_qa_job_holds_the_slot(
 def test_a_merge_admitted_without_the_slot_never_runs_a_suite(
     service, actors, seeded, tmp_path: Path, monkeypatch
 ) -> None:
-    from test_integration_async import (
+    from helpers.integration import (
         _candidate_ready_for_integration, _claimed_for_integration,
     )
 
