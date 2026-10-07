@@ -76,7 +76,13 @@ recheck every lesson against current code and specification.
 ## Hard stops
 
 `repository_reconciliation_required` freezes new offers, claims, candidate
-submission and merges until Planner resolves the observation. A
+submission and merges only for the tickets it names, until Planner resolves it;
+every other ticket keeps flowing. A packet's `planning_barrier` lists only what applies to its ticket. A
+QA rejection, integration regression or drift onto an observed main freezes
+that ticket and its dependents; an outside commit freezes only the tickets its
+paths reach (the whole project only for docs/spec, root files, rewritten
+history or an unknown diff). HoH's own merge freezes nothing: tickets it may
+affect carry `planning_base_stale` and their next QA checks intent. A
 `planning_barrier_pending` event carries the barrier's age; if it keeps growing,
 no Planner chat is open and the operator must resume one. Preserve the
 artifact and stop rather than rebasing, reinterpreting scope or bypassing the
