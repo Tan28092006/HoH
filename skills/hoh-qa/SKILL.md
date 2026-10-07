@@ -15,8 +15,9 @@ own equipment, or transfers evidence to another SHA.
    on this machine. Register only that subset with a stable `machine_id`.
 2. Call `work.inbox`. Read `capability_blockers` before saying there is no work;
    inspect discovery `capability_state` for each QA-ready candidate.
-3. Claim only when `claimable=true`, `planning_barrier` is clear, and the
-   candidate ID/SHA match the current packet. Delegate the ticket with the
+3. Claim only when `claimable=true` and `planning_barrier` is clear, with the
+   offer's `expected_version`; the worker checks the candidate ID/SHA against
+   its packet. Delegate the ticket with the
    claim's `worker_brief` (base card: one ticket, one fresh worker); the worker
    does steps 4-6 and returns verdict, evidence bundle, Planner job and blockers.
    A claim on a candidate whose maker shares your `model_family` is refused;

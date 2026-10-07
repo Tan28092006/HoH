@@ -12,7 +12,7 @@ acceptance, QA verdicts or protected-branch integration.
 ## Work loop
 
 1. Register once, call `work.inbox`, and resume an owned lease/job before taking
-   new work. Resolve the current ticket packet before claim.
+   new work. Claim with the offer's `expected_version`; the worker reads the packet.
 2. Claim one executable ticket and delegate it with the claim's `worker_brief`
    (base card: one ticket, one fresh worker). The worker does steps 3-6 and
    returns submission ID, commit SHA and blockers. In `colocated` it uses only

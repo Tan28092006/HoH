@@ -12,12 +12,14 @@ candidate; it does not repair candidate code or bypass QA and policy gates.
 ## Merge loop
 
 1. Register, inspect inbox, and resume an owned merge job before another claim.
-2. Resolve the candidate packet. Confirm verified evidence, exact candidate/base
-   SHA, hold/authorization and a clear `planning_barrier`
-   (`repository_reconciliation_required` is false).
+2. Claim only with a clear `planning_barrier` for that ticket
+   (`repository_reconciliation_required` is false), using the offer's
+   `expected_version`.
 3. Claim one candidate with `integrator.claim_candidate` and delegate it with
    the claim's `worker_brief` (base card: one ticket, one fresh worker); the
-   worker returns merge job ID, status, mainline SHA and blockers. It invokes
+   worker resolves the candidate packet, confirms verified evidence, exact
+   candidate/base SHA and hold/authorization, and returns merge job ID, status,
+   mainline SHA and blockers. It invokes
    `integrator.merge_candidate` once with the `context_snapshot_id` of the packet
    resolved after the claim, or the claim's `current_context_snapshot_id`
    (refused without one), retains `merge_job_id`, and polls with

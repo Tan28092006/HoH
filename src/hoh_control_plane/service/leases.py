@@ -17,7 +17,9 @@ from hoh_control_plane.service._common import (
     _row,
     _required_execution_capabilities,
     _transition_ticket,
+    agent_facing,
     datetime,
+    delivered_json,
     json,
     re,
     require_project,
@@ -25,6 +27,54 @@ from hoh_control_plane.service._common import (
     Connection,
     timedelta,
 )
+
+
+#: The ticket fields a claim result carries: who, what and which version.
+_CLAIMED_TICKET_FIELDS = (
+    "ticket_id", "feature_id", "title", "status", "version", "required_role",
+    "candidate_commit",
+)
+_CLAIMED_TITLE_CHARS = 120
+#: A claim result is a hand-off, not a packet: delivered_json size ceiling.
+MAX_CLAIM_RESULT_CHARS = 4_000
+_CLAIM_NEXT_ACTION = (
+    "The claim succeeded; call ticket.get_context for this ticket and use "
+    "its context_snapshot_id before the next write."
+)
+
+
+def _claimed_ticket_identity(ticket: dict[str, Any], project_id: str) -> dict[str, Any]:
+    identity: dict[str, Any] = {"project_id": project_id}
+    for field in _CLAIMED_TICKET_FIELDS:
+        value = ticket.get(field)
+        if value is not None:
+            identity[field] = value
+    title = identity.get("title")
+    if isinstance(title, str) and len(title) > _CLAIMED_TITLE_CHARS:
+        identity["title"] = title[: _CLAIMED_TITLE_CHARS - 3] + "..."
+    return identity
+
+
+def _bounded_claim_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Keep a claim result under its ceiling; past it, the brief is fetched by packet.
+
+    The lease and ticket identity always survive: the claim has committed and
+    the caller must be able to name what it holds.
+    """
+    if len(delivered_json(agent_facing(result))) <= MAX_CLAIM_RESULT_CHARS:
+        return result
+    bounded = {
+        "ticket": result["ticket"],
+        "lease": result["lease"],
+        "context_snapshot_id": result.get("context_snapshot_id"),
+        "current_context_snapshot_id": result.get("current_context_snapshot_id"),
+        "worker_brief": None,
+        "next_action": _CLAIM_NEXT_ACTION,
+        "truncated": True,
+    }
+    if "family_check" in result:
+        bounded["family_check"] = result["family_check"]
+    return bounded
 
 
 class LeaseMixin:
@@ -339,8 +389,11 @@ class LeaseMixin:
                 )},
             )
             self._mark_queue_claimed(connection, ticket_id, actor.agent_id, timestamp)
+            claimed = self._ticket(connection, ticket_id)
             result = {
-                "ticket": self._ticket(connection, ticket_id),
+                # Identity only: the dispatcher hands the brief on and the worker
+                # reads the body from its own packet (one ticket, one fresh worker).
+                "ticket": _claimed_ticket_identity(claimed, project_id),
                 "lease": self._lease(connection, lease_id),
                 # The snapshot the caller decided from, not a fresh identifier:
                 # inventing one here would name a packet nobody ever read.
@@ -359,16 +412,13 @@ class LeaseMixin:
                 actor, ticket_id
             )["context_snapshot_id"]
             result["worker_brief"] = self._worker_brief(
-                actor, result["ticket"], result["lease"], result["current_context_snapshot_id"]
+                actor, claimed, result["lease"], result["current_context_snapshot_id"]
             )
         except DomainError:  # includes ContentionError
             result["current_context_snapshot_id"] = None
             result["worker_brief"] = None
-            result["next_action"] = (
-                "The claim succeeded; call ticket.get_context for this ticket and use "
-                "its context_snapshot_id before the next write."
-            )
-        return result
+            result["next_action"] = _CLAIM_NEXT_ACTION
+        return _bounded_claim_result(result)
 
     def _worker_brief(
         self,
@@ -441,6 +491,7 @@ class LeaseMixin:
             ]
             returns = ["merge_job_id", "status", "mainline_sha", "blockers"]
         brief: dict[str, Any] = {
+            "project_id": project_id,
             "ticket_id": ticket_id,
             "role": role.value,
             "lease_id": lease_id,

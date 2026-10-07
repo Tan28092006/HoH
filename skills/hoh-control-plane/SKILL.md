@@ -17,9 +17,10 @@ is not.
    role skill, capacity 1 and the `model_family` (`anthropic`, `openai`,
    `google`, `other`) of the model doing ticket work, then call `work.inbox`. Planner runs its role
    control cycle before resuming work or waiting.
-3. Use discovery only to find a typed reference. Resolve the selected current
-   ticket packet before a claim or write. A packet is the shared development
-   document for this increment.
+3. Use discovery only to find a typed reference. Claim with the offer's
+   `expected_version`; the claim returns only ticket identity, lease and
+   `worker_brief`. Resolve the current packet before any other write. A packet
+   is the shared development document for this increment.
 4. Claim only executable work. Keep the lease only while doing useful work.
    Checkpoint a material handoff, durable blocker or changed decision; do not
    narrate polling as progress.
@@ -33,8 +34,9 @@ is not.
 An execution-role chat that waits is a thin dispatcher, not the worker. When a
 wait or inbox yields executable work, claim it and pass the claim's
 `worker_brief` verbatim to a fresh subagent (the Claude Code Agent/Task tool or
-Codex `spawn_agent`) on this same MCP server. The brief names the ticket,
-lease, packet snapshot, worktree, skills to load and next tool calls. The worker
+Codex `spawn_agent`) on this same MCP server. The brief names the project,
+ticket, lease, packet snapshot, worktree, skills to load and next tool calls;
+the dispatcher does not read the packet. The worker
 loads those skills, works only that ticket, and returns only the brief's
 `returns` fields plus blockers. Keep none of its transcript: note the result,
 then wait again. Without subagents, finish the ticket and start a new session
