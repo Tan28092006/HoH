@@ -213,16 +213,24 @@ def _expire_abandoned_planner_jobs(service):
 PLANNER_JOB_EVENT_LIMIT = 50
 
 
-def _planner_job_events(db, actor, project):
+_HIGH_SEVERITY_JOB = """EXISTS (
+              SELECT 1 FROM planner_interventions i
+              WHERE i.planner_job_id = j.planner_job_id AND i.severity = 'high'
+                AND i.status IN ('PENDING', 'DELIVERED')
+          )"""
+
+
+def _planner_job_events(db, actor, project, *, high_only=False):
     """READY Planner jobs this Planner has not already acknowledged, urgent first.
 
     The window excludes, in SQL, every job whose current event this agent has
     already acknowledged (or that went obsolete), so fifty old reports read but
     not resolved can never hide a new blocker behind the LIMIT (review R3). A
     delivered but unacknowledged event stays in the window, so it is replayed.
+    ``high_only`` keeps only high-severity jobs, the ones a barrier must not hide.
     """
     rows = db.execute(
-        """
+        f"""
         SELECT j.planner_job_id, j.ticket_id, j.updated_at FROM planner_jobs j
         WHERE j.project_id = ? AND j.status = 'READY'
           AND NOT EXISTS (
@@ -231,12 +239,9 @@ def _planner_job_events(db, actor, project):
                 AND d.event_key = 'planner:' || j.planner_job_id || ':' || j.updated_at
                 AND d.state != 'pending'
           )
+          {'AND ' + _HIGH_SEVERITY_JOB if high_only else ''}
         ORDER BY
-          CASE WHEN EXISTS (
-              SELECT 1 FROM planner_interventions i
-              WHERE i.planner_job_id = j.planner_job_id AND i.severity = 'high'
-                AND i.status IN ('PENDING', 'DELIVERED')
-          ) THEN 0 ELSE 1 END,
+          CASE WHEN {_HIGH_SEVERITY_JOB} THEN 0 ELSE 1 END,
           j.created_at, j.planner_job_id
         LIMIT ?
         """,
@@ -246,6 +251,14 @@ def _planner_job_events(db, actor, project):
              {'kind': 'planner_work', 'planner_job_id': row['planner_job_id'],
               'ticket_ref': 'ticket:' + row['ticket_id']})
             for row in rows]
+
+
+def _capacity_left(db, actor):
+    """True while this agent holds fewer leases than its registered capacity."""
+    presence = db.execute('SELECT capacity FROM agent_presence WHERE agent_id=?', (actor.agent_id,)).fetchone()
+    table = 'planner_job_leases' if actor.role == Role.PLANNER else 'leases'
+    active = db.execute(f'SELECT count(*) AS n FROM {table} WHERE agent_id=? AND expires_at>?', (actor.agent_id, _iso())).fetchone()['n']
+    return presence is not None and active < presence['capacity']
 
 
 def _pending(service, actor, project, kind=None, identifier=None):
@@ -327,11 +340,14 @@ def _pending(service, actor, project, kind=None, identifier=None):
             key = 'repository-reconciliation:' + first['reconciliation_id']
             if level:
                 key += f':stale{level}'
-            return [(key, payload)]
-        presence = db.execute('SELECT capacity FROM agent_presence WHERE agent_id=?', (actor.agent_id,)).fetchone()
-        table = 'planner_job_leases' if actor.role == Role.PLANNER else 'leases'
-        active = db.execute(f'SELECT count(*) AS n FROM {table} WHERE agent_id=? AND expires_at>?', (actor.agent_id, _iso())).fetchone()['n']
-        if active >= presence['capacity']:
+            events = [(key, payload)]
+            if planner and _capacity_left(db, actor):
+                # A barrier is the Planner's first duty, but it must not hide a
+                # high-severity blocker: once the barrier event is acknowledged,
+                # the next wait delivers the urgent job (review A6).
+                events.extend(_planner_job_events(db, actor, project, high_only=True))
+            return events
+        if not _capacity_left(db, actor):
             return []
         if actor.role == Role.PLANNER:
             jobs = _planner_job_events(db, actor, project)

@@ -90,6 +90,17 @@ _DEPENDENCY_UNMET = """NOT EXISTS (
                         JOIN tickets dependency ON dependency.ticket_id = d.depends_on_ticket_id
                         WHERE d.ticket_id = t.ticket_id AND dependency.status != 'DONE'
                     )"""
+# The same rule for a dispatch row: a READY or REWORK ticket whose dependencies
+# are not all DONE cannot be claimed (claim_ticket refuses it), so offering it
+# only fills the inbox window with work nobody can take (review A6).
+_QUEUE_DEPENDENCIES_MET = """NOT EXISTS (
+                    SELECT 1 FROM tickets queued
+                    JOIN ticket_dependencies d ON d.ticket_id = queued.ticket_id
+                    JOIN tickets dependency ON dependency.ticket_id = d.depends_on_ticket_id
+                    WHERE queued.ticket_id = work_queue.ticket_id
+                      AND queued.status IN ('READY', 'REWORK')
+                      AND dependency.status != 'DONE'
+                  )"""
 
 
 class DiscoveryMixin:
@@ -874,11 +885,12 @@ class DiscoveryMixin:
             ).fetchone()[0]
             offer_limit = max(0, limit - offered_count) if active_count < presence["capacity"] else 0
             pending = connection.execute(
-                """
+                f"""
                 SELECT * FROM work_queue
                 WHERE project_id = ? AND target_role = ? AND status IN ('pending', 'offered')
                   AND NOT EXISTS (SELECT 1 FROM work_offers o WHERE o.queue_id = work_queue.queue_id
                                   AND o.agent_id = ? AND o.status = 'offered')
+                  AND {_QUEUE_DEPENDENCIES_MET}
                 ORDER BY priority DESC, created_at ASC
                 LIMIT ?
                 """,
@@ -897,12 +909,13 @@ class DiscoveryMixin:
                     )
                 )
             offer_rows = connection.execute(
-                """
+                f"""
                 SELECT o.*, q.project_id, q.ticket_id, q.target_role, q.context_version,
                        q.priority, q.status AS queue_status
                 FROM work_offers o
                 JOIN work_queue q ON q.queue_id = o.queue_id
                 WHERE o.agent_id = ? AND q.project_id = ? AND o.status = 'offered'
+                  AND {_QUEUE_DEPENDENCIES_MET.replace('work_queue.', 'q.')}
                 ORDER BY q.priority DESC, o.offered_at ASC
                 LIMIT ?
                 """,
@@ -1289,6 +1302,11 @@ class DiscoveryMixin:
         if queue is None or queue["status"] not in {"pending", "offered"}:
             return []
         if ExecutionGate.is_closed(connection, queue["project_id"], queue["ticket_id"]):
+            return []
+        if connection.execute(
+            f"SELECT 1 FROM work_queue WHERE queue_id = ? AND NOT {_QUEUE_DEPENDENCIES_MET}",
+            (queue["queue_id"],),
+        ).fetchone() is not None:
             return []
         existing_offer_count = connection.execute(
             "SELECT COUNT(*) FROM work_offers WHERE queue_id = ? AND status = 'offered'",
