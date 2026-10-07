@@ -286,7 +286,10 @@ def test_shared_host_loads_new_profiles_and_revokes_without_restart(service, tmp
     app = create_mcp_http_app(service, _credentials(), credentials_provider=credential_provider(_credentials(), path))
     with TestClient(app, base_url='http://127.0.0.1') as client:
         token = register_local_credential(tmp_path, actor)
-        assert register_local_credential(tmp_path, actor) == token
+        # Stored as its digest (wave 8A, R4): a second registration cannot
+        # return the token, and the issued one stays valid.
+        assert register_local_credential(tmp_path, actor) is None
+        assert token not in path.read_text(encoding='utf-8')
         headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json, text/event-stream'}
         payload = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}
         response = client.post('/mcp', headers=headers, json=payload)

@@ -77,6 +77,7 @@ JSON_FIELDS = {
     "frozen_ticket_ids",
     "shadow_partition",
     "planning_base_stale",
+    "provenance_modules",
 }
 
 #: The QA criterion a fresh-context reviewer answers when a ticket's planning

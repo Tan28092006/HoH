@@ -34,7 +34,7 @@ def test_an_unconfigured_project_says_so(service, actors, seeded) -> None:
     profile = service.get_test_profile(actors["planner"], "project-1")
     assert profile == {
         "project_id": "project-1", "configured": False, "test_command": None,
-        "timeout_seconds": None, "configured_at": None, "configured_by": None,
+        "timeout_seconds": None, "configured_at": None, "configured_by": None, "provenance_modules": None,
     }
     assert service.session_bootstrap(actors["planner"], "project-1")["test_profile"] == profile
 

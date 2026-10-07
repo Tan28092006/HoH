@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from hoh_control_plane import contracts
+from hoh_control_plane.qa_runner import validate_provenance_modules
 from hoh_control_plane.service._common import (
     _estimate_tokens,
     _CONTRACT_TOKEN_BUDGET,
@@ -31,11 +32,19 @@ class ProjectPolicyMixin:
         project_id: str,
         test_command: list[str],
         timeout_seconds: int,
+        provenance_modules: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Register the single shell-free test command frozen into future candidates."""
+        """Register the single shell-free test command frozen into future candidates.
+
+        ``provenance_modules`` names the packages every run must import from
+        the frozen candidate. Omitted, each candidate freezes what its base
+        commit declares; either way the candidate cannot change it (8A, R8).
+        """
         require_role(actor, Role.PLANNER, Role.ADMIN)
         require_project(actor, project_id)
         self._test_command(test_command)
+        if provenance_modules is not None:
+            provenance_modules = validate_provenance_modules(provenance_modules)
         if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool):
             raise ValidationError("timeout_seconds must be an integer")
         if not 5 <= timeout_seconds <= 1800:
@@ -56,15 +65,18 @@ class ProjectPolicyMixin:
             connection.execute(
                 """
                 INSERT INTO project_test_profiles
-                    (project_id, test_command, timeout_seconds, configured_by, configured_at)
-                VALUES (?, ?, ?, ?, ?)
+                    (project_id, test_command, timeout_seconds, configured_by, configured_at,
+                     provenance_modules)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(project_id) DO UPDATE SET
                     test_command = excluded.test_command,
                     timeout_seconds = excluded.timeout_seconds,
                     configured_by = excluded.configured_by,
-                    configured_at = excluded.configured_at
+                    configured_at = excluded.configured_at,
+                    provenance_modules = excluded.provenance_modules
                 """,
-                (project_id, json.dumps(test_command), timeout_seconds, actor.agent_id, timestamp),
+                (project_id, json.dumps(test_command), timeout_seconds, actor.agent_id, timestamp,
+                 None if provenance_modules is None else json.dumps(provenance_modules)),
             )
             connection.execute(
                 "UPDATE projects SET version = ?, updated_at = ? WHERE project_id = ?",
@@ -101,7 +113,7 @@ class ProjectPolicyMixin:
     @staticmethod
     def _test_profile(connection: Any, project_id: str) -> dict[str, Any]:
         profile = _row(connection.execute(
-            "SELECT test_command, timeout_seconds, configured_at, configured_by "
+            "SELECT test_command, timeout_seconds, configured_at, configured_by, provenance_modules "
             "FROM project_test_profiles WHERE project_id = ?",
             (project_id,),
         ).fetchone())
@@ -112,6 +124,7 @@ class ProjectPolicyMixin:
             "timeout_seconds": profile["timeout_seconds"] if profile else None,
             "configured_at": profile["configured_at"] if profile else None,
             "configured_by": profile["configured_by"] if profile else None,
+            "provenance_modules": profile["provenance_modules"] if profile else None,
         }
 
     def configure_verification_profile(

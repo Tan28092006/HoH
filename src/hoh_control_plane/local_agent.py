@@ -118,7 +118,7 @@ def checked_project(root, project):
 
 
 def install_profile(root, project, role, instance, client, home, upgrade_skills=False, transport='stdio',
-                    model=None, model_family=None):
+                    model=None, model_family=None, rotate_token=False):
     from hoh_control_plane.agent_kit import build_kit
     from hoh_control_plane.agent_assets.install import install
     config = checked_project(root, project)
@@ -138,19 +138,30 @@ def install_profile(root, project, role, instance, client, home, upgrade_skills=
     codex = {'command': command, 'args': arguments, 'tool_timeout_sec': 86400}
     claude = {'type': 'stdio', 'command': command, 'args': arguments, 'timeout': 86400000}
     previous = {'codex': codex, 'claude-code': claude}
+    token_var = token_issued = None
     if transport == 'shared-http':
-        from hoh_control_plane.local_credentials import register_local_credential
-        token = register_local_credential(root, actor)
+        from hoh_control_plane.local_credentials import (
+            deliver_token, register_local_credential, token_delivery_available, token_env_var)
+        if not token_delivery_available():
+            raise ValueError('shared-http profiles deliver their token through the Windows user '
+                             'environment; use the stdio transport on this host')
+        # The client config names an environment variable, never the token
+        # (wave 8A, R4); the credential file keeps only its digest.
+        token_var = token_env_var(actor.agent_id)
+        token = register_local_credential(root, actor, rotate=rotate_token)
+        token_issued = token is not None
+        if token is not None:
+            deliver_token(token_var, token)
         url = f"http://127.0.0.1:{int(config.get('mcp_port', 8931))}/mcp"
-        headers = {'Authorization': 'Bearer ' + token}
-        codex = {'url': url, 'http_headers': headers, 'tool_timeout_sec': 86400}
-        claude = {'type': 'http', 'url': url, 'headers': headers, 'timeout': 86400000}
+        codex = {'url': url, 'bearer_token_env_var': token_var, 'tool_timeout_sec': 86400}
+        claude = {'type': 'http', 'url': url, 'headers': {'Authorization': 'Bearer ${' + token_var + '}'},
+                  'timeout': 86400000}
     with tempfile.TemporaryDirectory(prefix='hoh-profile-') as temp:
         kit = Path(temp) / 'kit'
         build_kit(kit, role, 'http://127.0.0.1:8931/mcp')
         if transport == 'shared-http':
-            codex_text = (f'[mcp_servers.{server}]\nurl = {json.dumps(url)}\ntool_timeout_sec = 86400\n'
-                          f'http_headers = {{ Authorization = {json.dumps(headers["Authorization"])} }}\n')
+            codex_text = (f'[mcp_servers.{server}]\nurl = {json.dumps(url)}\n'
+                          f'bearer_token_env_var = {json.dumps(token_var)}\ntool_timeout_sec = 86400\n')
         else:
             codex_text = f'[mcp_servers.{server}]\ncommand = {json.dumps(command)}\nargs = {json.dumps(arguments)}\ntool_timeout_sec = 86400\n'
         (kit / 'codex.toml').write_text(codex_text, encoding='utf-8')
@@ -203,6 +214,10 @@ def install_profile(root, project, role, instance, client, home, upgrade_skills=
             raise
     result = {'server_name': server, 'agent_id': actor.agent_id, 'role': role, 'project_id': project, 'transport': transport,
               'skill_backups': [str(backup) for _, backup in moved]}
+    if token_var:
+        # The value is never reported; a new token reaches clients started afterwards.
+        result['token_env_var'] = token_var
+        result['token_issued'] = token_issued
     if model_family:
         # A stdio server reads this at start and registers the family when the
         # agent omits it; every client also gets the explicit register hint.
@@ -313,13 +328,15 @@ def main():
     parser.add_argument('--model', help='Model this role runs on, where the client supports it')
     parser.add_argument('--model-family', choices=MODEL_FAMILIES,
                         help='Provider family of --model; derived from the model id when omitted')
+    parser.add_argument('--rotate-token', action='store_true',
+                        help='Issue a new shared-http token for this profile, revoking the old one')
     args = parser.parse_args()
     root = args.root.resolve()
     config = checked_project(root, args.project)
     actor = installed_profile_actor(root, config, args.project, args.role, args.instance)
     if args.action == 'setup':
         print(json.dumps(install_profile(root, args.project, args.role, args.instance, args.client, args.home, args.upgrade_skills, args.transport,
-                                         args.model, args.model_family)))
+                                         args.model, args.model_family, args.rotate_token)))
         return
     if any((root / 'config' / name).exists() for name in ('stop.request', 'shutdown.request')):
         raise SystemExit('HoH was stopped by the operator. Open the HoH desktop icon before reconnecting.')

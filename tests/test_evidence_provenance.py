@@ -492,15 +492,23 @@ def test_a_claimed_digest_is_not_recorded_as_a_proved_artifact(
     assert source == "claimed", "nothing here read those bytes"
 
 
-def test_a_local_artifact_that_is_not_on_this_machine_reads_as_claimed(
+def test_a_local_artifact_that_is_not_on_this_machine_is_refused(
     service, actors, seeded
 ) -> None:
-    """What a misconfigured shared evidence root actually looks like."""
-    _checksum, source = service._verified_storage_checksum(
-        "evidence://local/cand-9/never-written.json", "cand-9", None, "trust me"
-    )
+    """Wave 8A, R9: evidence://local/ names this host's store; no bytes, no evidence.
 
-    assert source == "claimed"
+    Before 8A this read as a claim, which let a passed verdict cite a report
+    that never existed.
+    """
+    with pytest.raises(ValidationError) as refused:
+        service._verified_storage_checksum(
+            "evidence://local/cand-9/never-written.json", "cand-9", None, "trust me"
+        )
+
+    assert refused.value.details == {
+        "reason": "evidence_artifact_missing",
+        "storage_ref": "evidence://local/cand-9/never-written.json",
+    }
 
 
 def test_the_metric_shows_how_much_evidence_is_actually_backed(

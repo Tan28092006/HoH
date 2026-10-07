@@ -226,13 +226,20 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
 
         @server.tool(name="planner.configure_test_command", structured_output=True)
         def planner_configure_test_command(
-            project_id: str, test_command: list[str], timeout_seconds: int = 600
+            project_id: str, test_command: list[str], timeout_seconds: int = 600,
+            provenance_modules: list[str] | None = None,
         ) -> dict[str, Any]:
-            """Register the only project test command that future QA candidates may execute."""
+            """Register the only project test command that future QA candidates may execute.
+
+            provenance_modules: packages every run must import from the frozen
+            candidate, e.g. ["hoh_control_plane"]. Omit it to freeze what each
+            candidate's base commit declares; a candidate never chooses it.
+            """
             arguments = {
                 "project_id": project_id,
                 "test_command": test_command,
                 "timeout_seconds": timeout_seconds,
+                "provenance_modules": provenance_modules,
             }
             return invoke(
                 "planner.configure_test_command",

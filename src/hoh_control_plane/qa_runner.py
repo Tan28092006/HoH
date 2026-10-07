@@ -127,6 +127,39 @@ class TestExecution:
     capture_errors: tuple[str, ...] = ()
 
 
+_MODULE_NAME = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
+_MAX_PROVENANCE_MODULES = 64
+
+
+def validate_provenance_modules(modules) -> list[str]:
+    if not isinstance(modules, list) or len(modules) > _MAX_PROVENANCE_MODULES or any(
+        not isinstance(m, str) or not _MODULE_NAME.fullmatch(m) for m in modules
+    ):
+        raise ValidationError("Invalid frozen project provenance_modules configuration")
+    return list(modules)
+
+
+def provenance_modules_from(pyproject_text: str | None, src_packages: list[str]) -> list[str]:
+    """The packages a tree declares for import attestation.
+
+    [tool.hoh.qa].provenance_modules, then the wheel's packages, then the
+    packages under src/. Applied to the candidate's base commit when the
+    candidate is frozen, so the candidate's own edits cannot choose its oracle.
+    """
+    try:
+        document = tomllib.loads(pyproject_text) if pyproject_text else {}
+    except tomllib.TOMLDecodeError as error:
+        raise ValidationError("pyproject.toml cannot be parsed for provenance_modules") from error
+    tool = document.get("tool", {})
+    modules = tool.get("hoh", {}).get("qa", {}).get("provenance_modules")
+    if modules is None:
+        packages = tool.get("hatch", {}).get("build", {}).get("targets", {}).get("wheel", {}).get("packages", [])
+        modules = [Path(p).name for p in packages if isinstance(p, str)] if isinstance(packages, list) else packages
+    if not modules:
+        modules = sorted(set(src_packages))
+    return validate_provenance_modules(modules)
+
+
 class ProjectTestRunner:
     """Run only Planner-registered commands without a shell and retain bounded evidence."""
 
@@ -134,13 +167,21 @@ class ProjectTestRunner:
         self.evidence_root = evidence_root.resolve()
 
     def execute(
-        self, command: list[str], worktree_path: str, timeout_seconds: int
+        self, command: list[str], worktree_path: str, timeout_seconds: int,
+        provenance_modules: list[str] | None = None,
     ) -> TestExecution:
+        """Run the registered command against the frozen worktree.
+
+        ``provenance_modules`` is the list frozen in the candidate's test
+        profile (wave 8A, R8). When given, the candidate's own pyproject.toml
+        cannot change which packages the run must attest.
+        """
         command_digest = hashlib.sha256("\0".join(command).encode()).hexdigest()
         started = time.perf_counter()
         environment = self._build_environment(worktree_path)
         if self._pytest_arguments(command) is not None:
-            return self._execute_pytest(command, worktree_path, timeout_seconds, environment)
+            return self._execute_pytest(command, worktree_path, timeout_seconds, environment,
+                                        frozen_modules=provenance_modules)
         resolved_source = self._resolve_candidate_source(command, worktree_path, environment)
         if resolved_source is not None and not self._within_worktree(
             resolved_source, worktree_path
@@ -300,34 +341,42 @@ class ProjectTestRunner:
 
     @staticmethod
     def _provenance_modules(worktree):
-        """Explicit frozen project config, then wheel packages, then src packages."""
+        """Explicit project config, then wheel packages, then src packages,
+        as the given tree declares them."""
         root = Path(worktree)
         path = root / "pyproject.toml"
-        document = tomllib.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-        tool = document.get("tool", {})
-        modules = tool.get("hoh", {}).get("qa", {}).get("provenance_modules")
-        if modules is None:
-            packages = tool.get("hatch", {}).get("build", {}).get("targets", {}).get("wheel", {}).get("packages", [])
-            modules = [Path(p).name for p in packages]
-        if not modules and (root / "src").is_dir():
-            modules = sorted(p.parent.name for p in (root / "src").glob("*/__init__.py"))
-        if not isinstance(modules, list) or len(modules) > 64 or any(
-            not isinstance(m, str) or not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", m) for m in modules
-        ):
-            raise ValidationError("Invalid frozen project provenance_modules configuration")
-        return modules
+        source = root / "src"
+        return provenance_modules_from(
+            path.read_text(encoding="utf-8") if path.is_file() else None,
+            [p.parent.name for p in source.glob("*/__init__.py")] if source.is_dir() else [])
 
-    def _execute_pytest(self, command, worktree, timeout, environment, *, retry_of=None):
+    def _execute_pytest(self, command, worktree, timeout, environment, *, retry_of=None,
+                        frozen_modules=None):
         flags, arguments = self._pytest_arguments(command)
         requested_workers = xdist_workers(arguments)
         started = time.perf_counter()
         digest = hashlib.sha256("\0".join(command).encode()).hexdigest()
-        modules = self._provenance_modules(worktree)
+        if frozen_modules is not None:
+            # The Planner-owned profile decides what is attested; the candidate's
+            # own declaration is retained only as a fact (wave 8A, R8).
+            modules = validate_provenance_modules(frozen_modules)
+            modules_source = "frozen_profile"
+        else:
+            modules = self._provenance_modules(worktree)
+            modules_source = "candidate_tree"
         resources = resource_snapshot()
         manifest = {"schema_version": 1, "command": command, "command_digest": digest,
-                    "provenance_modules": modules, "host_resources": resources,
+                    "provenance_modules": modules, "provenance_modules_source": modules_source,
+                    "host_resources": resources,
                     "environment_inputs": {k: environment[k] for k in
                         ("PYTHONPATH", "PYTHONNOUSERSITE", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS") if k in environment}}
+        if frozen_modules is not None:
+            try:
+                declared = self._provenance_modules(worktree)
+            except (ValidationError, ValueError, OSError):
+                declared = None
+            if declared != modules:
+                manifest["candidate_declared_modules"] = declared
         if retry_of is not None:
             manifest["retry_of"] = retry_of
             arguments = retry_of["arguments"]
@@ -421,6 +470,10 @@ class ProjectTestRunner:
                 reason = "test_failure" if completed.returncode in (1, 2) else "test_configuration_error"
             elif child.get("provenance_status") not in {"verified", "not_applicable"}:
                 reason = "incomplete_evidence"
+            elif not (child.get("test_counts") or {}).get("passed"):
+                # Exit 0 with nothing passed (every test skipped or deselected)
+                # proves nothing; the candidate answers for it (wave 8A, R8).
+                reason = "no_tests_passed"
         if retry_of is None and reason in _RETRIED_REASONS:
             # Once, with half the workers: an environment failure is retried by
             # the runner, never sent back to the Developer.
@@ -428,7 +481,8 @@ class ProjectTestRunner:
             retry_arguments = arguments
             if current is not None and current.isdigit():
                 retry_arguments = with_xdist_workers(arguments, max(1, int(current) // 2))
-            return self._execute_pytest(command, worktree, timeout, environment, retry_of={
+            return self._execute_pytest(command, worktree, timeout, environment,
+                                        frozen_modules=frozen_modules, retry_of={
                 "reason": reason, "exit_code": completed.returncode,
                 "xdist_workers": current, "arguments": retry_arguments,
             })

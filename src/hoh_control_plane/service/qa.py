@@ -244,9 +244,14 @@ class QaMixin:
             )
         artifact = (self.project_tests.evidence_root / relative).resolve()
         if not artifact.is_relative_to(self.project_tests.evidence_root) or not artifact.is_file():
-            # Nothing on disk to prove; a supplied digest is still recorded as the
-            # QA agent's own claim about an artifact it holds elsewhere.
-            return recorded_content_digest(), CHECKSUM_CLAIMED
+            # evidence://local/ names this host's own evidence store. A reference
+            # there with no bytes behind it proves nothing and is refused, not
+            # recorded as a claim (wave 8A, R9). Evidence kept elsewhere uses
+            # another scheme and is recorded as claimed.
+            raise ValidationError(
+                "Local evidence artifact does not exist on this host",
+                {"reason": "evidence_artifact_missing", "storage_ref": storage_ref},
+            )
         actual = hashlib.sha256(artifact.read_bytes()).hexdigest()
         # Agents read digests shortened to 12 characters, so an echoed value may be
         # a prefix; it still has to identify these bytes, and the full one is kept.
@@ -352,6 +357,7 @@ class QaMixin:
                     WHERE j.candidate_id = ? AND j.status = 'COMPLETED'
                       AND j.command_digest = ? AND j.timeout_seconds = ?
                       AND r.exit_code = 0 AND r.timed_out = 0
+                      AND r.termination_reason = 'passed'
                     ORDER BY j.created_at DESC LIMIT 1
                     """,
                     (candidate["candidate_id"],
@@ -485,21 +491,39 @@ class QaMixin:
                         "SELECT * FROM project_repositories WHERE project_id = ?", (job["project_id"],))
                 with self.git_worktrees.qa_checkout(repository_path=repository["repository_path"],
                         test_run_id=test_run_id, candidate_commit=job["candidate_commit"]) as path:
-                    execution = self.project_tests.execute(job["test_command"], path, job["timeout_seconds"])
+                    execution = self._execute_frozen_profile(
+                        job["test_command"], path, job["timeout_seconds"], job["candidate_id"])
                     if execution.artifact_mismatch and execution.termination_reason == "unclassified":
                         return self._fail_with_artifact_mismatch(test_run_id, job, execution)
                     return self._complete_queued_project_test(test_run_id, execution)
             worktree_path = self.git_worktrees.verify_frozen_candidate(
                 job["worktree_path"], job["candidate_commit"]
             )
-            execution = self.project_tests.execute(
-                job["test_command"], worktree_path, job["timeout_seconds"]
+            execution = self._execute_frozen_profile(
+                job["test_command"], worktree_path, job["timeout_seconds"], job["candidate_id"]
             )
             if execution.artifact_mismatch and execution.termination_reason == "unclassified":
                 return self._fail_with_artifact_mismatch(test_run_id, job, execution)
             return self._complete_queued_project_test(test_run_id, execution)
         except (DomainError, OSError) as error:
             return self.fail_queued_project_test(test_run_id, str(error))
+
+    def _execute_frozen_profile(self, command, path, timeout_seconds, candidate_id):
+        """Run the candidate's registered command with its frozen provenance list.
+
+        The list comes from candidate_test_profiles, never from the candidate's
+        tree (wave 8A, R8). An empty or missing list leaves the runner to read
+        the tree, which can only add packages to attest, never remove one.
+        """
+        with self.store.connection() as connection:
+            profile = _row(connection.execute(
+                "SELECT provenance_modules FROM candidate_test_profiles WHERE candidate_id = ?",
+                (candidate_id,),
+            ).fetchone())
+        modules = (profile or {}).get("provenance_modules")
+        if modules:
+            return self.project_tests.execute(command, path, timeout_seconds, provenance_modules=modules)
+        return self.project_tests.execute(command, path, timeout_seconds)
 
     def _fail_with_artifact_mismatch(
         self, test_run_id: str, job: dict[str, Any], execution: TestExecution
@@ -602,8 +626,9 @@ class QaMixin:
                     INSERT INTO qa_test_runs
                         (test_run_id, candidate_id, ticket_id, command_digest, exit_code, timed_out,
                          duration_ms, storage_ref, report_path, environment_digest,
-                         storage_checksum, executed_by, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         storage_checksum, executed_by, created_at, termination_reason,
+                         provenance_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         test_run_id,
@@ -619,6 +644,8 @@ class QaMixin:
                         checksum,
                         actor.agent_id,
                         timestamp,
+                        execution.termination_reason,
+                        execution.provenance_status,
                     ),
                 )
                 connection.execute(
@@ -663,6 +690,7 @@ class QaMixin:
                         "test_run_id": test_run_id,
                         "exit_code": execution.exit_code,
                         "timed_out": execution.timed_out,
+                        "termination_reason": execution.termination_reason,
                     },
                 )
                 if execution.termination_reason in _INFRASTRUCTURE_OUTCOMES:
@@ -748,7 +776,8 @@ class QaMixin:
         if test_run is not None:
             job.update({
                 key: test_run[key]
-                for key in ("exit_code", "timed_out", "duration_ms", "storage_ref", "report_path")
+                for key in ("exit_code", "timed_out", "duration_ms", "storage_ref", "report_path",
+                            "termination_reason", "provenance_status")
             })
         return job
 
@@ -802,11 +831,27 @@ class QaMixin:
             )
             if candidate["commit_sha"] != ticket["candidate_commit"]:
                 raise ConflictError("Candidate does not match the frozen ticket artifact")
+            self._refuse_self_review(connection, actor, candidate, "judge")
             # Re-checked at the write: a re-registration under another family
             # after the claim must not let a same-family verdict through.
             family_check = self._maker_checker_family_check(
                 connection, actor, project_id, ticket_id
             )
+            if verdict == "passed":
+                # A passed verdict is a claim that nothing observed failed. A
+                # failed or inconclusive finding next to it would park the ticket
+                # at the merge gate (unverified_qa_finding); refuse it here
+                # instead (wave 8A, R9).
+                unverified = [
+                    {"criterion": str(f.get("criterion", "")), "status": str(f.get("status", ""))}
+                    for f in findings if isinstance(f, dict) and f.get("status") != "verified"
+                ]
+                if unverified:
+                    raise ValidationError(
+                        "A passed verdict requires every finding to be verified; submit failed "
+                        "or remove the finding",
+                        {"reason": "passed_with_unverified_finding", "findings": unverified[:20]},
+                    )
             contract = {
                 item["criterion"]: item for item in (ticket.get("validation_contract") or [])
             }

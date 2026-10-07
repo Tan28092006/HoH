@@ -268,9 +268,10 @@ def _seed_run(service, candidate_id: str, command: list[str]) -> None:
         connection.execute(
             """INSERT INTO qa_test_runs
                (test_run_id, candidate_id, ticket_id, command_digest, exit_code, timed_out,
-                duration_ms, storage_ref, report_path, executed_by, created_at)
+                duration_ms, storage_ref, report_path, executed_by, created_at,
+                termination_reason)
                VALUES (?, ?, 'DEV-142', ?, 0, 0, 10, 'evidence://local/run.json', 'run.json',
-                       'qa-01', '2026-01-01T00:00:00Z')""",
+                       'qa-01', '2026-01-01T00:00:00Z', 'passed')""",
             (f"testrun_custom_{candidate_id[-8:]}", candidate_id, digest),
         )
 

@@ -103,6 +103,43 @@ class RiskPolicyMixin:
         ).fetchone())
         return (presence or {}).get("model_family")
 
+    @staticmethod
+    def _candidate_maker_id(connection: Connection, candidate: dict[str, Any]) -> str | None:
+        """The agent that wrote the patch: a server-rebased candidate is still
+        its original submitter's work, whoever recorded the rebase."""
+        current = candidate
+        for _ in range(32):
+            parent_id = current.get("derived_from")
+            if not parent_id:
+                break
+            parent = _row(connection.execute(
+                "SELECT candidate_id, submitted_by, derived_from FROM candidates "
+                "WHERE candidate_id = ?", (parent_id,),
+            ).fetchone())
+            if parent is None:
+                break
+            current = parent
+        return current.get("submitted_by")
+
+    def _refuse_self_review(
+        self, connection: Connection, actor: Actor, candidate: dict[str, Any] | None, action: str
+    ) -> None:
+        """Maker-checker by identity (wave 8A, R4): the agent that submitted a
+        candidate never claims, judges or merges it, whatever role it holds now.
+
+        Independent of ``checker_distinct_from_maker``: that policy compares
+        model families and a project may turn it off; this one never turns off.
+        """
+        if candidate is None:
+            return
+        maker = self._candidate_maker_id(connection, candidate)
+        if maker is not None and maker == actor.agent_id:
+            raise AuthorizationError(
+                f"An agent cannot {action} a candidate it submitted",
+                {"reason": "self_review", "candidate_id": candidate.get("candidate_id"),
+                 "submitted_by": maker, "role": actor.role.value},
+            )
+
     def _maker_checker_family_check(
         self, connection: Connection, actor: Actor, project_id: str, ticket_id: str
     ) -> dict[str, Any]:
