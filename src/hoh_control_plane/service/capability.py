@@ -374,6 +374,45 @@ class CapabilityMixin:
         )
         return {"approved": approved, "resolved_planner_jobs": resolved}
 
+    def _revoke_qa_machine_approvals(
+        self, connection: Connection, actor: Actor, project_id: str, fingerprint: str,
+    ) -> list[str]:
+        """Withdraw every QA approval held on one machine after it failed (review C3).
+
+        Whoever approved it, the approval was for equipment on a machine that
+        has just failed as infrastructure. Its QA agents rerun the preflight
+        once the machine is repaired and its Planner job is resolved.
+        """
+        revoked: list[str] = []
+        timestamp = _iso()
+        for row in connection.execute(
+            "SELECT agent_id, project_ids, machine_id, approved_execution_capabilities "
+            "FROM agent_presence WHERE role = ?",
+            (Role.QA.value,),
+        ).fetchall():
+            presence = _row(row)
+            if machine_fingerprint(presence.get("machine_id")) != fingerprint:
+                continue
+            if project_id not in set(presence.get("project_ids") or []):
+                continue
+            if not presence.get("approved_execution_capabilities"):
+                continue
+            connection.execute(
+                """UPDATE agent_presence
+                   SET approved_execution_capabilities = '[]', capability_approval_refs = '[]',
+                       capability_approved_machine_id = NULL, capability_approved_by = ?,
+                       capability_approved_at = ?, updated_at = ?
+                   WHERE agent_id = ?""",
+                (APPROVAL_REVOKED, timestamp, timestamp, presence["agent_id"]),
+            )
+            self._event(
+                connection, actor, project_id, "qa.capability_approval_revoked",
+                "agent_presence", presence["agent_id"], 1,
+                {"reason": "qa_machine_infrastructure_failure", "decided_by": APPROVAL_REVOKED},
+            )
+            revoked.append(presence["agent_id"])
+        return revoked
+
     def _revoke_host_preflight_approvals(
         self, connection: Connection, actor: Actor, project_id: str,
         reason: str, agent_id: str | None = None,

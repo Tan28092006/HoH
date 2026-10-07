@@ -489,6 +489,15 @@ by a dependency edge, a job or a refusal rather than by prose.
   `developer_blocker` Planner job whose summary starts `dependency_retired:`.
   Closed dependents are left alone. The edge is not rewritten when it cannot be
   moved: the Planner decides it with `planner.update_ticket_fields`.
+- **One broken QA machine (C3).** A QA `infrastructure` failure, reported or
+  parked by the runner, goes through `_group_qa_machine_failure` in
+  `planner_jobs.py`. It revokes every QA approval held on that machine and
+  marks the Planner job `qa_machine:<fingerprint>:infrastructure`. The first
+  failure blocks its ticket as before; a later one from the same machine and
+  class joins that job, and its ticket returns to QA_READY. While the job is
+  open, `_qa_machine_quarantined` keeps the machine out of QA offers and
+  `claim_qa` refuses it with `qa_machine_quarantined`. Resolving the job lifts
+  the quarantine; the QA reruns its preflight to be approved again.
 
 ## Change routing
 

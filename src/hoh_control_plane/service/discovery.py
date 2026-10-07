@@ -1334,6 +1334,10 @@ class DiscoveryMixin:
             if not self._presence_can_access(presence, queue["project_id"]):
                 continue
             if queue["target_role"] == Role.QA.value:
+                if self._qa_machine_quarantined(
+                    connection, queue["project_id"], presence.get("machine_id")
+                ):
+                    continue
                 ticket = self._ticket(connection, queue["ticket_id"])
                 required = _required_execution_capabilities(ticket)
                 available = set(presence.get("execution_capabilities") or []) & set(

@@ -672,7 +672,23 @@ class QaMixin:
             return self.fail_queued_project_test(test_run_id, str(error))
 
     def _park_qa_infrastructure(self, connection, actor, ticket, job, reason, storage_ref):
-        """Stop offers for source work and preserve the candidate for a guarded retry."""
+        """Stop offers for source work and preserve the candidate for a guarded retry.
+
+        A machine whose earlier infrastructure failure is still open with the
+        Planner does not block another ticket: the failure joins that machine's
+        job and the ticket goes back to QA for another machine (review C3).
+        """
+        evidence_refs = [f"test_run:{job['test_run_id']}", storage_ref]
+        grouped = self._group_qa_machine_failure(
+            connection, actor, job["project_id"], ticket, "infrastructure", evidence_refs,
+        )
+        if grouped is not None and grouped["planner_job"] is not None:
+            self._return_ticket_to_qa(
+                connection, actor, job["project_id"], ticket, grouped["planner_job"]
+            )
+            return
+        if grouped is not None:
+            evidence_refs.insert(0, grouped["mark"])
         timestamp = _iso()
         next_version = _transition_ticket(
             connection, ticket["ticket_id"], actor=actor, expected_version=ticket["version"],
@@ -695,7 +711,7 @@ class QaMixin:
                     next_version, {"test_run_id": job["test_run_id"], "reason": reason, "next_role": "planner"})
         self._open_planner_job(connection, actor, job["project_id"], updated,
             job_type=PlannerJobType.QA_FAILURE, summary="QA infrastructure needs remediation and a guarded same-candidate retry.",
-            evidence_refs=[f"test_run:{job['test_run_id']}", storage_ref], candidate_id=job["candidate_id"],
+            evidence_refs=evidence_refs, candidate_id=job["candidate_id"],
             context_entry_id=entry_id, severity=InterventionSeverity.NORMAL, artifact_commit=job["candidate_commit"])
 
     def fail_queued_project_test(self, test_run_id: str, message: str) -> dict[str, Any]:

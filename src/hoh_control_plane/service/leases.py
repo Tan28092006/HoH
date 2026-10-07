@@ -273,6 +273,18 @@ class LeaseMixin:
             self.require_fresh_context(connection, ticket_id, context_snapshot_id)
             self._require_skill_compatible(connection, actor, project_id)
             self._require_qa_execution_capabilities(connection, actor, project_id, ticket)
+            if actor.role is Role.QA:
+                machine = connection.execute(
+                    "SELECT machine_id FROM agent_presence WHERE agent_id = ?", (actor.agent_id,)
+                ).fetchone()
+                if machine is not None and self._qa_machine_quarantined(
+                    connection, project_id, machine["machine_id"]
+                ):
+                    raise ConflictError(
+                        "This QA machine has an open infrastructure failure job; it takes no "
+                        "QA work until Planner resolves that job",
+                        {"reason": "qa_machine_quarantined"},
+                    )
             family_check = (
                 self._maker_checker_family_check(connection, actor, project_id, ticket_id)
                 if actor.role is Role.QA else None

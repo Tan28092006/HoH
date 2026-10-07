@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hoh_control_plane.capability_probe import machine_fingerprint
 from hoh_control_plane.service._common import (
     _audit_event_has_field,
     Actor,
@@ -34,10 +35,118 @@ from hoh_control_plane.service._common import (
 # Evidence ref that marks a job as a pure QA capability review for one agent
 # (``capability_review:<agent_id>``); capability approval closes only those.
 CAPABILITY_REVIEW_MARK = "capability_review:"
+# Evidence ref that groups QA failures by machine and class
+# (``qa_machine:<machine fingerprint>:<failure_class>``). While a job carrying
+# it is open, that machine is quarantined from QA offers and claims.
+QA_MACHINE_MARK = "qa_machine:"
+# The failure classes grouped per machine; any other class is the ticket's own.
+QA_MACHINE_FAILURE_CLASSES = frozenset({"infrastructure"})
+_QA_MACHINE_JOB_REF_LIMIT = 100
 
 
 class PlannerJobMixin:
     """Planner job queue and intervention outbox."""
+
+    def _qa_machine_job(
+        self, connection: Connection, project_id: str, pattern: str
+    ) -> dict[str, Any] | None:
+        return _row(connection.execute(
+            """
+            SELECT * FROM planner_jobs
+            WHERE project_id = ? AND status IN ('READY', 'IN_PROGRESS') AND evidence_refs LIKE ?
+            ORDER BY created_at ASC LIMIT 1
+            """,
+            (project_id, pattern),
+        ).fetchone())
+
+    def _qa_machine_quarantined(
+        self, connection: Connection, project_id: str, machine_id: str | None
+    ) -> bool:
+        """True while an open machine failure job names this QA machine."""
+        fingerprint = machine_fingerprint(machine_id)
+        if fingerprint is None:
+            return False
+        return self._qa_machine_job(
+            connection, project_id, f'%"{QA_MACHINE_MARK}{fingerprint}:%'
+        ) is not None
+
+    def _group_qa_machine_failure(
+        self,
+        connection: Connection,
+        actor: Actor,
+        project_id: str,
+        ticket: dict[str, Any],
+        failure_class: str,
+        evidence_refs: list[str],
+    ) -> dict[str, Any] | None:
+        """Route a QA infrastructure failure to its machine, not to the ticket (review C3).
+
+        One broken QA machine used to block every ticket it touched. Now the
+        machine's capability approvals are revoked and one Planner job per
+        ``(machine, failure_class)`` collects the failures. Returns None when the
+        failure is not a groupable QA one; ``planner_job`` None when this is the
+        machine's first failure, which the caller records on this ticket with
+        ``mark`` in its evidence; otherwise the group job, already updated, and
+        the caller returns the ticket to QA instead of blocking it.
+        """
+        if actor.role is not Role.QA or failure_class not in QA_MACHINE_FAILURE_CLASSES:
+            return None
+        presence = _row(connection.execute(
+            "SELECT machine_id FROM agent_presence WHERE agent_id = ?", (actor.agent_id,)
+        ).fetchone())
+        fingerprint = machine_fingerprint((presence or {}).get("machine_id"))
+        if fingerprint is None:
+            return None
+        mark = f"{QA_MACHINE_MARK}{fingerprint}:{failure_class}"
+        self._revoke_qa_machine_approvals(connection, actor, project_id, fingerprint)
+        job = self._qa_machine_job(connection, project_id, f'%"{mark}"%')
+        if (
+            job is None
+            or job["ticket_id"] == ticket["ticket_id"]
+            or ticket["status"] != TicketStatus.QA_IN_PROGRESS.value
+        ):
+            return {"mark": mark, "planner_job": None}
+        merged = list(dict.fromkeys(
+            [*job["evidence_refs"], f"ticket:{ticket['ticket_id']}", *evidence_refs]
+        ))[:_QA_MACHINE_JOB_REF_LIMIT]
+        connection.execute(
+            "UPDATE planner_jobs SET evidence_refs = ?, updated_at = ? WHERE planner_job_id = ?",
+            (json.dumps(merged), _iso(), job["planner_job_id"]),
+        )
+        self._event(
+            connection, actor, project_id, "planner_job.evidence_added", "planner_job",
+            job["planner_job_id"], ticket["version"],
+            {"ticket_id": ticket["ticket_id"], "job_type": job["job_type"], "grouped_by": mark},
+        )
+        refreshed = self._planner_job(connection, job["planner_job_id"])
+        self._record_planner_intervention(
+            connection, actor, refreshed, event_class=PlannerJobType(refreshed["job_type"]),
+            severity=InterventionSeverity.NORMAL, artifact_commit=None,
+        )
+        return {"mark": mark, "planner_job": refreshed}
+
+    def _return_ticket_to_qa(
+        self, connection: Connection, actor: Actor, project_id: str,
+        ticket: dict[str, Any], planner_job: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Release a QA lease lost to a machine fault and offer the ticket again."""
+        timestamp = _iso()
+        connection.execute(
+            "DELETE FROM leases WHERE ticket_id = ? AND role = ?", (ticket["ticket_id"], Role.QA.value)
+        )
+        next_version = _transition_ticket(
+            connection, ticket["ticket_id"], actor=actor, expected_version=ticket["version"],
+            from_statuses=(TicketStatus.QA_IN_PROGRESS,),
+            changes={"status": TicketStatus.QA_READY, "updated_at": timestamp},
+        )
+        self._event(
+            connection, actor, project_id, "qa.machine_failure_grouped", "ticket",
+            ticket["ticket_id"], next_version,
+            {"planner_job_id": planner_job["planner_job_id"], "next_role": "qa"},
+        )
+        returned = self._ticket(connection, ticket["ticket_id"])
+        self._queue_ticket(connection, actor, project_id, returned)
+        return returned
 
     def _open_planner_job(
         self,
@@ -309,6 +418,7 @@ class PlannerJobMixin:
             ).fetchone())
             deduplicated = context is not None
             timestamp = _iso()
+            machine_mark = None
             if context is None:
                 if TicketStatus(ticket["status"]) in CLOSED_TICKET_STATUSES or (
                     ticket["status"] == TicketStatus.DONE.value
@@ -332,6 +442,26 @@ class PlannerJobMixin:
                 context = self._one(
                     connection, "SELECT * FROM context_entries WHERE entry_id = ?", (entry_id,)
                 )
+                grouped = self._group_qa_machine_failure(
+                    connection, actor, project_id, ticket, failure_class,
+                    [f"context:{entry_id}", source_ref, *evidence_refs],
+                )
+                if grouped is not None and grouped["planner_job"] is not None:
+                    return {
+                        "ticket": self._return_ticket_to_qa(
+                            connection, actor, project_id, ticket, grouped["planner_job"]
+                        ),
+                        "failure_context": context,
+                        "planner_job": grouped["planner_job"],
+                        "deduplicated": False,
+                        "grouped_by_machine": True,
+                        "next_action": (
+                            "this QA machine is quarantined until Planner resolves its "
+                            "infrastructure job; stop claiming here and wait_for_planner_direction"
+                        ),
+                    }
+                if grouped is not None:
+                    machine_mark = grouped["mark"]
                 if ticket["status"] not in {
                     TicketStatus.BLOCKED.value,
                     TicketStatus.REWORK.value,
@@ -364,6 +494,7 @@ class PlannerJobMixin:
                 job_type=job_type,
                 summary=summary,
                 evidence_refs=list(dict.fromkeys([
+                    *([machine_mark] if machine_mark else []),
                     f"context:{context['entry_id']}", source_ref, *evidence_refs
                 ])),
                 context_entry_id=context["entry_id"],
