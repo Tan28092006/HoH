@@ -5,6 +5,21 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+
+# .venv-hoh is shared by every session on this machine, and `pip install -e`
+# points it at whichever checkout ran it. Run from a ticket worktree, it left the
+# shared hoh-* console scripts running that worktree's (old) code. Only the main
+# checkout on the main branch may install into it.
+$mainCheckout = "D:\HoH"
+if (-not [string]::Equals($repoRoot.TrimEnd('\'), $mainCheckout, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw ("Refusing to bootstrap from $repoRoot. Only $mainCheckout on branch main installs into the " +
+        "shared .venv-hoh; a worktree runs tests with scripts\test.ps1, which puts its own src first.")
+}
+$branch = (& git -C $repoRoot rev-parse --abbrev-ref HEAD 2>$null)
+if ($LASTEXITCODE -ne 0 -or $branch -ne "main") {
+    throw "Refusing to bootstrap from $repoRoot on branch '$branch'. Check out main in $mainCheckout first."
+}
+
 $venvPath = Join-Path $repoRoot ".venv-hoh"
 $venvPython = Join-Path $venvPath "Scripts\python.exe"
 

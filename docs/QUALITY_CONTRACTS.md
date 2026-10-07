@@ -1,5 +1,10 @@
 # Quality contracts
 
+> Snapshot 2026-09-14, not kept in step with the code. QA capability approval is
+> now granted by the server from host preflight evidence, and risk tiers and
+> maker/checker model families were added later; [ARCHITECTURE.md](ARCHITECTURE.md)
+> and the code win where they disagree.
+
 HoH maps the Harness-of-Harness development document to durable project and
 ticket state. This keeps the same quality loop when Planner, Developer and QA
 run in separate chats or on separate machines.

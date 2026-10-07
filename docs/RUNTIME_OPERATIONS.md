@@ -1,6 +1,6 @@
 # Native worker supervision and recovery
 
-## Runner contract in 0.3.5
+## Runner contract
 
 The supervised host admits at most one worker that runs a project suite at a
 time: a QA run, or a merge whose integration gate executes the suite. A merge
@@ -36,9 +36,9 @@ decision. Planner context revisions invalidate old write snapshots even when the
 ticket's integer version did not change. Source main and the deployed release
 must agree before provisioning further worktrees.
 
-This release adds a bounded execution host, private QA Git snapshots, durable
-merge intents and operator commands. It is the first operational recovery stage;
-it does not claim full industrial availability, hostile-code isolation or HA.
+The bounded execution host, private QA Git snapshots, durable merge intents and
+operator commands are an operational recovery layer. They do not claim full
+industrial availability, hostile-code isolation or HA.
 
 ## Windows without a VM
 
@@ -55,14 +55,23 @@ untrusted code. Externally launched chats are not owned by this supervisor.
 
 ## Service-host setup
 
-Install the release on the service host, back up its database, and stop old workers
-after they finish. Preserve existing worktrees and unfinished work. Added database
-tables are additive. Keep every service process on the same database/artifact root.
+Install a release on the service host, and stop old workers after they finish.
+Preserve existing worktrees and unfinished work. Serving processes refuse a
+database older than their schema; `hoh-ops migrate` is the only upgrade path and
+takes a backup first (on this machine `deploy/desktop/upgrade_local.py` runs it).
+Keep every service process on the same database/artifact root.
 
-PowerShell example for a local SQLite pilot:
+On this machine the desktop host already runs the supervisor, scheduler and MCP
+on the authoritative database; never start a second supervisor against it. The
+authoritative path is `database_path` in `D:/HoH-service/config/settings.json`
+([LOCAL_RUNTIME.md](LOCAL_RUNTIME.md#where-things-are)). For a development
+instance use `.\scripts\start-supervisor.ps1`, which runs on the dev database.
+
+PowerShell example for a separate single-host SQLite pilot:
 
 ```powershell
-$env:HOH_DATABASE_PATH = 'D:\HoH-service\data\control-plane.db'
+# The absolute database path every process of that host uses.
+$env:HOH_DATABASE_PATH = '<absolute path to that host''s control-plane.db>'
 $env:HOH_WORKER_MODE = 'supervised'
 hoh-supervisor --max-workers 2 --worker-timeout 2100
 ```

@@ -41,7 +41,8 @@ def prepare_desktop_start(root: Path):
         from hoh_control_plane.store import SQLiteStore
         config = json.loads((root / 'config/settings.json').read_text(encoding='utf-8'))
         store = SQLiteStore(Path(config['database_path']))
-        store.initialize()
+        # The desktop host serves this database; it never upgrades it.
+        store.initialize(allow_migration=False)
         set_paused(ControlPlaneService(store), False, reason='Desktop reopened after its requested shutdown')
     marker.unlink()
 

@@ -52,6 +52,69 @@ def test_entry_router_stays_within_budget(name: str, budget: int) -> None:
     )
 
 
+def test_the_entry_router_records_no_live_numbers() -> None:
+    """AGENTS.md said "1167 passed ... on 2026-10-05" and "about 5 minutes" while
+    forbidding live state; a baseline comes from running unchanged main."""
+    text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    live = re.findall(
+        r"\b\d+ (?:passed|skipped|failed)\b|\b20\d\d-\d\d-\d\d\b|\b\d+(?:\.\d+)? ?min(?:ute)?s?\b"
+        r"|coverage \d+%",
+        text,
+    )
+    assert not live, f"AGENTS.md records live numbers: {live}"
+    assert "unchanged `main`" in text
+
+
+def test_the_enforced_invariants_claim_no_priority_cap() -> None:
+    """The server has no cap on Planner priorities; the rule lives in the Planner skill."""
+    text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    enforced = text.split("## Protocol invariants", 1)[1].split("\n## ", 1)[0]
+    assert "The service enforces these" in enforced
+    assert "priorit" not in enforced.lower()
+    assert "at most three active priorities" in (
+        ROOT / "skills" / "hoh-planner" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+
+DATABASE_ASSIGNMENT = re.compile(r"HOH_DATABASE_PATH\s*=\s*['\"]?([^'\"\s`]+)")
+# Databases that look plausible but are not the authoritative one (LOCAL_RUNTIME.md).
+WRONG_DATABASES = ("d:/hoh-service/data/", "control_plane.db")
+
+
+@pytest.mark.parametrize("document", _documents(), ids=lambda p: p.relative_to(ROOT).as_posix())
+def test_no_document_points_a_component_at_a_wrong_database(document: Path) -> None:
+    """RUNTIME_OPERATIONS.md once told operators to start a supervisor on D:/HoH-service/data."""
+    wrong = []
+    for value in DATABASE_ASSIGNMENT.findall(document.read_text(encoding="utf-8")):
+        normalized = value.replace("\\", "/").lower()
+        absolute = re.match(r"^([a-z]:/|/|<|\$)", normalized)
+        if not absolute or any(marker in normalized for marker in WRONG_DATABASES):
+            wrong.append(value)
+    assert not wrong, f"{document.relative_to(ROOT)} sets HOH_DATABASE_PATH to {wrong}"
+
+
+def test_runtime_operations_is_not_a_release_note() -> None:
+    text = (ROOT / "docs" / "RUNTIME_OPERATIONS.md").read_text(encoding="utf-8")
+    assert "This release" not in text
+    assert not re.search(r"^#+ .*\b0\.\d+\.\d+", text, re.MULTILINE), "no version-scoped headings"
+
+
+def test_the_architecture_service_table_lists_every_mixin_module() -> None:
+    """ARCHITECTURE.md said "25 mixins" when there were 26; it lists them instead."""
+    text = (ROOT / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    service = ROOT / "src" / "hoh_control_plane" / "service"
+    modules = sorted(p.name for p in service.glob("*.py") if not p.name.startswith("_"))
+    missing = [name for name in modules if f"| `{name}` |" not in text]
+    assert not missing, f"ARCHITECTURE.md's service table omits {missing}"
+    assert not re.search(r"\b\d+\s+mixins\b|\b\d+ distinct cross-mixin\b", text), "no rotting counts"
+
+
+def test_the_readme_does_not_call_the_specification_the_architecture() -> None:
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "full architecture" not in text.lower()
+    assert "docs/ARCHITECTURE.md" in text
+
+
 def _indexed_from(index: Path) -> set[str]:
     """Documents an index links, as paths relative to docs/."""
     docs = (ROOT / "docs").resolve()

@@ -96,9 +96,14 @@ held back.
 
 ```sh
 hoh-mcp        # the MCP endpoint agents connect to
+hoh-supervisor # runs the queued worker jobs (worktrees, submissions, QA runs, merges)
 hoh-scheduler  # lease recovery, work dispatch, and wakeup delivery
 hoh-api        # the operator UI and REST surface (optional)
 ```
+
+`HOH_WORKER_MODE` defaults to `supervised`: `hoh-mcp` only queues jobs, and
+without `hoh-supervisor` they stay queued. Run exactly one supervisor per
+artifact root ([RUNTIME_OPERATIONS.md](../docs/RUNTIME_OPERATIONS.md)).
 
 `hoh-scheduler` is not optional in a real deployment. It is what recovers an
 expired lease, what dispatches queued work, and what knocks on an agent to say
@@ -107,10 +112,14 @@ nothing is ever recovered from a crashed agent.
 
 ## Upgrading
 
-Run the new version against the same database. `initialize()` creates any table
-that does not exist and adds any column that does not exist, on both backends:
-the list of added columns is declared once in `store.py` and applied by whichever
-store is in use, so an upgrade is not a thing you do by hand.
+Serving processes (`hoh-mcp`, `hoh-api`, `hoh-scheduler`, `hoh-supervisor`)
+refuse a database an older release wrote, untouched, with
+`schema_upgrade_required`; none of them upgrades it. Stop every process that
+uses the database, install the new version, then run `hoh-ops migrate`. For
+SQLite it first writes an integrity-checked `sqlite3.backup()` copy
+(`--backup-dir` chooses where); for PostgreSQL take your own backup and pass
+`--external-backup`. Added tables, columns and indexes are declared in
+`store_migrations.py` and applied by whichever store is in use.
 
 Two migrations are SQLite-only by design. They rebuild tables to repair foreign
 keys and CHECK constraints that only ever went wrong in SQLite, because it

@@ -29,7 +29,7 @@ See the [production audit](docs/PRODUCTION_AUDIT.md) for measured improvements a
 remaining scale limits, [agent kit setup](docs/AGENT_KIT.md) to onboard a new chat,
 and [browser QA](docs/UI_QA.md) for candidate UI acceptance.
 
-The full architecture is in [HOH_MULTI_AGENT_CONTROL_PLANE.md](./HOH_MULTI_AGENT_CONTROL_PLANE.md).
+How the code is organized, and where each invariant is enforced, is in [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md). The original product specification, which also contains requirements that were never built, is [HOH_MULTI_AGENT_CONTROL_PLANE.md](./HOH_MULTI_AGENT_CONTROL_PLANE.md).
 
 ## Local quick start
 
@@ -48,7 +48,15 @@ dispatch queued work to live agents:
 .\scripts\start-scheduler.ps1
 ```
 
-Open <http://127.0.0.1:8765>. The local runner enables local identity headers and seeds a demo project. To attach the role-scoped MCP to separate Codex or Claude agents, follow [docs/LOCAL_SETUP.md](./docs/LOCAL_SETUP.md).
+In a third window, start the supervisor. Workers run in supervised mode by
+default, so without it queued worktree provisioning, candidate submissions, QA
+test runs and merges stay `QUEUED`:
+
+```powershell
+.\scripts\start-supervisor.ps1
+```
+
+Open <http://127.0.0.1:8775>. These scripts start a development instance on its own database, `D:\HoH\tmp\dev\control-plane.db`, and refuse the real one under `D:\HoH\data` and the installed host's ports; they enable local identity headers and seed nothing unless `start-dashboard.ps1 -SeedDemo` asks for the demo project. To attach the role-scoped MCP to separate Codex or Claude agents, follow [docs/LOCAL_SETUP.md](./docs/LOCAL_SETUP.md).
 
 For how a long-lived Codex or Claude Code role worker waits for hand-offs,
 see [docs/ROLE_WAKEUPS.md](./docs/ROLE_WAKEUPS.md).
@@ -70,7 +78,7 @@ Start with the [documentation map](docs/README.md) and the
 Each agent gets its own stdio MCP process and role identity. Example environment for a Developer:
 
 ```text
-HOH_DATABASE_PATH=D:\HoH\data\control-plane.db
+HOH_DATABASE_PATH=D:\HoH\tmp\dev\control-plane.db
 HOH_AGENT_ID=dev-agent-03
 HOH_AGENT_ROLE=developer
 HOH_PROJECT_IDS=demo
@@ -99,7 +107,7 @@ See [deployment](docs/DEPLOYMENT.md).
 
 ## REST API
 
-Interactive API documentation is available at <http://127.0.0.1:8765/docs>.
+Interactive API documentation is available at <http://127.0.0.1:8775/docs> on the development instance.
 
 Local mode accepts `X-HOH-Agent-Id` and `X-HOH-Role` headers. Never expose local mode on a network interface.
 

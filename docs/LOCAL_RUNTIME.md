@@ -27,9 +27,16 @@ neither are the `accidental-diagnostic-*` and `*-before-*` files in
 - **Never reset, recreate or migrate the authoritative database** as part of an
   upgrade or a test. Use the service's supported lifecycle for state changes.
   Upgrades back up configuration under `D:/HoH-service/config/upgrade-*`.
+  Serving processes (`hoh-mcp`, `hoh-api`, scheduler, supervisor, desktop host)
+  refuse a database older than their schema instead of upgrading it; the only
+  upgrade path is `hoh-ops migrate`, which `upgrade_local.py` runs after taking
+  its backup.
 - **Never run a component without the host environment.** With no
-  `HOH_DATABASE_PATH` a component creates a stray database relative to its
-  working directory, and agents then read an empty board.
+  `HOH_DATABASE_PATH` (or `HOH_DATABASE_URL`) a component now refuses to start;
+  older builds created a stray database relative to the working directory.
+- **Never point a dev script at the real database.** `scripts/start-*.ps1` use
+  `D:/HoH/tmp/dev/control-plane.db` and port 8775 by default, and refuse paths
+  under `D:/HoH/data` or `D:/HoH-service` and the installed ports 8765 and 8931.
 - **Never put installation or client credentials** in source, logs, release
   archives or this repository.
 - **Never delete candidate worktrees, evidence or historical records**, including
@@ -66,14 +73,27 @@ acting; earlier chat context is historical.
 Changing source does not update the installed service. Build and upgrade from an
 isolated branch or worktree based on the deployed commit, with
 `deploy/desktop/package_local.py` and `deploy/desktop/upgrade_local.py`. The
-0.3.23 upgrade restart once failed with no captured cause and succeeded from the
+upgrade backs up the database, installs the wheel, then runs
+`python -m hoh_control_plane.operations migrate --database <db> --backup-dir <upgrade folder>`
+(`hoh-ops migrate`), which writes a second `sqlite3.backup()` copy before raising
+the schema version. The 0.3.23 upgrade restart once failed with no captured cause and succeeded from the
 desktop icon; the validation record describes it.
 
 ## Development environment traps
 
-- `D:/HoH/.venv-hoh` is the working interpreter. Its editable install points at
-  an old worktree (`tmp/planner-merge-handoff`), so tests must run with
-  `PYTHONPATH` naming the checkout under test. `scripts/test.ps1` does this, and
-  `tests/conftest.py` refuses to run against any other source tree.
+- `D:/HoH/.venv-hoh` is the working interpreter, shared by every session. Its
+  editable install may point at an old worktree (it pointed at
+  `tmp/planner-merge-handoff`, running 0.3.11 code, until reinstalled), so tests
+  must run with `PYTHONPATH` naming the checkout under test. `scripts/test.ps1`
+  does this, and `tests/conftest.py` refuses to run against any other source tree.
+  The venv's `hoh-*` console scripts still run whatever the install points at.
+  Check with `D:/HoH/.venv-hoh/Scripts/python.exe -c "import hoh_control_plane; print(hoh_control_plane.__file__)"`.
+- `scripts/bootstrap-local.ps1` refuses to run from any checkout other than
+  `D:/HoH` on branch `main`. To repoint the venv: make sure no HoH process or
+  test run is using `.venv-hoh` (the installed service uses its own
+  `D:/HoH-service/.venv`), then from `D:/HoH` on `main` run
+  `.\scripts\bootstrap-local.ps1`. It reruns `pip install -e "D:\HoH[dev]"`; the
+  check above should then print a path under `D:\HoH\src`. Never run it from a
+  ticket worktree.
 - `D:/HoH/.venv` and a bare `python` resolve to an msys interpreter without
   pytest; the system Python lacks `pytest-cov`. Neither can run the suite.

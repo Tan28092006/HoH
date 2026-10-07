@@ -2,7 +2,14 @@
 
 This setup runs one shared control-plane database on a trusted local machine. Each
 Planner, Developer or QA client connects to the shared HTTP MCP endpoint, and all use the
-same SQLite database at `D:\HoH\data\control-plane.db`.
+same SQLite database. On this machine that database is `D:\HoH\data\control-plane.db`,
+served by the installed host in `D:\HoH-service` ([LOCAL_RUNTIME.md](LOCAL_RUNTIME.md)).
+
+The scripts in steps 1 and 2 start a separate **development instance**. It uses
+`D:\HoH\tmp\dev\control-plane.db` (override with `-DatabasePath` or
+`HOH_DEV_DATABASE_PATH`) and port 8775, and refuses any path under `D:\HoH\data`
+or `D:\HoH-service` and the installed host's ports 8765 and 8931. It never
+touches the real database.
 
 ## 1. Bootstrap once
 
@@ -14,7 +21,10 @@ cd D:\HoH
 ```
 
 This creates `.venv-hoh` and installs the local package. It does not add credentials
-or modify any agent configuration.
+or modify any agent configuration. It runs only from `D:\HoH` on branch `main`,
+because the venv is shared and an editable install from a worktree would point
+every session's `hoh-*` scripts at that worktree; see
+[LOCAL_RUNTIME.md](LOCAL_RUNTIME.md#development-environment-traps).
 
 ## 2. Start the read-only dashboard
 
@@ -23,11 +33,12 @@ cd D:\HoH
 .\scripts\start-dashboard.ps1
 ```
 
-Open <http://127.0.0.1:8765>. The dashboard remains local (`127.0.0.1`), seeds
-the `demo` project when empty, and shows Jira-like ticket progress plus redacted
-Agent activity. Keep this terminal running while you want the dashboard.
+Open <http://127.0.0.1:8775>. The dashboard remains local (`127.0.0.1`) and
+shows Jira-like ticket progress plus redacted Agent activity. Keep this terminal
+running while you want the dashboard.
 
-Use `-NoSeedDemo` only when a Planner will create the first project itself.
+It seeds nothing by default. Add `-SeedDemo` to put the `demo` project into the
+dev database when it is empty.
 
 In a second PowerShell window, start the local lease scheduler:
 
@@ -41,6 +52,19 @@ It runs every 30 seconds by default. A Developer lease that expires returns to
 hand-offs to every matching online agent (up to the current fan-out limit).
 Use `-Once` for a one-shot maintenance pass or `-IntervalSeconds 60` to change
 the interval.
+
+In a third PowerShell window, start the supervisor:
+
+```powershell
+cd D:\HoH
+.\scripts\start-supervisor.ps1
+```
+
+`HOH_WORKER_MODE` defaults to `supervised`: MCP only queues worktree
+provisioning, candidate submissions, QA test runs and merges, and the supervisor
+runs them. Without it every such job stays `QUEUED`. `-MaxWorkers` (default 2)
+and `-WorkerTimeoutSeconds` (default 2100) bound it; see
+[RUNTIME_OPERATIONS.md](RUNTIME_OPERATIONS.md).
 
 ## 3. Attach exactly one role to each agent
 

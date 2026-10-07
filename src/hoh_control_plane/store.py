@@ -13,11 +13,13 @@ from hoh_control_plane.store_migrations import (  # noqa: F401  (re-exported)
     SCHEMA_VERSION,
     SQLiteRebuildMigrations,
     SchemaMigrationError,
+    SchemaUpgradeRequired,
     SchemaVersionError,
     apply_additive_columns,
     backfill_experience_scopes,
     read_schema_version,
     record_schema_version,
+    require_current_schema_version,
     require_supported_schema_version,
 )
 from hoh_control_plane.store_schema import (  # noqa: F401  (re-exported)
@@ -230,15 +232,25 @@ class SQLiteStore(SQLiteRebuildMigrations):
         # been; a store that is not a file has to be told.
         self.artifact_root = self.path.parent
 
-    def initialize(self) -> None:
+    def initialize(self, *, allow_migration: bool = True) -> None:
+        """Create the schema, or bring an existing database up to this build.
+
+        ``allow_migration=False`` is how a serving process opens its database: a
+        new, empty file is still created from the current schema, but a database
+        an older release wrote is refused untouched rather than upgraded in
+        place. Only the explicit ``hoh-ops migrate`` path, which takes a backup
+        first, passes True against a real database.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as connection:
             # A database a newer release upgraded is refused before anything,
             # even a pragma, touches it.
             columns_of = self._existing_columns(connection)
-            require_supported_schema_version(
-                read_schema_version(connection, columns_of), str(self.path)
-            )
+            found = read_schema_version(connection, columns_of)
+            require_supported_schema_version(found, str(self.path))
+            # So is one an older release wrote, when this caller may not migrate.
+            if not allow_migration and self._has_tables(connection):
+                require_current_schema_version(found, str(self.path))
             # WAL allows many MCP reader processes and one short-lived writer to coexist.
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = NORMAL")
@@ -295,6 +307,13 @@ class SQLiteStore(SQLiteRebuildMigrations):
             }
 
         return columns_of
+
+    @staticmethod
+    def _has_tables(connection: sqlite3.Connection) -> bool:
+        """Whether this file already holds a database rather than being new."""
+        return connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' LIMIT 1"
+        ).fetchone() is not None
 
     @contextmanager
     def connection(self, *, immediate: bool = False) -> Iterator[StoreConnection]:

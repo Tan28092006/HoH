@@ -1,5 +1,9 @@
 # Windows desktop operator controls (0.3.4)
 
+> Snapshot 2026-09-13 at 0.3.4, not kept in step with the code. For the host
+> installed on this machine read [LOCAL_RUNTIME.md](../../docs/LOCAL_RUNTIME.md);
+> for supervision and recovery read [RUNTIME_OPERATIONS.md](../../docs/RUNTIME_OPERATIONS.md).
+
 These launcher files describe the existing single-user installation at
 `D:\HoH-service`; they are not a universal Windows installer. The Python package
 provides `desktop_control.create_desktop_app` and `local_agent` separately from
