@@ -5,6 +5,7 @@ from dataclasses import replace
 
 from hoh_control_plane.service.qa import _INFRASTRUCTURE_OUTCOMES
 from hoh_control_plane.service.run_guardrails import MergeQueueGuard
+from hoh_control_plane.uncancellable import uncancellable
 from hoh_control_plane.service._common import (
     _audit_event_has_field,
     require_snapshot_id,
@@ -997,22 +998,25 @@ class IntegrationMixin:
         except DomainError as error:
             return self.fail_queued_merge(merge_job_id, str(error))
         try:
-            if candidate.get("derived_from"):
-                # A server-rebased tree lands only by compare-and-set: Git
-                # refuses the ref write if main moved since the gate's base.
-                merged, mainline_commit = self.git_worktrees.cas_fast_forward(
-                    repository_path=repository["repository_path"],
-                    default_branch=project["default_branch"],
-                    expected_old_commit=candidate["base_commit"],
-                    new_commit=candidate["commit_sha"],
-                )
-            else:
-                merged, mainline_commit = self.git_worktrees.fast_forward_default_branch(
-                    repository_path=repository["repository_path"],
-                    default_branch=project["default_branch"],
-                    expected_base_commit=candidate["base_commit"],
-                    candidate_commit=candidate["commit_sha"],
-                )
+            # From here the shared checkout's branch and tree move together;
+            # the supervisor neither cancels nor times out this phase (R6/G14).
+            with uncancellable(self.store.artifact_root, "merge", merge_job_id):
+                if candidate.get("derived_from"):
+                    # A server-rebased tree lands only by compare-and-set: Git
+                    # refuses the ref write if main moved since the gate's base.
+                    merged, mainline_commit = self.git_worktrees.cas_fast_forward(
+                        repository_path=repository["repository_path"],
+                        default_branch=project["default_branch"],
+                        expected_old_commit=candidate["base_commit"],
+                        new_commit=candidate["commit_sha"],
+                    )
+                else:
+                    merged, mainline_commit = self.git_worktrees.fast_forward_default_branch(
+                        repository_path=repository["repository_path"],
+                        default_branch=project["default_branch"],
+                        expected_base_commit=candidate["base_commit"],
+                        candidate_commit=candidate["commit_sha"],
+                    )
             return self._complete_queued_merge(merge_job_id, merged, mainline_commit)
         except DomainError as error:
             # Git may already have changed. Preserve the intent and reconcile
@@ -1073,6 +1077,12 @@ class IntegrationMixin:
             return self._merge_needs_attention(merge_job_id, 'Repository or candidate configuration changed')
         from pathlib import Path
         path = Path(intent['repository_path'])
+        # A branch move a killed worker left half done is finished first, so the
+        # tree it was carrying forward is not mistaken for uncommitted work.
+        try:
+            self.git_worktrees.recover_interrupted_fast_forward(str(path))
+        except DomainError as error:
+            return self._merge_needs_attention(merge_job_id, str(error))
         if retirement is None and self.git_worktrees._git(path, 'status', '--porcelain').stdout.strip():
             return self._merge_needs_attention(merge_job_id, 'Repository has uncommitted work; it was preserved')
         head = self.git_worktrees._resolve_commit(path, 'refs/heads/' + intent['default_branch'])

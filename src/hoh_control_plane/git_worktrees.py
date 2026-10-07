@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
 import subprocess
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -18,6 +20,18 @@ from hoh_control_plane.managed_process import run_managed
 
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 _GIT_COMMAND_TIMEOUT_SECONDS = 15
+# The program that runs Git. A list so a test can put a fake Git in front.
+_GIT_PROGRAM: tuple[str, ...] = ("git",)
+# Moving the shared checkout's branch and then its working tree is one side
+# effect that must finish once started (R6/G14). The 15-second budget above
+# would kill it halfway; this one only bounds a Git that truly hangs.
+_FAST_FORWARD_TIMEOUT_SECONDS = 900
+# Git holds index.lock for the duration of one command. Older than this, no
+# live Git owns it; younger, another process may, and HoH refuses to move.
+_STALE_INDEX_LOCK_SECONDS = 600
+# A marker in the shared checkout's Git directory that records a branch move
+# in flight. Present on entry means an earlier move was interrupted.
+FAST_FORWARD_MARKER = "hoh-fast-forward.json"
 
 CLEAN_CHECKPOINT = "clean_checkpoint"
 DIRTY = "dirty"
@@ -750,11 +764,19 @@ class GitWorktreeManager:
         expected_base_commit: str,
         candidate_commit: str,
     ) -> tuple[bool, str]:
-        """Fast-forward the checked-out default branch only when its base is unchanged."""
+        """Fast-forward the checked-out default branch only when its base is unchanged.
+
+        The caller holds ``repository_lock``. The branch moves by compare-and-set
+        (``update-ref <ref> <candidate> <base>``) and only then is the working
+        tree carried forward; see ``_move_branch`` for why that order and that
+        budget. A move an earlier process left half done is finished first.
+        """
         repository = Path(self.validate_repository(repository_path))
+        self.recover_interrupted_fast_forward(str(repository))
         active_branch = self._git(repository, "branch", "--show-current").stdout.strip()
         if active_branch != default_branch:
             raise ValidationError("Repository default branch is not checked out for integration")
+        self._clear_stale_index_lock(repository)
         if self._git(repository, 'status', '--porcelain').stdout.strip():
             raise ValidationError('Repository must be clean before integration')
         current = self._resolve_commit(repository, f"refs/heads/{default_branch}")
@@ -762,10 +784,143 @@ class GitWorktreeManager:
         candidate = self._resolve_commit(repository, candidate_commit)
         if current != expected_base:
             return False, current
-        merged = self._git(repository, "merge", "--ff-only", candidate, check=False)
-        if merged.returncode != 0:
+        if not self._is_ancestor(repository, expected_base, candidate):
             raise ValidationError("Candidate cannot fast-forward the default branch")
-        return True, candidate
+        return self._move_branch(
+            repository, f"refs/heads/{default_branch}", expected_base, candidate,
+            checked_out=True, message="hoh: fast-forward to candidate")
+
+    def _git_dir(self, repository: Path) -> Path:
+        """The checkout's own Git directory, where its index and index.lock live."""
+        return Path(self._git(repository, "rev-parse", "--absolute-git-dir").stdout.strip())
+
+    def _move_branch(
+        self, repository: Path, ref: str, old: str, new: str, *, checked_out: bool, message: str,
+    ) -> tuple[bool, str]:
+        """Compare-and-set ``ref`` from ``old`` to ``new``, then sync the working tree.
+
+        The ref write is atomic in Git (a lockfile renamed into place), so it
+        either happened or it did not. The marker written before it says a move
+        is in flight: if this process dies after the ref moved but before the
+        working tree caught up, ``recover_interrupted_fast_forward`` sees the
+        marker and finishes the sync instead of reporting a dirty checkout.
+        Both steps use the long budget, never the 15-second one.
+        """
+        marker = self._git_dir(repository) / FAST_FORWARD_MARKER
+        marker.write_text(json.dumps({
+            "ref": ref, "old": old, "new": new, "checked_out": checked_out,
+            "started_at": time.time(),
+        }), encoding="utf-8")
+        # A refused update-ref changed nothing, so its marker goes. If Git is
+        # killed or times out instead, _git raises and the marker stays:
+        # recovery then asks the ref whether the move landed.
+        updated = self._git(repository, "update-ref", "-m", message, ref, new, old,
+                            check=False, timeout=_FAST_FORWARD_TIMEOUT_SECONDS)
+        if updated.returncode != 0:
+            marker.unlink(missing_ok=True)
+            return False, self._resolve_commit(repository, ref)
+        if checked_out:
+            self._sync_worktree(repository, old, new, recovering=False)
+        marker.unlink(missing_ok=True)
+        return True, new
+
+    def _sync_worktree(self, repository: Path, old: str, new: str, *, recovering: bool) -> None:
+        """Carry the index and working tree of a clean checkout from ``old`` to ``new``.
+
+        A two-tree ``read-tree -m -u`` is what ``merge --ff-only`` does after
+        its ref write, and it keeps anything it does not need to touch. After
+        an interruption the tree can be half-written, which read-tree refuses;
+        then only the paths this move owns (those that differ between ``old``
+        and ``new``) are rewritten, so other work in the checkout is kept.
+        """
+        self._clear_stale_index_lock(repository, interrupted=recovering)
+        synced = self._git(repository, "read-tree", "-m", "-u", old, new,
+                           check=False, timeout=_FAST_FORWARD_TIMEOUT_SECONDS)
+        if synced.returncode == 0:
+            return
+        if not recovering:
+            raise ValidationError(
+                "The default branch moved but its working tree could not be updated; "
+                "recovery will finish the update")
+        self._git(repository, "reset", "-q", new, timeout=_FAST_FORWARD_TIMEOUT_SECONDS)
+        rows = self._git(repository, "diff", "-z", "--name-status", "--no-renames", old, new,
+                         timeout=_FAST_FORWARD_TIMEOUT_SECONDS).stdout.split("\0")
+        rewrite: list[str] = []
+        root = repository.resolve()
+        for status, path in zip(rows[0::2], rows[1::2]):
+            if not path:
+                continue
+            if status == "D":
+                target = (repository / path).resolve()
+                if target.is_relative_to(root) and (target.is_file() or target.is_symlink()):
+                    target.unlink()
+            else:
+                rewrite.append(path)
+        for start in range(0, len(rewrite), 100):
+            self._git(repository, "-c", "core.hooksPath=", "checkout", new, "--",
+                      *(":(literal)" + path for path in rewrite[start:start + 100]),
+                      timeout=_FAST_FORWARD_TIMEOUT_SECONDS)
+
+    def recover_interrupted_fast_forward(self, repository_path: str) -> dict[str, object] | None:
+        """Finish a branch move an earlier process started; None when there was none.
+
+        The caller holds ``repository_lock``, so the process that wrote the
+        marker is gone. If its ref write landed, the working tree is brought
+        to the new commit; if it did not, nothing changed and the marker is
+        dropped. A ref that names neither commit was moved by someone else
+        afterwards; the tree is then left alone for an operator.
+        """
+        repository = Path(self.validate_repository(repository_path))
+        marker = self._git_dir(repository) / FAST_FORWARD_MARKER
+        if not marker.exists():
+            return None
+        try:
+            intent = json.loads(marker.read_text(encoding="utf-8"))
+            ref, old, new = intent["ref"], intent["old"], intent["new"]
+        except (OSError, ValueError, KeyError, TypeError):
+            marker.unlink(missing_ok=True)
+            return {"outcome": "unreadable_marker_dropped"}
+        current = self._resolve_commit(repository, ref)
+        checked_out = (
+            bool(intent.get("checked_out"))
+            and self._git(repository, "symbolic-ref", "-q", "HEAD", check=False).stdout.strip() == ref
+        )
+        if current == new:
+            if checked_out:
+                self._sync_worktree(repository, old, new, recovering=True)
+            outcome = "completed"
+        elif current == old:
+            # The ref never moved, and the tree is only synced after it does.
+            self._clear_stale_index_lock(repository, interrupted=True)
+            outcome = "not_started"
+        else:
+            outcome = "superseded"
+        marker.unlink(missing_ok=True)
+        return {"outcome": outcome, "ref": ref, "old": old, "new": new, "current": current}
+
+    def _clear_stale_index_lock(self, repository: Path, *, interrupted: bool = False) -> None:
+        """Remove an index.lock no live Git can own; refuse to guess about a fresh one.
+
+        Git holds index.lock for one command. ``interrupted`` means an HoH move
+        under this repository lock died mid-command, so its lock is ours to
+        clear unless it was written in the last few seconds. Otherwise only a
+        lock older than ``_STALE_INDEX_LOCK_SECONDS`` is removed; a younger one
+        belongs to a Git that may still be running, and HoH stops before
+        touching anything.
+        """
+        lock = self._git_dir(repository) / "index.lock"
+        try:
+            age = time.time() - lock.stat().st_mtime
+        except FileNotFoundError:
+            return
+        limit = 5 if interrupted else _STALE_INDEX_LOCK_SECONDS
+        if age < limit:
+            raise ValidationError(
+                "Another Git process holds the shared checkout's index.lock; "
+                "the default branch was not moved",
+                {"reason": "index_lock_busy"},
+            )
+        lock.unlink(missing_ok=True)
 
     def rebase_candidate(
         self,
@@ -827,21 +982,19 @@ class GitWorktreeManager:
         then carried from old to new with a two-tree ``read-tree``.
         """
         repository = Path(self.validate_repository(repository_path))
+        self.recover_interrupted_fast_forward(str(repository))
         ref = f"refs/heads/{default_branch}"
         old = self._resolve_commit(repository, expected_old_commit)
         new = self._resolve_commit(repository, new_commit)
         if not self._is_ancestor(repository, old, new):
             raise ValidationError("Rebased candidate does not descend from the expected mainline")
         checked_out = self._git(repository, "branch", "--show-current").stdout.strip() == default_branch
-        if checked_out and self._git(repository, 'status', '--porcelain').stdout.strip():
-            raise ValidationError('Repository must be clean before integration')
-        updated = self._git(repository, "update-ref", "-m", "hoh: land rebased candidate",
-                            ref, new, old, check=False)
-        if updated.returncode != 0:
-            return False, self._resolve_commit(repository, ref)
         if checked_out:
-            self._git(repository, "read-tree", "-m", "-u", old, new)
-        return True, new
+            self._clear_stale_index_lock(repository)
+            if self._git(repository, 'status', '--porcelain').stdout.strip():
+                raise ValidationError('Repository must be clean before integration')
+        return self._move_branch(repository, ref, old, new, checked_out=checked_out,
+                                 message="hoh: land rebased candidate")
 
     def commit_is_on_branch(
         self, *, repository_path: str, default_branch: str, commit: str
@@ -984,10 +1137,12 @@ class GitWorktreeManager:
         return path
 
     @staticmethod
-    def _git(path: Path, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    def _git(path: Path, *arguments: str, check: bool = True,
+             timeout: float | None = None) -> subprocess.CompletedProcess[str]:
         try:
-            command = ['git', '-C', str(path), *arguments]
-            result = run_managed(command, cwd=path, timeout=_GIT_COMMAND_TIMEOUT_SECONDS, output_limit=2_000_000)
+            command = [*_GIT_PROGRAM, '-C', str(path), *arguments]
+            result = run_managed(command, cwd=path, timeout=timeout or _GIT_COMMAND_TIMEOUT_SECONDS,
+                                 output_limit=2_000_000)
             if result.timed_out:
                 raise ValidationError('Git operation timed out; its process tree was stopped')
             if any(output.endswith('\n[output truncated]') for output in (result.stdout, result.stderr)):

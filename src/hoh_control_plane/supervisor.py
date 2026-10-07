@@ -19,6 +19,7 @@ from uuid import uuid4
 from hoh_control_plane.domain import Actor, Role, ConflictError
 from hoh_control_plane.managed_process import run_managed
 from hoh_control_plane.resource_lock import exclusive_file_lock
+from hoh_control_plane.uncancellable import clear as clear_uncancellable, is_uncancellable
 
 JOBS = {
     'qa': ('qa_test_jobs', 'test_run_id', 'execute_queued_project_test', 'fail_queued_project_test'),
@@ -184,6 +185,14 @@ class Supervisor:
                 VALUES (?, ?, ?, ?, 'RUNNING', ?, ?)''', (execution_id, self.runner_id, kind, identifier, now(), now()))
         return self.pool.submit(self._execute, execution_id, kind, identifier)
 
+    def _worker_command(self, kind, identifier, database):
+        arguments = [sys.executable, '-m', 'hoh_control_plane.managed_worker',
+                     '--database', database, '--kind', kind, '--job-id', identifier]
+        if self.lanes.get((kind, identifier)) == MERGE_LANE:
+            # Admitted without the test slot: the worker must not run a suite.
+            arguments.append('--without-test-slot')
+        return arguments
+
     def _execute(self, execution_id, kind, identifier):
         environment = {k: v for k, v in os.environ.items()
                        if not k.upper().startswith(('HOH_', 'COV_CORE', 'COVERAGE'))
@@ -212,17 +221,21 @@ class Supervisor:
                     return False  # A main check belongs to no lease.
                 lease = db.execute('SELECT expires_at FROM leases WHERE lease_id = ?', (job['lease_id'],)).fetchone()
             return lease is None or datetime.fromisoformat(lease['expires_at'].replace('Z', '+00:00')) <= datetime.now(UTC)
+        def holding():
+            # A worker moving the shared checkout's branch finishes that move
+            # even when the supervisor stops or the lease lapses (R6/G14).
+            return is_uncancellable(self.service.store.artifact_root, kind, identifier)
         outcome = 'worker error'
-        arguments = [sys.executable, '-m', 'hoh_control_plane.managed_worker',
-                     '--database', database, '--kind', kind, '--job-id', identifier]
-        if self.lanes.get((kind, identifier)) == MERGE_LANE:
-            # Admitted without the test slot: the worker must not run a suite.
-            arguments.append('--without-test-slot')
+        arguments = self._worker_command(kind, identifier, database)
         try:
             result = run_managed(arguments,
-                cwd=self.service.store.artifact_root, env=environment, timeout=self.worker_timeout, cancel=revoked)
+                cwd=self.service.store.artifact_root, env=environment, timeout=self.worker_timeout,
+                cancel=revoked, hold=holding)
             outcome = 'cancelled' if result.cancelled else 'timeout' if result.timed_out else f'exit {result.returncode}'
         finally:
+            # The worker is gone; a phase marker it left must not shield the
+            # job's next run.
+            clear_uncancellable(self.service.store.artifact_root, kind, identifier)
             job = self._job(kind, identifier)
             if kind == 'merge' and job and job['status'] == 'RUNNING':
                 self.service.reconcile_merge_job(ADMIN, identifier)
