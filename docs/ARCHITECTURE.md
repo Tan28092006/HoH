@@ -43,7 +43,7 @@ never above.
 | Transports and client setup | `mcp_server`, `mcp/`, `api`, `auth`, `__main__`; `agent_kit`, `local_agent`, `local_credentials`, `desktop_control`, `profile_migration`, `agent_assets/` | Translate requests to service calls; build client kits and prompts |
 | Orchestration | `event_wait`, `supervisor`, `scheduler`, `agent_wakeup`, `planner_wakeup`, `*_worker`, `seed`, `operations` | Long waits, wake-ups, worker processes |
 | Service | `service/` (`ControlPlaneService`) | All workflow rules, role checks and state transitions |
-| Adapters | `git_worktrees`, `qa_runner`, `managed_process`, `resource_lock`, `resource_probe`, `capability_probe`, `pytest_probe`, `observability` | Git, subprocesses, file locks, host probes, invocation logging |
+| Adapters | `git_worktrees`, `qa_runner`, `managed_process`, `resource_lock`, `resource_probe`, `capability_probe`, `pytest_probe`, `observability`, `uncancellable` | Git, subprocesses, file locks, host probes, invocation logging, the merge phase the supervisor must not cancel |
 | Storage | `store` (connection seam), `store_schema` (DDL), `store_migrations` (additive columns, indexes, SQLite rebuilds), `postgres_store`, `store_factory` | Schema, additive migrations, connections and transactions |
 | Domain | `domain`, `scopes`, `contracts` | Enums, `Actor`, error types, pure helpers; `contracts` holds the pydantic types and limits for structured agent writes (verdict, findings, evidence, developer claims, validation contracts) that MCP signatures, REST models and service checks all use |
 
