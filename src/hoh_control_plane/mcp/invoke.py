@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 from collections.abc import Callable
@@ -46,6 +47,26 @@ def _run_with_contention_retry(
             time.sleep(delay)
             delay *= 2
     raise AssertionError("unreachable")  # pragma: no cover
+
+
+_LOG = logging.getLogger(__name__)
+
+
+def _record_tool_call(service: ControlPlaneService, actor: Actor, **fields: Any) -> None:
+    """Write the transport activity log, best effort.
+
+    The log row is written after the call's own transaction has committed (or
+    failed). Losing it to contention or a full disk must never turn a committed
+    success into an error the agent would retry, nor replace the real error of
+    a failed call with a logging one.
+    """
+    try:
+        service.record_tool_call(actor, **fields)
+    except Exception as error:  # noqa: BLE001 - the activity log is not the outcome
+        _LOG.warning(
+            "tool-call log entry for %s was not recorded: %s",
+            fields.get("tool_name"), type(error).__name__,
+        )
 
 
 _TARGET_KEYS = (
@@ -101,7 +122,8 @@ def make_invoke(service: ControlPlaneService, actor: Actor) -> Callable[..., Any
                     run, lambda: service.request_has_committed(actor, correlation_id)
                 )
         except DomainError as error:
-            service.record_tool_call(
+            _record_tool_call(
+                service,
                 actor,
                 tool_name=tool_name,
                 project_id=project_id,
@@ -117,7 +139,8 @@ def make_invoke(service: ControlPlaneService, actor: Actor) -> Callable[..., Any
             # without an existing service-layer translation (e.g. a foreign-key
             # violation this call site has no bespoke message for), so a caller
             # never sees internal storage-engine text through MCP.
-            service.record_tool_call(
+            _record_tool_call(
+                service,
                 actor,
                 tool_name=tool_name,
                 project_id=project_id,
@@ -130,7 +153,8 @@ def make_invoke(service: ControlPlaneService, actor: Actor) -> Callable[..., Any
                 "state; retry the request."
             ) from error
         except Exception:
-            service.record_tool_call(
+            _record_tool_call(
+                service,
                 actor,
                 tool_name=tool_name,
                 project_id=project_id,
@@ -139,7 +163,8 @@ def make_invoke(service: ControlPlaneService, actor: Actor) -> Callable[..., Any
                 error_code="internal_error",
             )
             raise
-        service.record_tool_call(
+        _record_tool_call(
+            service,
             actor,
             tool_name=tool_name,
             project_id=project_id,
