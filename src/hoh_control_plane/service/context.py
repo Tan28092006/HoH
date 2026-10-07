@@ -4,6 +4,7 @@ import hashlib
 import re
 
 from hoh_control_plane.service._common import (
+    BARE_REFERENCE_KINDS,
     Actor,
     Any,
     AuthorizationError,
@@ -67,25 +68,6 @@ _TICKET_SUMMARY_FIELDS = (
 )
 _VERSION_TOKEN = re.compile(r"v[0-9]+")
 
-# The bare typed references the server writes into Planner jobs, findings,
-# events and packets, and the ctx: kind each one resolves as. context.resolve
-# accepts both spellings, so a reference copied from any tool result resolves
-# without the caller learning a second vocabulary.
-BARE_REFERENCE_KINDS: dict[str, str] = {
-    "context": "entry",
-    "finding": "finding",
-    "candidate": "candidate",
-    "ticket": "ticket",
-    "feature": "feature",
-    "experience": "experience",
-    "test_run": "test_run",
-    "qa_test_job": "test_run",
-    "qa_test_jobs": "test_run",
-    "merge_job": "merge_job",
-    "worktree_provision_job": "provision",
-    "candidate_submission_job": "submission",
-    "planner_job": "planner_job",
-}
 # Worker and Planner jobs a reference can name: table, key column, fields shown.
 _JOB_REFERENCES: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "test_run": ("qa_test_jobs", "test_run_id", (

@@ -29,7 +29,7 @@ ORCHESTRATION = {
 }
 TRANSPORTS = {
     "mcp_server", "api", "__main__", "auth",
-    "mcp", "mcp.invoke", "mcp.workers", "mcp.server", "mcp.http_app",
+    "mcp", "mcp.errors", "mcp.invoke", "mcp.workers", "mcp.server", "mcp.http_app",
     "mcp.tools", "mcp.tools.common", "mcp.tools.planner", "mcp.tools.developer",
     "mcp.tools.qa", "mcp.tools.integrator",
 }

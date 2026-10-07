@@ -170,8 +170,12 @@ def test_resolution_follows_the_packet_visibility_rules(service, actors, seeded)
 
 
 def test_unknown_or_malformed_references_are_refused_not_guessed(service, actors) -> None:
-    with pytest.raises(ValidationError):
+    # A bare server reference is a supported form (wave 8D, A2); an unknown
+    # ticket is not found, and an unknown prefix is still refused.
+    with pytest.raises(NotFoundError):
         service.resolve_context_reference(actors["developer"], "ticket:DEV-142")
+    with pytest.raises(ValidationError):
+        service.resolve_context_reference(actors["developer"], "tickets:DEV-142")
     with pytest.raises(ValidationError):
         service.resolve_context_reference(actors["developer"], "ctx:candidate:cand_0001:secrets")
     with pytest.raises(NotFoundError):

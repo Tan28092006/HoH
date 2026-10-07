@@ -177,6 +177,25 @@ CONTEXT_ENTRY_ALIASES = {
     "blocker": "developer_blocker",
 }
 
+# The bare typed references the server writes into Planner jobs, findings,
+# events and packets, and the ctx: kind each one resolves as. context.resolve
+# accepts both spellings, so a reference copied from any tool result resolves
+# without the caller learning a second vocabulary.
+BARE_REFERENCE_KINDS: dict[str, str] = {
+    "context": "entry",
+    "finding": "finding",
+    "candidate": "candidate",
+    "ticket": "ticket",
+    "feature": "feature",
+    "experience": "experience",
+    "test_run": "test_run",
+    "qa_test_job": "test_run",
+    "qa_test_jobs": "test_run",
+    "merge_job": "merge_job",
+    "worktree_provision_job": "provision",
+    "candidate_submission_job": "submission",
+    "planner_job": "planner_job",
+}
 # Where a label outside the vocabulary lands. Deliberately not a narration type,
 # so an unrecognised entry is protected from compaction rather than discarded:
 # an unknown label is a reason to keep something, not to throw it away.

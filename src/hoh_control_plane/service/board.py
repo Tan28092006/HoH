@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from hoh_control_plane import contracts
-from hoh_control_plane.service.context import BARE_REFERENCE_KINDS
 from hoh_control_plane.service._common import (
+    BARE_REFERENCE_KINDS,
     Actor,
     Any,
     Role,
