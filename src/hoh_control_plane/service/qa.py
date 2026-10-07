@@ -244,9 +244,14 @@ class QaMixin:
             )
         artifact = (self.project_tests.evidence_root / relative).resolve()
         if not artifact.is_relative_to(self.project_tests.evidence_root) or not artifact.is_file():
-            # Nothing on disk to prove; a supplied digest is still recorded as the
-            # QA agent's own claim about an artifact it holds elsewhere.
-            return recorded_content_digest(), CHECKSUM_CLAIMED
+            # evidence://local/ names this host's own evidence store. A reference
+            # there with no bytes behind it proves nothing and is refused, not
+            # recorded as a claim (wave 8A, R9). Evidence kept elsewhere uses
+            # another scheme and is recorded as claimed.
+            raise ValidationError(
+                "Local evidence artifact does not exist on this host",
+                {"reason": "evidence_artifact_missing", "storage_ref": storage_ref},
+            )
         actual = hashlib.sha256(artifact.read_bytes()).hexdigest()
         # Agents read digests shortened to 12 characters, so an echoed value may be
         # a prefix; it still has to identify these bytes, and the full one is kept.
@@ -832,6 +837,21 @@ class QaMixin:
             family_check = self._maker_checker_family_check(
                 connection, actor, project_id, ticket_id
             )
+            if verdict == "passed":
+                # A passed verdict is a claim that nothing observed failed. A
+                # failed or inconclusive finding next to it would park the ticket
+                # at the merge gate (unverified_qa_finding); refuse it here
+                # instead (wave 8A, R9).
+                unverified = [
+                    {"criterion": str(f.get("criterion", "")), "status": str(f.get("status", ""))}
+                    for f in findings if isinstance(f, dict) and f.get("status") != "verified"
+                ]
+                if unverified:
+                    raise ValidationError(
+                        "A passed verdict requires every finding to be verified; submit failed "
+                        "or remove the finding",
+                        {"reason": "passed_with_unverified_finding", "findings": unverified[:20]},
+                    )
             contract = {
                 item["criterion"]: item for item in (ticket.get("validation_contract") or [])
             }

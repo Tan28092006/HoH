@@ -77,6 +77,10 @@ def _blocked_candidate_with_insufficient_evidence(service, actors, seeded, tmp_p
     qa_claim = service.claim_qa(
         actors["qa"], ticket["ticket_id"], candidate["ticket"]["version"], 900
     )
+    # A local reference must name bytes this host holds (wave 8A, R9).
+    shadowed = service.project_tests.evidence_root / candidate_id / "testrun-shadowed.json"
+    shadowed.parent.mkdir(parents=True, exist_ok=True)
+    shadowed.write_text('{"termination_reason": "artifact_mismatch"}', encoding="utf-8")
     rejected = service.submit_qa_verdict(
         actors["qa"],
         ticket["ticket_id"],
