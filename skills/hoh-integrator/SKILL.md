@@ -29,6 +29,10 @@ candidate; it does not repair candidate code or bypass QA and policy gates.
 5. A successful merge creates exactly one `delivery_completed` report and next
    reconciliation. Stop; Planner determines the next increment.
 
+`self_review` refuses a claim or merge of a candidate you submitted; leave it.
+A job failing `precondition_failed:<outcome>` changed nothing in Git and keeps
+the QA verdict: do the step its message names (no rework, no Planner report).
+
 Never raw-merge, force-push, edit the candidate or reuse QA evidence after a
 SHA/base change. Drift, conflict, missing evidence or regression routes to
 Planner/Developer and fresh QA. Read [protected-merge.md](references/protected-merge.md)

@@ -24,6 +24,9 @@ For `qa.infrastructure/*`, preserve the candidate. After real remediation,
 append a Planner decision naming readiness evidence and call
 `planner.recover_candidate_for_qa` with the original failed run/finding and
 current version. Do not make product agents repair the HoH runtime.
+A job marked `qa_machine:<fingerprint>:infrastructure` groups one machine's
+failures and quarantines it (`qa_machine_quarantined`) until you resolve the
+job; resolve it only after that machine is repaired.
 
 For `delivery_completed`, resolve the ticket, candidate, merge job and actual
 mainline SHA. Update feature progress, unblock only dependencies truly satisfied,

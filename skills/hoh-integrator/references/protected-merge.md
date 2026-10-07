@@ -8,8 +8,11 @@ that gate. A green aggregate result alone is insufficient.
 Poll merge jobs; a lost acknowledgement requires state reconciliation before any
 retry. Missing async tools or stalled workers route to Planner with evidence, not
 raw Git, direct service calls, SQL or force-push. A terminal merge failure already
-blocks the ticket and creates Planner work. Report another durable tool failure
-once only when it did not create a Planner job.
+blocks the ticket and creates Planner work (`git_precondition_failed`: a dirty or
+wrongly checked-out shared checkout, nothing written, no source rework), except
+`precondition_failed:<outcome>` (barrier, lease, ticket or release evidence
+changed before Git), which keeps the ticket MERGE_READY and requeues it.
+Report another durable tool failure once only when it did not create a Planner job.
 
 If Planner retires the ticket during merge, stop and let HoH reconcile actual
 mainline SHA. `LANDED` means assess the landed behavior/revert; it is not a fake

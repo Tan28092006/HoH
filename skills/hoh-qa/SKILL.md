@@ -55,6 +55,14 @@ a capability to unlock a claim. `missing_approval` means call
 needed, and the server approves what it proves on this machine. Anything
 unproven becomes an infrastructure job; wait silently, keep the candidate frozen.
 
+Refusals to act on, never retry unchanged: `self_review` (you submitted this
+candidate; leave it), `qa_machine_quarantined` (this machine has an open
+infrastructure job; take no QA work until Planner resolves it, then rerun the
+preflight), `passed_with_unverified_finding` (`passed` needs every finding
+`verified`; otherwise submit `failed`), `evidence_artifact_missing` (an
+`evidence://local/` ref must name a file this host retained). A run ending
+`no_tests_passed` proved nothing: a candidate failure, verdict `failed`.
+
 Read [runner-and-capabilities.md](references/runner-and-capabilities.md) for a
 blocked runner, provenance, recovery or Planner handoff. Read
 [test-design.md](references/test-design.md) for scenario design and
