@@ -31,6 +31,11 @@ from hoh_control_plane.service._common import (
 )
 
 
+# Evidence ref that marks a job as a pure QA capability review for one agent
+# (``capability_review:<agent_id>``); capability approval closes only those.
+CAPABILITY_REVIEW_MARK = "capability_review:"
+
+
 class PlannerJobMixin:
     """Planner job queue and intervention outbox."""
 
@@ -67,6 +72,11 @@ class PlannerJobMixin:
         )
         if existing is not None:
             merged = list(dict.fromkeys([*existing["evidence_refs"], *evidence_refs]))
+            if not any(ref.startswith(CAPABILITY_REVIEW_MARK) for ref in evidence_refs):
+                # Failure evidence turns a capability review into a failure
+                # job. Without the mark, a later capability approval cannot
+                # close it while the failure still holds the ticket (review C2).
+                merged = [ref for ref in merged if not ref.startswith(CAPABILITY_REVIEW_MARK)]
             connection.execute(
                 """
                 UPDATE planner_jobs
