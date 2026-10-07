@@ -32,7 +32,47 @@ def pytest_addoption(parser):
     parser.addoption("--ui-channel", default=None, help="Installed browser channel, e.g. chrome; default is Playwright Chromium")
 
 
+# Lanes (review F3). ``git`` marks every test in a module that drives real Git
+# repositories; ``slow`` marks the modules whose tests dominate wall time
+# (measured with --durations on the dev host). The fast lane is
+# ``-m "not slow and not git"``. A test may also carry either marker itself.
+_GIT_SIGNS = ('["git"', "['git'", '"git", "-C"', "configure_repository(", "GitWorktreeManager",
+              "_tracked_repository(", "_repository(", "repository(tmp_path",
+              # tests/helpers setups that build a real repository
+              "_candidate_ready_for_integration(", "_candidate_waiting_for_qa(",
+              "_gate_ready_candidate(", "queued_merge(", "_rich_ticket(",
+              "verified_with_repository(")
+SLOW_MODULES = frozenset({
+    "test_integration_async", "test_integration_async_gate", "test_integration_gate",
+    "test_integration_release_policy", "test_git_worktrees", "test_repository_sync",
+    "test_repository_sweep", "test_operational_recovery", "test_supervisor",
+    "test_candidate_submission", "test_candidate_requeue", "test_candidate_qa_retry",
+    "test_workspace_models", "test_agent_workspace_candidates", "test_qa_runner",
+    "test_runner_attestation", "test_runtime_environment", "test_managed_process",
+    "test_event_wait", "test_silent_wait", "test_desktop_controls", "test_merge_lane",
+    "test_w7_auto_rebase", "test_w7_landing_sweep", "test_w7_mainline_guard",
+})
+_module_is_git: dict[str, bool] = {}
+
+
+def _drives_git(path: Path) -> bool:
+    key = str(path)
+    if key not in _module_is_git:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        _module_is_git[key] = any(sign in text for sign in _GIT_SIGNS)
+    return _module_is_git[key]
+
+
 def pytest_collection_modifyitems(config, items):
+    for item in items:
+        module = Path(str(item.fspath))
+        if module.stem in SLOW_MODULES:
+            item.add_marker(pytest.mark.slow)
+        if _drives_git(module):
+            item.add_marker(pytest.mark.git)
     if not config.getoption("--run-ui"):
         for item in items:
             if "ui" in item.keywords:
@@ -44,7 +84,22 @@ from hoh_control_plane.store import SQLiteStore
 
 
 @pytest.fixture(autouse=True)
-def _git_has_no_wall_clock_budget_in_tests(monkeypatch):
+def _no_host_environment(monkeypatch):
+    """No HOH_* setting of the shell that started pytest reaches a test (review E5).
+
+    A shell with HOH_DATABASE_URL or HOH_DATABASE_PATH set would otherwise point
+    every worker's seed data at a real database. HOH_TEST_* settings, which only
+    configure the suite itself (e.g. HOH_TEST_POSTGRES_DSN), are kept. A test that
+    needs a HOH_* variable sets it through monkeypatch after this runs.
+    """
+    for key in list(os.environ):
+        upper = key.upper()
+        if upper.startswith("HOH_") and not upper.startswith("HOH_TEST_"):
+            monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _git_has_no_wall_clock_budget_in_tests(request, monkeypatch):
     """Tests assert what Git did, not how fast this machine ran it.
 
     Production stops any Git command after 15 seconds. A test repository's
@@ -55,7 +110,10 @@ def _git_has_no_wall_clock_budget_in_tests(monkeypatch):
     fail under load and pass serially. The budget is raised here; a test that is
     about the timeout itself sets its own value, which overrides this one.
     """
-    monkeypatch.setattr("hoh_control_plane.git_worktrees._GIT_COMMAND_TIMEOUT_SECONDS", 600)
+    # A test marked production_git_timeout keeps the shipped budget, so at least
+    # one test still runs Git under the value production uses (review E5).
+    if request.node.get_closest_marker("production_git_timeout") is None:
+        monkeypatch.setattr("hoh_control_plane.git_worktrees._GIT_COMMAND_TIMEOUT_SECONDS", 600)
 
 
 @pytest.fixture

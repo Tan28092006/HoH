@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import pytest
-from barrier_helpers import keep_open_tickets
+from helpers.barrier import keep_open_tickets
+from helpers.planner import _blocked_ticket
 
 from hoh_control_plane.domain import Actor, AuthorizationError, ConflictError, Role
 from hoh_control_plane.mcp_server import create_mcp_server
@@ -21,20 +22,6 @@ def _failing_finding(criterion: str) -> dict[str, object]:
             }
         ],
     }
-
-
-def _blocked_ticket(service, actors, seeded):
-    ticket = seeded["ticket"]
-    claim = service.claim_ticket(
-        actors["developer"], ticket["ticket_id"], ticket["version"], 900
-    )
-    return service.report_blocker(
-        actors["developer"],
-        ticket["ticket_id"],
-        claim["lease"]["lease_id"],
-        claim["ticket"]["version"],
-        "The upstream payment contract is undecided.",
-    )
 
 
 def _qa_failed_ticket(service, actors, seeded):

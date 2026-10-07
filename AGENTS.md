@@ -21,8 +21,8 @@ ticket state here; `tests/test_repo_docs.py` caps it at 900 words.
 
 - Tests: `powershell -File scripts/test.ps1 [pytest args]`. It pins `.venv-hoh`
   and this checkout's `src/` (`tests/conftest.py` refuses any other tree) and
-  runs `-n 6` by default (`-n 0` serial). Targeted runs may add `--no-cov`; the
-  full suite must clear the 80% coverage gate.
+  runs `-n 6` by default (`-n 0` serial). Only the full suite checks the 80%
+  coverage gate; lanes in [docs/TESTING.md](docs/TESTING.md).
 - `main` is green (1167 passed, 31 skipped, coverage 83% on 2026-10-05). A failure after your
   change is yours until a run of unchanged `main` shows otherwise.
 - A local development instance: [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md).

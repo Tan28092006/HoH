@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from test_context_compaction import TIGHT_BUDGET, _all_roles, _rich_ticket
+from helpers.context import TIGHT_BUDGET, _all_roles, _rich_ticket
 
 AUTHORS = {"planner", "developer", "qa", "integrator", "system"}
 

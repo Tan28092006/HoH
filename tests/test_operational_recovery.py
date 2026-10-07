@@ -4,17 +4,15 @@ from pathlib import Path
 import pytest
 
 from hoh_control_plane.domain import Actor, Role, ValidationError
-from test_integration_async import _candidate_ready_for_integration, _claimed_for_integration, _git, _repository
+from helpers.integration import (
+    _candidate_ready_for_integration,
+    _claimed_for_integration,
+    _git,
+    _repository,
+    queued_merge,
+)
 
 ADMIN = Actor('recovery-test', Role.ADMIN, frozenset({'*'}))
-
-
-def queued_merge(service, actors, seeded, tmp_path):
-    repository, ticket, candidate, verified = _candidate_ready_for_integration(service, actors, seeded, tmp_path)
-    claim = _claimed_for_integration(service, actors, ticket, verified)
-    job = service.queue_merge_candidate(actors['integrator'], ticket['ticket_id'],
-                                       claim['lease']['lease_id'], claim['ticket']['version'], context_snapshot_id=service.get_ticket_context(actors['integrator'], ticket['ticket_id'])["context_snapshot_id"])['merge_job']
-    return repository, candidate['candidate'], job
 
 
 def test_qa_checkout_has_private_git_metadata(service, tmp_path):

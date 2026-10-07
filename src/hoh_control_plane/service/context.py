@@ -131,21 +131,21 @@ _ROLE_TICKET_FIELDS: dict[Role, frozenset[str]] = {
             "ticket_id", "feature_id", "ticket_type", "title", "objective",
             "status", "required_role", "validation_contract",
             "preservation_constraints", "file_scope", "blocked_reason", "version",
-            "planning_base_stale",
+            "planning_base_stale", "risk",
         }
     ),
     Role.QA: frozenset(
         {
             "ticket_id", "feature_id", "title", "objective", "status",
             "validation_contract", "preservation_constraints", "blocked_reason",
-            "version", "planning_base_stale", "intent_check",
+            "version", "planning_base_stale", "intent_check", "risk",
         }
     ),
     Role.INTEGRATOR: frozenset(
         {
             "ticket_id", "feature_id", "title", "objective", "status",
             "validation_contract", "preservation_constraints", "blocked_reason",
-            "version", "planning_base_stale", "intent_check",
+            "version", "planning_base_stale", "intent_check", "risk",
         }
     ),
 }

@@ -188,7 +188,10 @@ class RiskPolicyMixin:
         )
         self._bounded_list(high, "high_risk_patterns", 50, 200)
         self._bounded_list(medium, "medium_risk_patterns", 50, 200)
-        if not isinstance(medium_max_files, int) or not 1 <= medium_max_files <= 1000:
+        if (
+            not isinstance(medium_max_files, int) or isinstance(medium_max_files, bool)
+            or not 1 <= medium_max_files <= 1000
+        ):
             raise ValidationError("medium_max_files must be between 1 and 1000")
         timestamp = _iso()
         with self.store.connection(immediate=True) as connection:
@@ -377,7 +380,6 @@ class RiskPolicyMixin:
             ).fetchone())
             if candidate is None:
                 raise ConflictError("Ticket has no frozen candidate to sign off")
-            risk = self._ticket_risk(connection, project_id, ticket)
             approval_id = _id(connection, "hrisk")
             timestamp = _iso()
             connection.execute(
@@ -392,6 +394,8 @@ class RiskPolicyMixin:
                     actor.agent_id, actor.role.value, timestamp,
                 ),
             )
+            # Read after the insert, so the answer already counts this sign-off.
+            risk = self._ticket_risk(connection, project_id, ticket)
             self._event(
                 connection, actor, project_id, "policy.high_risk_approved", "ticket",
                 ticket_id, ticket["version"],

@@ -700,7 +700,7 @@ class QaMixin:
 
     def fail_queued_project_test(self, test_run_id: str, message: str) -> dict[str, Any]:
         """Terminally record infrastructure or stale-state failures without blocking QA polling."""
-        self._bounded_text(message, "test worker error", 2000)
+        message = self._failure_text(message, 2000)
         with self.store.connection(immediate=True) as connection:
             job = self._qa_test_job(connection, test_run_id)
             if job["status"] in {"COMPLETED", "FAILED", "STALE"}:

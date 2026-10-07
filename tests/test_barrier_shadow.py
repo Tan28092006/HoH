@@ -138,7 +138,7 @@ def _resolve(service, actors, reconciliation, revised: str) -> dict:
 def test_a_merge_acts_on_its_partition_instead_of_closing_the_project(
     service, actors, seeded, tmp_path: Path
 ) -> None:
-    from test_integration_async import _merge
+    from helpers.integration import _merge
 
     _board(service, actors)
     assert _merge(service, actors, seeded, tmp_path)["merge_status"] == "merged"
@@ -226,7 +226,7 @@ def test_a_change_outside_the_prediction_is_reported_as_a_disagreement(
 def test_an_auto_kept_merge_carries_no_prediction(
     service, actors, seeded, tmp_path: Path
 ) -> None:
-    from test_integration_async import _merge
+    from helpers.integration import _merge
 
     _open(service, actors, "DEV-FREE", ["src/reporting/**"])
     _merge(service, actors, seeded, tmp_path)

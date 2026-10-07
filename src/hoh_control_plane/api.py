@@ -582,13 +582,20 @@ def _token_identities_from_environment() -> dict[str, Actor]:
         return {}
     try:
         parsed = json.loads(raw)
-        return {
-            token: Actor(
-                value["agent_id"],
-                Role(value["role"]),
-                frozenset(value.get("project_ids", [])),
+        if not isinstance(parsed, dict):
+            raise TypeError("token map must be an object")
+        identities = {}
+        for token, value in parsed.items():
+            # A blank key would match the header "Bearer " with nothing after it.
+            if not token.strip():
+                raise ValueError("token must not be blank")
+            project_ids = value.get("project_ids", [])
+            # A string here would become a set of its characters.
+            if not isinstance(project_ids, list):
+                raise TypeError("project_ids must be a list")
+            identities[token] = Actor(
+                value["agent_id"], Role(value["role"]), frozenset(project_ids)
             )
-            for token, value in parsed.items()
-        }
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        return identities
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError) as exc:
         raise RuntimeError("HOH_AGENT_TOKENS_JSON is invalid") from exc

@@ -11,13 +11,13 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from barrier_helpers import keep_open_tickets
+from helpers.barrier import keep_open_tickets
 
 from hoh_control_plane import event_wait
 from hoh_control_plane.domain import Actor, ConflictError, Role
 from hoh_control_plane.mcp_server import create_mcp_server
 from hoh_control_plane.scheduler import sweep_once
-from test_integration_async import _candidate_ready_for_integration, _git, _repository
+from helpers.integration import _candidate_ready_for_integration, _git, _repository
 
 SCHEDULER = Actor("hoh-scheduler", Role.ADMIN, frozenset({"*"}))
 LONG_AGO = "2000-01-01T00:00:00Z"
@@ -226,7 +226,7 @@ def test_a_cherry_picked_candidate_is_found_by_patch_id(
 
 def _stuck_merge(service, actors, seeded, tmp_path, monkeypatch) -> tuple[Path, dict, dict]:
     """Git landed the candidate, the worker died, and the ticket changed meanwhile."""
-    from test_operational_recovery import queued_merge
+    from helpers.integration import queued_merge
 
     repository, candidate, job = queued_merge(service, actors, seeded, tmp_path)
     _observed_baseline(service, actors, repository, tmp_path)

@@ -243,7 +243,7 @@ class CandidateMixin:
             return self._candidate_submission_job(connection, submission_id)
 
     def fail_queued_candidate_submission(self, submission_id: str, error_message: str) -> dict[str, Any]:
-        self._bounded_text(error_message, "candidate_submission.error_message", 4000)
+        error_message = self._failure_text(error_message, 4000)
         with self.store.connection(immediate=True) as connection:
             job = self._candidate_submission_job(connection, submission_id)
             if job["status"] in {"COMPLETED", "FAILED"}:

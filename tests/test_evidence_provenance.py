@@ -10,59 +10,8 @@ import pytest
 from hoh_control_plane.domain import ValidationError
 from hoh_control_plane.service import ControlPlaneService
 from hoh_control_plane.store import SQLiteStore
-
-
-def _git(path: Path, *arguments: str) -> str:
-    completed = subprocess.run(
-        ["git", "-C", str(path), *arguments], check=True, capture_output=True, text=True
-    )
-    return completed.stdout.strip()
-
-
-def _candidate_waiting_for_qa(service, actors, seeded, tmp_path: Path):
-    repository = tmp_path / "provenance-repository"
-    repository.mkdir()
-    _git(repository, "init", "--initial-branch=main")
-    _git(repository, "config", "user.email", "hoh-tests@example.invalid")
-    _git(repository, "config", "user.name", "HoH Tests")
-    (repository / "README.md").write_text("# project\n", encoding="utf-8")
-    _git(repository, "add", "README.md")
-    _git(repository, "commit", "-m", "Initial commit")
-    service.configure_repository(actors["planner"], "project-1", str(repository))
-    service.configure_test_command(
-        actors["planner"], "project-1", [sys.executable, "-c", "print('passed')"], 120
-    )
-    ticket = seeded["ticket"]
-    development = service.claim_ticket(
-        actors["developer"], ticket["ticket_id"], ticket["version"], 900
-    )
-    prepared = service.prepare_worktree(
-        actors["developer"],
-        ticket["ticket_id"],
-        development["lease"]["lease_id"],
-        development["ticket"]["version"],
-    )
-    worktree = Path(prepared["worktree"]["worktree_path"])
-    change = worktree / "src" / "checkout" / "retry.txt"
-    change.parent.mkdir(parents=True)
-    change.write_text("safe retry\n", encoding="utf-8")
-    _git(worktree, "add", "src/checkout/retry.txt")
-    _git(worktree, "commit", "-m", "Implement safe retry")
-    candidate = service.submit_candidate(
-        actors["developer"],
-        ticket["ticket_id"],
-        development["lease"]["lease_id"],
-        development["ticket"]["version"],
-        _git(worktree, "rev-parse", "HEAD"),
-        prepared["worktree"]["base_commit"],
-        prepared["worktree"]["branch_ref"],
-        ["Ready for QA."],
-        context_snapshot_id=service.get_ticket_context(actors["developer"], ticket["ticket_id"])["context_snapshot_id"],
-    )
-    qa_claim = service.claim_qa(
-        actors["qa"], ticket["ticket_id"], candidate["ticket"]["version"], 900
-    )
-    return ticket, candidate, qa_claim
+from helpers.qa import _git
+from helpers.qa import candidate_waiting_for_qa as _candidate_waiting_for_qa
 
 
 def _verdict(service, actors, ticket, candidate, qa_claim, evidence: dict[str, object]):

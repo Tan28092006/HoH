@@ -4,7 +4,7 @@ import pytest
 
 from hoh_control_plane.domain import Role, ValidationError
 
-from tests.test_evidence_provenance import _candidate_waiting_for_qa
+from helpers.qa import candidate_waiting_for_qa as _candidate_waiting_for_qa
 
 
 CAPABILITIES = ["build_execution", "runtime_trace", "source_inspection"]

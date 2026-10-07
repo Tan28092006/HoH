@@ -2,7 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
-from test_postgres_store import pg_service, pg_seeded, _developer, pytestmark
+from helpers.postgres import pg_service, pg_seeded, _developer, pytestmark
 from hoh_control_plane.domain import ConflictError, Role
 
 

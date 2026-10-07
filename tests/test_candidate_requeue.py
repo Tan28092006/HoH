@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from hoh_control_plane.domain import AuthorizationError, ConflictError
-from test_integration_async import _git, _repository
+from helpers.integration import _git, _repository
 
 
 def _setup_candidate_ticket(service, actors, seeded, tmp_path: Path):

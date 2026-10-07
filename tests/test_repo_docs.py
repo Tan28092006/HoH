@@ -52,12 +52,39 @@ def test_entry_router_stays_within_budget(name: str, budget: int) -> None:
     )
 
 
+def _indexed_from(index: Path) -> set[str]:
+    """Documents an index links, as paths relative to docs/."""
+    docs = (ROOT / "docs").resolve()
+    found = set()
+    for link in _relative_links(index):
+        target = (index.parent / link).resolve()
+        if target.is_relative_to(docs):
+            found.add(target.relative_to(docs).as_posix())
+    return found
+
+
 def test_every_doc_is_indexed() -> None:
-    index = (ROOT / "docs" / "README.md").read_text(encoding="utf-8")
-    linked = {link for link in _relative_links(ROOT / "docs" / "README.md")}
-    unindexed = [
-        path.relative_to(ROOT / "docs").as_posix()
-        for path in sorted((ROOT / "docs").glob("*.md"))
-        if path.name != "README.md" and path.relative_to(ROOT / "docs").as_posix() not in linked
-    ]
-    assert index and not unindexed, f"docs/README.md does not route to: {unindexed}"
+    """Every document under docs/, at any depth, is reachable from docs/README.md.
+
+    A nested document counts when docs/README.md links it directly, or links
+    the README.md of its own directory and that README links it (releases/).
+    rglob, not glob: reviews/ and releases/ are documents too (review E6).
+    """
+    index = ROOT / "docs" / "README.md"
+    linked = _indexed_from(index)
+    unindexed = []
+    for path in sorted((ROOT / "docs").rglob("*.md")):
+        relative = path.relative_to(ROOT / "docs").as_posix()
+        if path == index or relative in linked:
+            continue
+        local_index = path.parent / "README.md"
+        local_relative = local_index.relative_to(ROOT / "docs").as_posix()
+        if (
+            path != local_index and local_index.is_file() and local_relative in linked
+            and relative in _indexed_from(local_index)
+        ):
+            continue
+        unindexed.append(relative)
+    assert index.read_text(encoding="utf-8") and not unindexed, (
+        f"docs/README.md does not route to: {unindexed}"
+    )

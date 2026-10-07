@@ -5,7 +5,7 @@ import pytest
 
 from hoh_control_plane.qa_runner import TestExecution as Execution
 from hoh_control_plane.supervisor import ADMIN
-from test_integration_async import REGRESSION_COMMAND, _candidate_ready_for_integration, _claimed_for_integration, _git
+from helpers.integration import REGRESSION_COMMAND, _candidate_ready_for_integration, _claimed_for_integration, _git
 
 
 def ready(service,actors,seeded,tmp_path):
@@ -79,7 +79,7 @@ def test_gate_rechecks_authorization_before_git(service,actors,seeded,tmp_path,m
     def execute(command,path,timeout):
         if revocation=='hold':
             # Arrange the durable release-policy record, as in the policy tests.
-            from test_integration_release_policy import _add_context
+            from helpers.integration import _add_context
             _add_context(service,ticket,'integration_hold',candidate['commit_sha'],'2099-01-01T00:00:00Z')
         else:
             with service.store.connection(immediate=True) as c:

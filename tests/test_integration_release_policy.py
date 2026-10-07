@@ -5,10 +5,11 @@ from pathlib import Path
 import pytest
 
 from hoh_control_plane.domain import ReleasePolicyError
-from test_integration_async import (
+from helpers.integration import (
     REGRESSION_COMMAND,
     _candidate_ready_for_integration,
     _claimed_for_integration,
+    _add_context,
     _git,
     record_regression_run,
 )
@@ -33,26 +34,6 @@ def _merge_jobs(service, ticket_id: str) -> int:
         return connection.execute(
             "SELECT COUNT(*) FROM merge_jobs WHERE ticket_id = ?", (ticket_id,)
         ).fetchone()[0]
-
-
-def _add_context(service, ticket, entry_type: str, artifact_commit: str | None, created_at: str):
-    with service.store.connection(immediate=True) as connection:
-        connection.execute(
-            """
-            INSERT INTO context_entries
-                (entry_id, project_id, feature_id, ticket_id, entry_type, content,
-                 artifact_commit, actor_id, actor_role, created_at)
-            VALUES (?, 'project-1', ?, ?, ?, 'Planner decision', ?, 'planner-01', 'planner', ?)
-            """,
-            (
-                f"ctx_{entry_type}_{created_at}",
-                ticket["feature_id"],
-                ticket["ticket_id"],
-                entry_type,
-                artifact_commit,
-                created_at,
-            ),
-        )
 
 
 def test_a_fully_evidenced_candidate_queues_for_merge(
