@@ -379,7 +379,7 @@ class RunGuardrailsMixin:
         ).fetchone() is None:
             return None
         waiting = connection.execute(
-            "SELECT check_id FROM mainline_checks WHERE project_id = ? AND status = 'QUEUED' "
+            "SELECT check_id, autonomy_hold_run_id FROM mainline_checks WHERE project_id = ? AND status = 'QUEUED' "
             "ORDER BY created_at LIMIT 1",
             (project_id,),
         ).fetchone()
@@ -389,6 +389,15 @@ class RunGuardrailsMixin:
                 "trigger_ticket_id = ? WHERE check_id = ?",
                 (mainline_commit, trigger_ref, trigger_ticket_id, waiting["check_id"]),
             )
+            # Coalescing changes execution ownership; an old scoped hold must
+            # not freeze another run's or an unscoped landing's main check.
+            if waiting["autonomy_hold_run_id"] and self._autonomy_job_run(
+                connection, f"main:{waiting['check_id']}"
+            ) != waiting["autonomy_hold_run_id"]:
+                connection.execute(
+                    "UPDATE mainline_checks SET autonomy_hold_run_id = NULL, error_message = NULL WHERE check_id = ?",
+                    (waiting["check_id"],),
+                )
             return str(waiting["check_id"])
         check_id = _id(connection, "main_check")
         connection.execute(

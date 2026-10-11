@@ -438,3 +438,66 @@ async def test_autonomy_mcp_surfaces_separate_owner_control_and_execution(servic
         assert not names & {"autonomy.start", "autonomy.resume", "autonomy.reconcile", "autonomy.acknowledge"}
     assert {"autonomy.start", "autonomy.resume", "autonomy.reconcile", "autonomy.stop", "autonomy.status"} <= owner_names
     assert "autonomy.admit" not in owner_names
+
+
+@pytest.mark.parametrize("new_owner", ["same_run", "unscoped", "other_run"])
+def test_held_main_retarget_preserves_only_current_run_hold_and_accounting(
+    service, actors, seeded, crew, new_owner
+):
+    """finding_0038: a scoped ceiling must not hold unrelated post-main work."""
+    from hoh_control_plane.domain import AutonomyExecutionPaused
+    from hoh_control_plane.supervisor import Supervisor
+    run_id = start(service, actors, seeded, crew, suite_starts=2)
+    ticket_id = seeded["ticket"]["ticket_id"]
+    target_ticket = ticket_id
+    target_run = run_id
+    if new_owner != "same_run":
+        target_ticket = service.create_ticket(actors["planner"], seeded["feature"]["feature_id"],
+            "OUTSIDE", "Outside work", "Independent mainline check", Role.DEVELOPER,
+            ["Check current main"], [], ["outside/**"], ready=True)["ticket_id"]
+        target_run = None
+    if new_owner == "other_run":
+        target_run = service.autonomy_start(actors["planner"], "project-1",
+            dict(wall_seconds=600, launch_attempts=10, in_flight=1, suite_starts=1, landed_tickets=2),
+            crew, "other-run", ticket_ids=[target_ticket])["run"]["run_id"]
+    with service.store.connection(immediate=True) as connection:
+        connection.execute("INSERT INTO project_test_profiles (project_id, test_command, timeout_seconds, configured_by, configured_at) VALUES ('project-1', '[]', 30, 'fixture', ?)", (_iso(),))
+        check_id = service._queue_mainline_check(connection, "project-1", mainline_commit="a" * 40,
+            trigger_ref="fixture:scoped", trigger_ticket_id=ticket_id)
+        service._autonomy_observed_landing(connection, "project-1", ticket_id)
+        connection.execute("UPDATE mainline_checks SET status = 'RUNNING' WHERE check_id = ?", (check_id,))
+    guard = service._autonomy_execution_guard(f"main:{check_id}")
+    for index in (0, 1):
+        with guard(index):
+            pass
+    with pytest.raises(AutonomyExecutionPaused) as denial:
+        with guard(2):
+            pytest.fail("Scoped ceiling was bypassed")
+    assert service._autonomy_hold_job(f"main:{check_id}", denial.value)["autonomy_hold_run_id"] == run_id
+    with service.store.connection(immediate=True) as connection:
+        if target_run and target_run != run_id:
+            service._autonomy_observed_landing(connection, "project-1", target_ticket)
+        retargeted = service._queue_mainline_check(connection, "project-1", mainline_commit="b" * 40,
+            trigger_ref="fixture:retargeted", trigger_ticket_id=target_ticket)
+        row = dict(connection.execute("SELECT * FROM mainline_checks WHERE check_id = ?", (retargeted,)).fetchone())
+    assert retargeted == check_id
+    assert row["mainline_commit"] == "b" * 40
+    assert row["trigger_ticket_id"] == target_ticket
+    assert row["autonomy_hold_run_id"] == (run_id if new_owner == "same_run" else None)
+    pending = Supervisor(service, max_workers=1)._pending()
+    assert (("mainline", check_id) in pending) == (new_owner != "same_run")
+    assert service.autonomy_status(actors["planner"], run_id)["counts"]["suite_starts"] == 2
+    retarget_guard = service._autonomy_execution_guard(f"main:{check_id}")
+    if new_owner == "same_run":
+        assert service.execute_queued_mainline_check(check_id)["autonomy_hold_run_id"] == run_id
+        with pytest.raises(AutonomyExecutionPaused):
+            with retarget_guard(0):
+                pytest.fail("Retarget reset exhausted scoped budget")
+    elif new_owner == "unscoped":
+        assert retarget_guard is None
+        assert row["error_message"] is None
+    else:
+        with retarget_guard(0):
+            pass
+        assert service.autonomy_status(actors["planner"], target_run)["counts"]["suite_starts"] == 1
+    assert service.autonomy_status(actors["planner"], run_id)["counts"]["suite_starts"] == 2
