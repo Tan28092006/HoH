@@ -49,6 +49,10 @@ def environment(component):
     env = {k: v for k, v in os.environ.items()
            if not k.upper().startswith(('HOH_', 'COV_CORE', 'COVERAGE'))
            and k.upper() not in {'PYTHONPATH', 'PYTHONHOME'}}
+    # Keep worker paths short inside the installation's existing private boundary.
+    temp = ROOT / 't'
+    temp.mkdir(exist_ok=True)
+    env.update(TEMP=str(temp), TMP=str(temp))
     env.update(HOH_DATABASE_PATH=config['database_path'],
                HOH_WORKER_MODE='supervised', HOH_HOST='127.0.0.1',
                HOH_PORT=str(config['ui_port']), HOH_SEED_DEMO='0',
