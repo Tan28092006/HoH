@@ -136,6 +136,8 @@ def main():
         save()
 
     class Probe:
+        collection_failures = set()
+
         @pytest.hookimpl(trylast=True)
         def pytest_sessionstart(self, session):
             facts["phase"] = "session_started"
@@ -149,7 +151,11 @@ def main():
 
         def pytest_collectreport(self, report):
             if report.failed:
-                facts["test_counts"]["collection_errors"] += 1
+                # Each xdist worker collects the same files. Count the failed
+                # collection once, while retaining its original diagnostic.
+                if report.nodeid not in self.collection_failures:
+                    self.collection_failures.add(report.nodeid)
+                    facts["test_counts"]["collection_errors"] += 1
                 foreign = foreign_import_path(str(report.longrepr))
                 if foreign and len(facts["foreign_import_errors"]) < 20:
                     facts["foreign_import_errors"].append(
@@ -160,10 +166,20 @@ def main():
         def pytest_runtest_makereport(self, item, call):
             outcome = yield
             report = outcome.get_result()
+            # Preserve exception-type inspection in serial runs. Workers send
+            # their report representations to the controller instead.
+            report.hoh_resource_failure = bool(call.excinfo and any(
+                c.__name__ in {"MemoryError", "ArrowMemoryError"}
+                for c in type(call.excinfo.value).__mro__))
+
+        def pytest_runtest_logreport(self, report):
+            # This hook receives both serial and xdist controller reports;
+            # makereport only runs where the test itself executes.
             if report.failed:
                 facts["test_counts"]["failed"] += 1
-                if call.excinfo and any(c.__name__ in {"MemoryError", "ArrowMemoryError"}
-                                       for c in type(call.excinfo.value).__mro__):
+                crash = getattr(report.longrepr, "reprcrash", None)
+                exception = getattr(crash, "message", "").split(":", 1)[0].rsplit(".", 1)[-1]
+                if getattr(report, "hoh_resource_failure", False) or exception in {"MemoryError", "ArrowMemoryError"}:
                     facts["resource_failures"] += 1
             elif report.skipped:
                 facts["test_counts"]["skipped"] += 1
