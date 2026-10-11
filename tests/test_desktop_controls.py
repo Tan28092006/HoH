@@ -96,7 +96,8 @@ def test_drain_waits_for_workers_and_reopen_restores_admission(desktop):
 
 @pytest.mark.parametrize('client_name', ['codex', 'claude-code'])
 def test_shared_http_upgrades_only_generated_profile_and_keeps_identity(desktop, tmp_path, client_name,
-                                                                      delivered_tokens):
+                                                                      delivered_tokens, monkeypatch):
+    monkeypatch.setattr("hoh_control_plane.local_credentials.read_token", delivered_tokens.get)
     import tomllib
     from hoh_control_plane.auth import credentials_from_environment
     from hoh_control_plane.local_agent import install_profile
@@ -136,7 +137,8 @@ def test_shared_http_upgrades_only_generated_profile_and_keeps_identity(desktop,
     assert path.read_text() == content
 
 
-def test_legacy_migration_preserves_actor_and_unrelated_config(desktop, tmp_path):
+def test_legacy_migration_preserves_actor_and_unrelated_config(desktop, tmp_path, delivered_tokens, monkeypatch):
+    monkeypatch.setattr("hoh_control_plane.local_credentials.read_token", delivered_tokens.get)
     import tomllib
     from hoh_control_plane.profile_migration import migrate
     from hoh_control_plane.auth import credentials_from_environment
@@ -155,7 +157,8 @@ def test_legacy_migration_preserves_actor_and_unrelated_config(desktop, tmp_path
     preview = migrate(root, home, 'codex', legacy)
     assert len(preview['profiles']) == 1 and path.read_text() == original
     result = migrate(root, home, 'codex', legacy, apply=True)
-    assert Path(result['backup_path']).read_text() == original
+    assert result['backup_path'] is None
+    assert not list(path.parent.glob(path.name + '.hoh-http-backup-*'))
     parsed = tomllib.loads(path.read_text())
     assert parsed['model'] == 'keep' and parsed['mcp_servers']['other']['command'] == 'untouched'
     assert parsed['projects']['example']['trust_level'] == 'trusted'

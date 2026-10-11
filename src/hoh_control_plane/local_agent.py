@@ -148,10 +148,6 @@ def install_profile(root, project, role, instance, client, home, upgrade_skills=
         # The client config names an environment variable, never the token
         # (wave 8A, R4); the credential file keeps only its digest.
         token_var = token_env_var(actor.agent_id)
-        token = register_local_credential(root, actor, rotate=rotate_token)
-        token_issued = token is not None
-        if token is not None:
-            deliver_token(token_var, token)
         url = f"http://127.0.0.1:{int(config.get('mcp_port', 8931))}/mcp"
         codex = {'url': url, 'bearer_token_env_var': token_var, 'tool_timeout_sec': 86400}
         claude = {'type': 'http', 'url': url, 'headers': {'Authorization': 'Bearer ${' + token_var + '}'},
@@ -186,6 +182,24 @@ def install_profile(root, project, role, instance, client, home, upgrade_skills=
                           'chat model with /model or claude --model.')
         if transport == 'shared-http':
             manifest['upgrade_from'] = previous
+            from hoh_control_plane.auth import credentials_from_environment
+            import tomllib
+            credential_path = root / 'config/agent-credentials.json'
+            credentials = credentials_from_environment(credential_path.read_text(encoding='utf-8')) if credential_path.exists() else ()
+            digests = [c.digest for c in credentials if c.actor == actor]
+            manifest['http_upgrade'] = {'url': url, 'digests': digests}
+            config_path = home / ('.codex/config.toml' if client == 'codex' else '.claude.json')
+            recovery_token = None
+            if config_path.exists():
+                raw = config_path.read_text(encoding='utf-8')
+                parsed = tomllib.loads(raw) if client == 'codex' else json.loads(raw)
+                old = parsed.get('mcp_servers' if client == 'codex' else 'mcpServers', {}).get(server, {})
+                authorization = old.get('http_headers' if client == 'codex' else 'headers', {}).get('Authorization', '')
+                if old.get('url') == url and authorization.startswith('Bearer '):
+                    from hoh_control_plane.auth import token_digest
+                    value = authorization[7:]
+                    if value.isascii() and token_digest(value) in digests:
+                        recovery_token = value
         manifest['files'] = {p.relative_to(kit).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
                              for p in kit.rglob('*') if p.is_file() and p.name != 'manifest.json'}
         (kit / 'manifest.json').write_text(json.dumps(manifest), encoding='utf-8')
@@ -206,7 +220,14 @@ def install_profile(root, project, role, instance, client, home, upgrade_skills=
                         backup = Path(tempfile.mkdtemp(prefix=source.name + '-', dir=backup_root)) / source.name
                         shutil.move(str(destination), backup)
                         moved.append((destination, backup))
-            install(kit, home, client)
+            install(kit, home, client, dry_run=True)
+            if transport == 'shared-http':
+                token = register_local_credential(
+                    root, actor, rotate=rotate_token, delivery=deliver_token,
+                    apply=lambda: install(kit, home, client), recovery_token=recovery_token)
+                token_issued = token is not None
+            else:
+                install(kit, home, client)
         except BaseException:
             for destination, backup in reversed(moved):
                 if not destination.exists():

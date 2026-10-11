@@ -111,6 +111,48 @@ def _write_config(config: Path, kit: Path, manifest: dict, client: str,
 def _merged_config(kit: Path, manifest: dict, client: str, text: str) -> str:
     """The client config with this kit's MCP server merged in; raises on a conflict."""
     name = manifest["server_name"]
+    upgrade = manifest.get('http_upgrade')
+    if upgrade:
+        parsed_http = tomllib.loads(text) if client == 'codex' else json.loads(text or '{}')
+        old_http = parsed_http.get('mcp_servers' if client == 'codex' else 'mcpServers', {}).get(name)
+        if old_http and old_http.get('url') == upgrade['url']:
+            header_key = 'http_headers' if client == 'codex' else 'headers'
+            headers = old_http.get(header_key, {})
+            authorization = headers.get('Authorization', '')
+            digest = ('sha256:' + hashlib.sha256(authorization[7:].encode('ascii')).hexdigest()
+                      if authorization.startswith('Bearer ') and authorization[7:].isascii() else None)
+            allowed = {'url', header_key, 'type', 'tool_timeout_sec', 'startup_timeout_sec',
+                       'enabled', 'required', 'enabled_tools', 'disabled_tools', 'timeout', 'bearer_token_env_var'}
+            desired = manifest['codex'] if client == 'codex' else json.loads((kit / 'mcp.json').read_text())['mcpServers'][name]
+            current_reference = (old_http.get('bearer_token_env_var') == desired.get('bearer_token_env_var')
+                                 and header_key not in old_http) if client == 'codex' else headers == desired['headers']
+            literal = (digest in upgrade['digests'] and set(headers) == {'Authorization'}
+                       and 'bearer_token_env_var' not in old_http)
+            if (set(old_http) <= allowed and (('type' not in old_http) if client == 'codex' else old_http.get('type') == 'http')
+                    and (literal or current_reference)):
+                preserved = {k: v for k, v in old_http.items() if k not in {header_key, 'bearer_token_env_var'}}
+                updated = {**preserved, **desired}
+                timeout = 'tool_timeout_sec' if client == 'codex' else 'timeout'
+                if type(old_http.get(timeout, 1)) is not int or old_http.get(timeout, 1) <= 0:
+                    raise ValueError('Invalid profile timeout')
+                updated[timeout] = max(old_http.get(timeout, 0), desired[timeout])
+                if updated == old_http and not manifest.get('codex_profile'):
+                    # An unchanged profile must not rewrite key order/spacing
+                    # on every setup retry. Artifact installation still runs.
+                    return text
+                if client == 'codex':
+                    # Include nested header tables in the exact server block.
+                    block = re.compile(r'(?ms)^\[mcp_servers\.' + re.escape(name) + r'\][ \t]*\n.*?(?=^\[(?!mcp_servers\.' + re.escape(name) + r'\.)|\Z)')
+                    if len(block.findall(text)) != 1:
+                        raise ValueError('Cannot locate generated HTTP profile')
+                    replacement = f'[mcp_servers.{name}]\n' + ''.join(f'{k} = {json.dumps(v)}\n' for k, v in updated.items()) + '\n'
+                    text = block.sub(lambda _: replacement, text)
+                    manifest = {**manifest, 'codex': updated}
+                else:
+                    parsed_http['mcpServers'][name] = updated
+                    text = json.dumps(parsed_http)
+                    # The normal merge preserves timeouts; use preserved options too.
+                    manifest = {**manifest, 'http_supplied': updated}
     if client == "codex":
         parsed = tomllib.loads(text)
         old = parsed.get("mcp_servers", {}).get(name)
@@ -146,6 +188,7 @@ def _merged_config(kit: Path, manifest: dict, client: str, text: str) -> str:
     else:
         parsed = json.loads(text or "{}")
         supplied = json.loads((kit / "mcp.json").read_text(encoding="utf-8"))["mcpServers"][name]
+        supplied = manifest.get("http_supplied", supplied)
         old = parsed.setdefault("mcpServers", {}).get(name)
         previous = manifest.get('upgrade_from', {}).get('claude-code')
         if previous is not None and old is not None:
@@ -169,7 +212,7 @@ def _merged_config(kit: Path, manifest: dict, client: str, text: str) -> str:
     return new_text
 
 
-def install(kit: Path, home: Path, client: str) -> None:
+def install(kit: Path, home: Path, client: str, *, dry_run=False) -> None:
     manifest = json.loads((kit / "manifest.json").read_text(encoding="utf-8"))
     for relative, expected in manifest["files"].items():
         source = (kit / relative).resolve()
@@ -199,6 +242,8 @@ def install(kit: Path, home: Path, client: str) -> None:
             if source_files != dest_files:
                 raise ValueError(f"Existing skill differs: {source.name}; review before upgrading")
     # All conflicts checked before the first write.
+    if dry_run:
+        return
     for source in sources:
         destination = skill_root / source.name
         if not destination.exists():

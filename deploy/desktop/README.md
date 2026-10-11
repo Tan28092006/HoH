@@ -93,7 +93,8 @@ server-side session managers. Revoked credentials cannot reuse a cached actor.
 Existing `serve` profiles remain compatible. To migrate recognized profiles,
 run `python -I -m hoh_control_plane.profile_migration --root D:\HoH-service
 --client codex --legacy-repository D:\HoH` (or `--client claude-code`). The first
-run previews identity-preserving changes; add `--apply` to write with backups.
+run previews identity-preserving changes; add `--apply` to replace config atomically
+without a raw backup (config may contain credentials).
 Only known generated profiles are changed. Reload the clients after migration
 to release their old stdio processes. Open HoH with its Desktop icon before
 connecting: HTTP profiles do not automatically start an operator-stopped host.
@@ -135,3 +136,34 @@ This fixes cross-version host dependency leakage, but does not finish the
 pytest configuration, an actual-child environment manifest, resource admission
 and infrastructure-only QA retry routing still need their own changes. Do not
 mark an existing candidate accepted using historical insufficient evidence.
+
+## Recovering generated shared HTTP profiles
+
+Setup recognizes an older literal-Bearer profile only when its loopback URL and
+credential match the exact actor and project. It replaces the literal with a
+user environment reference, preserves unrelated settings, and keeps the valid
+token. Unknown profiles require review. Config conflicts are checked before
+delivery; delivery and installation finish before credentials are published or
+rotated. A failed rotation keeps the previous credential valid and attempts to
+restore its user variable. If that fails, setup reports recovery explicitly.
+A missing variable for an existing hashed credential requires restoring the
+variable or explicitly using `--rotate-token`; setup never silently rotates it.
+Restart clients after successful delivery so they inherit the user variable.
+
+Run `verify_shared_profiles.py --project <exact-project-id>` from a process with
+those variables. It resolves Codex and Claude environment references and checks
+the server name, role tools and exact project scope. Failures are redacted; do not
+copy credentials into commands, reports or configuration backups.
+For homes containing several projects, repeat `--server <exact-server-name>`
+for each intended profile; a missing selected profile fails verification.
+Use `--client codex` or `--client claude-code` when an inventory exists in only
+one client. Each selected server must exist in every selected client.
+The profile migration utility also recognizes existing literal HTTP profiles
+against the host credential actor map and exact URL. It preflights all profiles
+before delivery, supports preview, and atomically replaces configuration without
+raw backups. Existing environment references are validated against persistent
+tokens, exact actor variables and the host URL; missing recovery stops migration.
+Token variable collisions stop migration before delivery.
+Exact legacy role aliases (`hoh-planner`, `hoh-developer`, `hoh-qa`,
+`hoh-integrator`) retain their names and must authenticate that role. Verification
+of these aliases requires explicitly selecting them with `--server`.
