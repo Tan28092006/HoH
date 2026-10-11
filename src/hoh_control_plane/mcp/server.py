@@ -7,7 +7,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from hoh_control_plane.domain import Actor
 from hoh_control_plane.service import ControlPlaneService
 from hoh_control_plane.mcp.invoke import _CompactFastMCP, make_failure_audit, make_invoke
-from hoh_control_plane.mcp.tools import common, developer, integrator, planner, qa
+from hoh_control_plane.mcp.tools import autonomy, common, developer, integrator, planner, qa
 
 
 def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_http: bool = False) -> FastMCP:
@@ -40,4 +40,5 @@ def create_mcp_server(service: ControlPlaneService, actor: Actor, *, stateless_h
     common.register_lease_heartbeat(server, service, actor, invoke)
     integrator.register(server, service, actor, invoke)
     qa.register(server, service, actor, invoke)
+    autonomy.register(server, service, actor, invoke)
     return server

@@ -176,3 +176,41 @@ The legacy synchronous `merge_candidate` was removed.
 Primary references: [Windows Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects),
 [Python subprocess](https://docs.python.org/3/library/subprocess.html),
 [Monitoring and alerts](https://sre.google/sre-book/monitoring-distributed-systems/).
+# Autonomy run recovery
+
+Schema-4 `autonomy.status` returns the retained run, attempts, counters and
+unacknowledged notifications. Inspect it after an ambiguous response; repeat
+admission with the original key and exact input, never a new key to work around
+a retained attempt. Preserve leases, jobs, candidates and reservations during
+drain. A controller keeps existing lease heartbeats independent of output.
+
+Only Planner/Admin can start, stop, resume or acknowledge a run. Selected
+execution controllers may report typed stop signals and settle optional usage;
+their result never replaces candidate, QA or Git truth. Explicit resume checks
+current version, settled drain, barriers, capabilities and remaining count
+limits. Planner can explicitly supply replacement finite limits, audited against
+old limits without resetting counters; an expired wall window requires that
+explicit replacement. Accepted work is not cancelled merely because the window
+ends. Unknown usage requires owner review,
+and ambiguous suite/Git execution retains capacity rather than refunding work
+that may already have happened. Follow the existing merge reconciliation path
+for uncertain Git outcomes. Unreserved required validation holds its queued
+job and preserves prior infrastructure evidence; the supervisor starts it only
+after explicit resume provides available capacity. Expired claims must pass
+the existing lease recovery and fresh claim path before executing again.
+Operator landings remain ungated facts and are counted once; a server ceiling
+cannot prevent a Git write performed outside its lifecycle.
+
+After supervisor recovery closes an interrupted suite job, a lost execution
+callback settles conservatively as consumed and pauses with unknown usage.
+`autonomy.reconcile` is Planner/Admin-only: it resolves retained landing units
+from completed merge truth or fresh candidate ancestry/unchanged-base Git proof.
+It never accepts a client's claim that work did not execute. Still-running or
+ambiguous work stays retained with the required supervisor/merge recovery action;
+retry reconciliation after that existing lifecycle settles the job. No evidence
+or candidate is deleted, and potentially consumed suites are never refunded.
+
+The foundation does not spawn subscription workers or alter installed host
+startup. Serving code requires schema 4; use the documented backed-up operator
+upgrade only after owner authorization. Do not test or migrate against the
+shared schema-3 database.

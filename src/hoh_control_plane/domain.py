@@ -109,6 +109,13 @@ class ConflictError(DomainError):
     status_code = 409
 
 
+class AutonomyExecutionPaused(ConflictError):
+    """A retained execution needs owner review before another budgeted start."""
+
+    code = "autonomy_execution_paused"
+    prior_execution = None
+
+
 class ReleasePolicyError(ConflictError):
     """The current candidate does not satisfy the standing release policy.
 

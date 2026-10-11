@@ -1,4 +1,5 @@
 from __future__ import annotations
+from hoh_control_plane.domain import AutonomyExecutionPaused
 
 import json
 from dataclasses import replace
@@ -240,6 +241,7 @@ class IntegrationMixin:
                 {"landed_commit": landed_commit, "gated": False, "qa_verified": False,
                  **({"detection": detection} if detection else {})},
             )
+            self._autonomy_observed_landing(connection, project_id, ticket_id)
             self._close_ticket_dispatch(connection, ticket_id, timestamp)
             # An expired lease is no longer an owner. Leaving it behind lets an
             # older recovery path put already-landed work back on the queue.
@@ -732,7 +734,7 @@ class IntegrationMixin:
         outcome = "barrier_pending"
         with self.store.connection(immediate=True) as connection:
             job = self._merge_job(connection, merge_job_id)
-            if job["status"] != "QUEUED":
+            if job["status"] != "QUEUED" or job.get("autonomy_hold_run_id"):
                 return job
             actor = Actor(job["requested_by"], Role.INTEGRATOR, frozenset({job["project_id"]}))
             ticket = self._ticket(connection, job["ticket_id"])
@@ -795,6 +797,8 @@ class IntegrationMixin:
                 return self._auto_rebase_drifted(
                     merge_job_id, job, actor, ticket, candidate, repository, project, current_main)
             reused = self._reusable_qa_run(job["candidate_id"], command, profile["timeout_seconds"])
+        except AutonomyExecutionPaused as error:
+            return self._autonomy_hold_job(f"merge:{merge_job_id}", error)
         except DomainError as error:
             return self.fail_queued_merge(merge_job_id, str(error))
         if reused is not None:
@@ -806,7 +810,7 @@ class IntegrationMixin:
                 ticket_id=job["ticket_id"], candidate_commit=candidate["commit_sha"],
             ) as integration_path:
                 execution = self._execute_frozen_profile(
-                    command, integration_path, profile["timeout_seconds"], job["candidate_id"])
+                    command, integration_path, profile["timeout_seconds"], job["candidate_id"], execution_ref=f"merge:{merge_job_id}")
             execution = replace(execution, environment_manifest={**execution.environment_manifest,
                 "merge_job_id": merge_job_id,
                 "frozen_profile": {"configured_at": profile["configured_at"],
@@ -829,6 +833,8 @@ class IntegrationMixin:
                         "submit corrected source for independent QA."
                         if execution.termination_reason == "candidate_config_invalid" else
                         f"Integration regression failed; inspect {gate_run['storage_ref']} and submit corrected source for independent QA."))
+        except AutonomyExecutionPaused as error:
+            return self._autonomy_hold_job(f"merge:{merge_job_id}", error)
         except DomainError as error:
             return self.fail_queued_merge(merge_job_id, str(error))
         return self._finish_gate_and_merge(
@@ -1074,6 +1080,12 @@ class IntegrationMixin:
         except DomainError as error:
             return self._fail_merge_precondition(merge_job_id, outcome, str(error))
         try:
+            self._autonomy_reserve(f"merge:{merge_job_id}", "landed_tickets", job["ticket_id"], job["ticket_id"])
+        except AutonomyExecutionPaused as error:
+            return self._autonomy_hold_job(f"merge:{merge_job_id}", error)
+        except DomainError as error:
+            return self._fail_merge_precondition(merge_job_id, "release_policy_changed", str(error))
+        try:
             # From here the shared checkout's branch and tree move together;
             # the supervisor neither cancels nor times out this phase (R6/G14).
             with uncancellable(self.store.artifact_root, "merge", merge_job_id):
@@ -1110,6 +1122,8 @@ class IntegrationMixin:
                 )
             return self._complete_queued_merge(merge_job_id, merged, mainline_commit)
         except GitPreconditionError as error:
+            with self.store.connection(immediate=True) as connection:
+                connection.execute("UPDATE autonomy_reservations SET state = 'RELEASED', settled_at = ? WHERE job_ref = ? AND unit = 'landed_tickets' AND state = 'RESERVED'", (_iso(), f"merge:{merge_job_id}"))
             # Refused before any write: nothing to reconcile. A dirty or
             # wrongly checked-out shared checkout is the host's to repair.
             return self.fail_queued_merge(
@@ -1237,6 +1251,8 @@ class IntegrationMixin:
                 return job
             actor = Actor(job["requested_by"], Role.INTEGRATOR, frozenset({job["project_id"]}))
             ticket = self._ticket(connection, job["ticket_id"])
+            connection.execute("UPDATE autonomy_reservations SET state = ?, settled_at = ? WHERE job_ref = ? AND unit = 'landed_tickets' AND state = 'RESERVED'",
+                ("SETTLED" if merged else "RELEASED", _iso(), f"merge:{merge_job_id}"))
             retirement_pending = connection.execute(
                 """SELECT 1 FROM ticket_retirement_requests
                    WHERE ticket_id = ? AND status = 'PENDING'""",
@@ -1450,6 +1466,7 @@ class IntegrationMixin:
             if job["status"] in {"COMPLETED", "FAILED"}:
                 return job
             timestamp = _iso()
+            connection.execute("UPDATE autonomy_reservations SET state = 'RELEASED', settled_at = ? WHERE job_ref = ? AND unit = 'landed_tickets' AND state = 'RESERVED'", (timestamp, f"merge:{merge_job_id}"))
             connection.execute(
                 """UPDATE merge_jobs SET status = 'FAILED', error_message = ?, completed_at = ?
                    WHERE merge_job_id = ?""",
@@ -1478,6 +1495,7 @@ class IntegrationMixin:
             job = self._merge_job(connection, merge_job_id)
             if job["status"] in {"COMPLETED", "FAILED"}:
                 return job
+            connection.execute("UPDATE autonomy_reservations SET state = ?, settled_at = ? WHERE job_ref = ? AND unit = 'landed_tickets' AND state = 'RESERVED'", ("SETTLED" if error_message.startswith("candidate_already_on_main:") else "RELEASED", _iso(), f"merge:{merge_job_id}"))
             connection.execute(
                 """UPDATE merge_jobs SET status = 'FAILED', error_message = ?, completed_at = ?
                    WHERE merge_job_id = ?""",

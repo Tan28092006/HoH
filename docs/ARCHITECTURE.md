@@ -560,3 +560,18 @@ by a dependency edge, a job or a refusal rather than by prose.
 | Wait, wake-up or event behavior | `event_wait.py`, `agent_wakeup.py`, `docs/GUI_EVENT_WAIT.md`, release 0.3.24 |
 | Worker lifecycle | `supervisor.py`, the job's mixin, `docs/RUNTIME_OPERATIONS.md` |
 | Anything a client installs | `skills/`, `agent_assets/`, `agent_kit.py`, `local_agent.py`; installed clients change only on upgrade |
+# Scoped autonomy runs
+
+`service/autonomy.py` owns schema-4 runs, attempt identities, execution
+reservations and durable notifications. `mcp/tools/autonomy.py` exposes owner
+lifecycle controls separately from selected execution-role admission and stop
+signals. Atomic admission enters `LeaseMixin._claim`, retaining its snapshot,
+scope, dependency, barrier, capability and maker/checker checks. No service
+module depends on a CLI crew client.
+
+QA and integration pass an optional execution guard into `ProjectTestRunner`;
+it reserves immediately around each actual subprocess, including internal
+retry. Mainline checks use the same seam. Gate reuse has no subprocess and
+therefore no new suite charge. A landing reservation precedes Git and settles
+from durable integration truth. All budget mutations use the existing store
+write-transaction serialization, including PostgreSQL's advisory lock.

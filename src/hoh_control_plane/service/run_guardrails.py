@@ -17,6 +17,7 @@ The pause is one project flag, read by ``MergeQueueGuard``; the merge queue
 It never touches ``ExecutionGate``: development and QA keep flowing.
 """
 from __future__ import annotations
+from hoh_control_plane.domain import AutonomyExecutionPaused
 
 from hoh_control_plane.service._common import (
     Actor,
@@ -406,7 +407,7 @@ class RunGuardrailsMixin:
         """Run the project's test command on the recorded main commit (supervisor test slot)."""
         with self.store.connection(immediate=True) as connection:
             check = self._mainline_check(connection, check_id)
-            if check["status"] != "QUEUED":
+            if check["status"] != "QUEUED" or check.get("autonomy_hold_run_id"):
                 return check
             project_id = check["project_id"]
             profile = _row(connection.execute(
@@ -436,10 +437,14 @@ class RunGuardrailsMixin:
             ) as checkout_path:
                 # Main is Planner truth; a Planner-set list still applies (8A, R8).
                 modules = profile.get("provenance_modules")
+                guard = self._autonomy_execution_guard(f"main:{check_id}")
                 execution = self.project_tests.execute(
                     command, checkout_path, int(profile["timeout_seconds"]),
                     **({"provenance_modules": modules} if modules else {}),
+                    **({"execution_guard": guard} if guard else {}),
                 )
+        except AutonomyExecutionPaused as error:
+            return self._autonomy_hold_job(f"main:{check_id}", error)
         except DomainError as error:
             return self.fail_queued_mainline_check(check_id, str(error))
         infrastructure = (

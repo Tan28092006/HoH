@@ -13,8 +13,9 @@ from pathlib import Path
 import re
 import tempfile
 import tomllib
+from contextlib import nullcontext
 
-from hoh_control_plane.domain import ValidationError
+from hoh_control_plane.domain import AutonomyExecutionPaused, ValidationError
 from hoh_control_plane.managed_process import run_managed
 from hoh_control_plane.resource_probe import resource_snapshot
 
@@ -175,6 +176,7 @@ class ProjectTestRunner:
     def execute(
         self, command: list[str], worktree_path: str, timeout_seconds: int,
         provenance_modules: list[str] | None = None,
+        execution_guard=None,
     ) -> TestExecution:
         """Run the registered command against the frozen worktree.
 
@@ -187,7 +189,7 @@ class ProjectTestRunner:
         environment = self._build_environment(worktree_path)
         if self._pytest_arguments(command) is not None:
             return self._execute_pytest(command, worktree_path, timeout_seconds, environment,
-                                        frozen_modules=provenance_modules)
+                                        frozen_modules=provenance_modules, execution_guard=execution_guard)
         resolved_source = self._resolve_candidate_source(command, worktree_path, environment)
         if resolved_source is not None and not self._within_worktree(
             resolved_source, worktree_path
@@ -210,12 +212,13 @@ class ProjectTestRunner:
             )
         completed = None
         try:
-            completed = run_managed(
-                command,
-                cwd=worktree_path,
-                env=environment,
-                timeout=timeout_seconds,
-            )
+            with execution_guard(0) if execution_guard else nullcontext():
+                completed = run_managed(
+                    command,
+                    cwd=worktree_path,
+                    env=environment,
+                    timeout=timeout_seconds,
+                )
             if completed.returncode == 127 and '[hoh:exec-error]' in completed.stderr:
                 raise ValidationError('Registered project test command cannot be executed')
             exit_code = completed.returncode
@@ -357,7 +360,7 @@ class ProjectTestRunner:
             [p.parent.name for p in source.glob("*/__init__.py")] if source.is_dir() else [])
 
     def _execute_pytest(self, command, worktree, timeout, environment, *, retry_of=None,
-                        frozen_modules=None):
+                        frozen_modules=None, execution_guard=None):
         flags, arguments = self._pytest_arguments(command)
         requested_workers = xdist_workers(arguments)
         started = time.perf_counter()
@@ -449,7 +452,8 @@ class ProjectTestRunner:
             invocation = [command[0], *flags, str(probe), str(report), str(config), *arguments]
             manifest["instrumentation"]["entrypoint"] = str(probe)
             try:
-                completed = run_managed(invocation, cwd=worktree, env=environment, timeout=timeout)
+                with execution_guard(1 if retry_of else 0) if execution_guard else nullcontext():
+                    completed = run_managed(invocation, cwd=worktree, env=environment, timeout=timeout)
             except (OSError, subprocess.TimeoutExpired):
                 return result("launch_failure")
             child = {}
@@ -504,11 +508,15 @@ class ProjectTestRunner:
             retry_arguments = arguments
             if current is not None and current.isdigit():
                 retry_arguments = with_xdist_workers(arguments, max(1, int(current) // 2))
-            return self._execute_pytest(command, worktree, timeout, environment,
-                                        frozen_modules=frozen_modules, retry_of={
-                "reason": reason, "exit_code": completed.returncode,
-                "xdist_workers": current, "arguments": retry_arguments,
-            })
+            try:
+                return self._execute_pytest(command, worktree, timeout, environment,
+                                            frozen_modules=frozen_modules, execution_guard=execution_guard, retry_of={
+                    "reason": reason, "exit_code": completed.returncode,
+                    "xdist_workers": current, "arguments": retry_arguments,
+                })
+            except AutonomyExecutionPaused as error:
+                error.prior_execution = result(reason, child=child, completed=completed)
+                raise
         return result(reason, child=child, completed=completed)
 
     def _resolve_candidate_source(

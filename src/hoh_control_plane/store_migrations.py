@@ -52,7 +52,8 @@ class SchemaVersionError(SchemaMigrationError):
 #        column is additive and nullable, so a wave 7 build reads it safely):
 #        qa_test_runs.termination_reason and provenance_status (R1);
 #        project_ and candidate_test_profiles.provenance_modules (R8).
-SCHEMA_VERSION = 3
+#   4 -- server-owned autonomy runs, attempts, reservations and notifications.
+SCHEMA_VERSION = 4
 
 
 def read_schema_version(connection: Any, columns_of: Any) -> int:
@@ -141,6 +142,9 @@ _TICKET_STATUS_COLUMN = re.compile(r"(\bstatus\s+TEXT\s+NOT\s+NULL)\s*(?=,|\n|\)
 # Every declaration is valid in both dialects, and every default states what was
 # already true of the rows being migrated rather than inventing a new fact.
 ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("qa_test_jobs", "autonomy_hold_run_id", "TEXT"),
+    ("merge_jobs", "autonomy_hold_run_id", "TEXT"),
+    ("mainline_checks", "autonomy_hold_run_id", "TEXT"),
     # Quality contracts introduced after the first local releases. Existing
     # projects remain in legacy mode until a Planner explicitly enables the
     # claim/evidence gate; existing tickets therefore migrate without invented
@@ -631,12 +635,15 @@ class SQLiteRebuildMigrations:
             "command_digest, timeout_seconds, worktree_path, candidate_commit, requested_by, "
             "status, error_message, created_at, started_at, completed_at"
         )
+        if "autonomy_hold_run_id" in {row["name"] for row in connection.execute("PRAGMA table_info(qa_test_jobs)").fetchall()}:
+            columns += ", autonomy_hold_run_id"
         connection.execute("DROP INDEX IF EXISTS qa_test_jobs_candidate_created")
         connection.execute("DROP INDEX IF EXISTS qa_test_jobs_active_candidate")
         connection.execute("ALTER TABLE qa_test_jobs RENAME TO qa_test_jobs_legacy")
         connection.execute(
             """
             CREATE TABLE qa_test_jobs (
+                autonomy_hold_run_id TEXT,
                 test_run_id TEXT PRIMARY KEY,
                 project_id TEXT NOT NULL REFERENCES projects(project_id),
                 candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),

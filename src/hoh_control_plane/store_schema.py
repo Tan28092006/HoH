@@ -361,6 +361,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS candidate_submission_jobs_one_active_ticket
 -- of any BEGIN IMMEDIATE write transaction, while preserving the Integrator
 -- lease and a durable polling record.
 CREATE TABLE IF NOT EXISTS merge_jobs (
+    autonomy_hold_run_id TEXT,
     merge_job_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(project_id),
     ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
@@ -441,6 +442,7 @@ CREATE INDEX IF NOT EXISTS qa_test_runs_candidate_created
     ON qa_test_runs(candidate_id, created_at);
 
 CREATE TABLE IF NOT EXISTS qa_test_jobs (
+    autonomy_hold_run_id TEXT,
     test_run_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(project_id),
     candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),
@@ -906,6 +908,7 @@ CREATE TABLE IF NOT EXISTS project_run_guardrails (
 -- One run of the project's test command on main after a landing moved it,
 -- executed by the supervisor in the host's test slot.
 CREATE TABLE IF NOT EXISTS mainline_checks (
+    autonomy_hold_run_id TEXT,
     check_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(project_id),
     mainline_commit TEXT NOT NULL,
@@ -925,6 +928,68 @@ CREATE TABLE IF NOT EXISTS mainline_checks (
 
 CREATE INDEX IF NOT EXISTS idx_mainline_checks_project_status
     ON mainline_checks(project_id, status, created_at);
+
+-- Admission ceilings belong to the shared server, not a runner checkpoint.
+CREATE TABLE IF NOT EXISTS autonomy_runs (
+    run_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    created_by TEXT NOT NULL,
+    start_key TEXT NOT NULL,
+    start_request TEXT NOT NULL,
+    ticket_ids TEXT NOT NULL,
+    role_agents TEXT NOT NULL,
+    limits TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('ACTIVE', 'DRAINING', 'PAUSED', 'COMPLETED')),
+    stop_reason TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    deadline_at TEXT NOT NULL,
+    idle_seconds INTEGER NOT NULL,
+    last_activity_at TEXT NOT NULL,
+    resume_at TEXT,
+    UNIQUE (created_by, start_key)
+);
+CREATE TABLE IF NOT EXISTS autonomy_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES autonomy_runs(run_id),
+    ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
+    actor_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    admission_key TEXT NOT NULL,
+    admission_request TEXT NOT NULL,
+    lease_id TEXT NOT NULL,
+    claim_result TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('ADMITTED', 'SETTLED')),
+    observed_tokens INTEGER,
+    cli_outcome TEXT,
+    result_ref TEXT,
+    finish_request TEXT,
+    created_at TEXT NOT NULL,
+    settled_at TEXT,
+    UNIQUE (run_id, actor_id, admission_key)
+);
+CREATE INDEX IF NOT EXISTS autonomy_attempts_lease ON autonomy_attempts(lease_id);
+CREATE TABLE IF NOT EXISTS autonomy_reservations (
+    reservation_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES autonomy_runs(run_id),
+    unit TEXT NOT NULL CHECK (unit IN ('suite_starts', 'landed_tickets')),
+    unit_key TEXT NOT NULL,
+    ticket_id TEXT REFERENCES tickets(ticket_id),
+    job_ref TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('RESERVED', 'SETTLED', 'RELEASED')),
+    created_at TEXT NOT NULL,
+    settled_at TEXT,
+    UNIQUE (run_id, unit, unit_key)
+);
+CREATE TABLE IF NOT EXISTS autonomy_notifications (
+    notification_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES autonomy_runs(run_id),
+    transition_version INTEGER NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    acknowledged_at TEXT,
+    UNIQUE (run_id, transition_version)
+);
 """
 
 

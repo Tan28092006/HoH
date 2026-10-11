@@ -92,9 +92,11 @@ from hoh_control_plane.service.planner_jobs import PlannerJobMixin
 from hoh_control_plane.service.leases import LeaseMixin
 from hoh_control_plane.service.validation import ValidationMixin
 from hoh_control_plane.service.risk_policy import RiskPolicyMixin
+from hoh_control_plane.service.autonomy import AutonomyMixin
 
 
 class ControlPlaneService(
+    AutonomyMixin,
     SessionMixin,
     ProjectSetupMixin,
     RepositoryReconciliationMixin,

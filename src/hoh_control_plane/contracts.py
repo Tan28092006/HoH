@@ -10,6 +10,19 @@ from typing import Annotated, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+
+class AutonomyLimits(BaseModel):
+    """Hard admission ceilings; tokens are an observed-usage threshold."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    wall_seconds: int = Field(ge=30, le=604800)
+    launch_attempts: int = Field(ge=1, le=10000)
+    in_flight: int = Field(ge=1, le=20)
+    suite_starts: int = Field(ge=0, le=10000)
+    landed_tickets: int = Field(ge=0, le=10000)
+    crash_retries: int = Field(default=1, ge=0, le=10)
+    observed_tokens: int | None = Field(default=None, ge=1, le=2000000000)
+
 # --- Validation contracts (service.project_policy._validated_validation_contract)
 # The ticket section is never compacted, so contract text is carried by every
 # packet for the ticket's whole life (release 0.3.21).
