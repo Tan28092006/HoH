@@ -1,5 +1,6 @@
 """Real trusted observer runs, including reports transported by xdist."""
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -17,18 +18,18 @@ def observe(tmp_path, monkeypatch):
     root = tmp_path / "candidate"
     root.mkdir()
 
-    def run(source, workers):
+    def run(source, workers, *, flags=(), modules=()):
         (root / "test_sample.py").write_text(source, encoding="utf-8")
-        command = [sys.executable, "-m", "pytest", "-p", "xdist.plugin",
+        command = [sys.executable, *flags, "-m", "pytest", "-p", "xdist.plugin",
                    "-n", str(workers), "-q", "--tb=short", str(root)]
         execution = ProjectTestRunner(tmp_path / "evidence").execute(command, str(root), 120,
-                                                                   provenance_modules=[])
+                                                                   provenance_modules=list(modules))
         child = execution.environment_manifest["child"]
         assert not execution.timed_out, execution.stderr
         assert not execution.capture_errors, execution.capture_errors
         assert child["phase"] == "session_finished", execution.stderr
         assert child["pytest_exit_status"] == execution.exit_code
-        assert child["provenance_status"] == "not_applicable"
+        assert child["provenance_status"] == ("verified" if modules else "not_applicable")
         return execution, child
 
     return run
@@ -68,6 +69,35 @@ def test_parallel_memory_failure_remains_infrastructure(observe, workers):
     assert child["resource_failures"] == 1
     assert execution.termination_reason == "resource_exhausted"
     assert execution.environment_manifest["classification"] == "infrastructure_failure"
+
+
+@pytest.mark.parametrize("workers", [0, 2], ids=["serial-retry", "xdist"])
+@pytest.mark.parametrize("base,resource", [("'Memory' + 'Error'", True), ("'RuntimeError'", False)])
+def test_neutral_exception_ancestry_survives_worker_transport(observe, workers, base, resource):
+    # Split the builtin name so printed source cannot trigger stderr heuristics.
+    source = ("import builtins\n"
+              f"AllocationFailure = type('AllocationFailure', (getattr(builtins, {base}),), {{}})\n"
+              "def test_a(): raise AllocationFailure('neutral failure')\n")
+    execution, child = observe(source, workers)
+    assert child["resource_failures"] == int(resource)
+    assert child["test_counts"] == {"passed": 0, "failed": 1, "skipped": 0, "collection_errors": 0}
+    assert execution.termination_reason == ("resource_exhausted" if resource else "test_failure")
+    assert execution.environment_manifest["classification"] == (
+        "infrastructure_failure" if resource else "candidate_failure")
+    if resource:
+        assert execution.environment_manifest["retry_of"]["reason"] == "resource_exhausted"
+
+
+@pytest.mark.parametrize("workers", [0, 2], ids=["serial", "xdist"])
+@pytest.mark.parametrize("flags,modules", [(("-I",), ()), (("-B",), ("test_sample",))])
+def test_worker_observer_preserves_flags_and_provenance(observe, workers, flags, modules):
+    execution, child = observe("def test_a(): pass\n", workers, flags=flags, modules=modules)
+    assert execution.termination_reason == "passed"
+    assert child["isolated"] == ("-I" in flags)
+    assert execution.environment_manifest["instrumentation"]["python_flags"] == list(flags)
+    if modules:
+        source = Path(child["source_modules"]["test_sample"]["path"])
+        assert source.name == "test_sample.py" and source.parent.name == "candidate"
 
 
 @pytest.mark.parametrize("workers", [0, 2], ids=["serial", "xdist"])
