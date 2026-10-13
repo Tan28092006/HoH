@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from concurrent.futures import ThreadPoolExecutor
 import ctypes
 import json
@@ -11,6 +12,7 @@ import os
 from pathlib import Path
 import secrets
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -44,14 +46,148 @@ def initialize():
     print('Initialized local settings and four private role credentials; values were not printed.')
 
 
+def private_temp(config=None):
+    """Publish a short temp path only after establishing its private boundary."""
+    config = settings() if config is None else config
+    explicit = 'private_temp_path' in config
+    temp = ROOT / 't'
+    physical = temp
+    try:
+        if explicit:
+            value = config['private_temp_path']
+            if not isinstance(value, str) or not value:
+                raise OSError('Invalid path')
+            temp = Path(value)
+            if (not temp.is_absolute() or '..' in temp.parts or
+                    (os.name == 'nt' and len(temp.drive) != 2)):
+                raise OSError('Invalid path')
+            for forbidden in (ROOT, Path('D:/HoH-service'), Path('D:/HoH/data')):
+                if temp.is_relative_to(forbidden):
+                    raise OSError('Protected location')
+            if not temp.is_dir():
+                raise OSError('Missing directory')
+            if os.name == 'nt':
+                drive_type = ctypes.windll.kernel32.GetDriveTypeW
+                drive_type.argtypes = [ctypes.c_wchar_p]
+                drive_type.restype = ctypes.c_uint
+                if drive_type(temp.anchor) not in (2, 3, 6):  # local removable/fixed/RAM
+                    raise OSError('Nonlocal drive')
+                physical = Path(os.path.realpath(temp, strict=True))
+                if len(physical.drive) != 2:
+                    raise OSError('Nonlocal physical path')
+            else:
+                physical = temp
+            # Native file identity also closes aliases with another drive letter.
+            for forbidden in (ROOT, Path('D:/HoH-service'), Path('D:/HoH/data')):
+                if forbidden.exists():
+                    canonical = Path(os.path.realpath(forbidden, strict=True))
+                    if (physical.is_relative_to(canonical) or
+                            any(os.path.samefile(path, forbidden)
+                                for path in (physical, *physical.parents))):
+                        raise OSError('Protected physical location')
+        for path in (temp, *temp.parents, physical, *physical.parents):
+            if path.exists() or path.is_symlink():
+                info = path.lstat()
+                if (stat.S_ISLNK(info.st_mode) or
+                        getattr(info, 'st_file_attributes', 0) & 0x400):
+                    raise OSError('Reparse point')
+        if not explicit:
+            temp.mkdir(mode=0o700, exist_ok=True)
+        if os.name != 'nt':
+            if temp.stat().st_uid != os.getuid():
+                raise OSError('Unexpected temp owner')
+            for ancestor in temp.parents:
+                info = ancestor.stat()
+                if (info.st_uid not in (os.getuid(), 0) or
+                        (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX)):
+                    raise OSError('Unsafe ancestor')
+            if not explicit:
+                temp.chmod(0o700)
+            if stat.S_IMODE(temp.stat().st_mode) != 0o700:
+                raise OSError('Private mode verification failed')
+        else:
+            # Request Access only: setting even an unchanged owner requires
+            # WRITE_OWNER, which a non-elevated installation owner may lack.
+            script = r'''
+$ErrorActionPreference = 'Stop'
+$temp = $env:HOH_PRIVATE_TEMP
+$directory = [IO.DirectoryInfo]::new($temp)
+if ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse point' }
+$before = Get-Acl -LiteralPath $temp
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+$owner = $before.GetOwner([Security.Principal.SecurityIdentifier]).Value
+$group = $before.GetGroup([Security.Principal.SecurityIdentifier]).Value
+if ($owner -ne $sid.Value) { throw 'Unexpected temp owner' }
+$allowed = @($sid, [Security.Principal.SecurityIdentifier]::new('S-1-5-18'), [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+# Check every pathname boundary, including the drive root. A private leaf
+# cannot stop a parent's DELETE_CHILD grant, nor a replaceable ancestor.
+$trusted = @($allowed | ForEach-Object { $_.Value })
+$parent = [IO.DirectoryInfo]::new($env:HOH_PRIVATE_TEMP_PHYSICAL).Parent
+while ($null -ne $parent) {
+    if ($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse point' }
+    $parentAcl = Get-Acl -LiteralPath $parent.FullName
+    $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($parentAcl.GetSecurityDescriptorBinaryForm(), 0)
+    if ($null -eq $descriptor.DiscretionaryAcl) { throw 'Unrestricted ancestor' }
+    if ($parentAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $trusted) { throw 'Unexpected ancestor owner' }
+    foreach ($rule in $parentAcl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -ne 'Allow' -or $rule.IdentityReference.Value -in $trusted -or
+            ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly)) { continue }
+        # WRITE_DAC/WRITE_OWNER can grant DELETE_CHILD later. DELETE permits
+        # moving a non-root ancestor even when its descendants are private.
+        $dangerous = 0x100C0040
+        if ($null -ne $parent.Parent) { $dangerous = $dangerous -bor 0x10000 }
+        if ([int]$rule.FileSystemRights -band $dangerous) { throw 'Unsafe ancestor permissions' }
+    }
+    $parent = $parent.Parent
+}
+if ($env:HOH_PRIVATE_TEMP_VERIFY_ONLY -ne '1') {
+$acl = $directory.GetAccessControl([Security.AccessControl.AccessControlSections]::Access)
+$acl.SetAccessRuleProtection($true, $false)
+foreach ($rule in @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))) { $acl.RemoveAccessRuleAll($rule) }
+foreach ($identity in $allowed) {
+    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($identity, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+}
+$directory.SetAccessControl($acl)
+}
+$verified = Get-Acl -LiteralPath $temp
+$rules = @($verified.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+$expected = @($allowed | ForEach-Object { $_.Value } | Sort-Object -Unique)
+$actual = @($rules | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique)
+if (-not $verified.AreAccessRulesProtected -or $rules.Count -ne 3 -or
+    @(Compare-Object $expected $actual).Count -or
+    $verified.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $owner -or
+    $verified.GetGroup([Security.Principal.SecurityIdentifier]).Value -ne $group -or
+    @($rules | Where-Object { $_.IsInherited -or $_.AccessControlType -ne 'Allow' -or
+        $_.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+        $_.InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit' -or
+        $_.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None }).Count -or
+    ([IO.DirectoryInfo]::new($temp).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    throw 'Private ACL verification failed'
+}
+'''
+            helper_env = {k: v for k, v in os.environ.items()
+                          if k.upper() != 'PSMODULEPATH'}
+            helper_env['HOH_PRIVATE_TEMP'] = str(temp)
+            helper_env['HOH_PRIVATE_TEMP_PHYSICAL'] = str(physical)
+            helper_env['HOH_PRIVATE_TEMP_VERIFY_ONLY'] = '1' if explicit else '0'
+            powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+            result = subprocess.run([str(powershell), '-NoProfile', '-NonInteractive',
+                '-EncodedCommand', base64.b64encode(script.encode('utf-16le')).decode('ascii')],
+                env=helper_env, capture_output=True, timeout=30, creationflags=HIDDEN)
+            if result.returncode:
+                raise OSError('Private ACL setup failed')
+    except (OSError, KeyError, ValueError, TypeError, subprocess.SubprocessError):
+        # Helper output/environment may contain sensitive caller information.
+        raise RuntimeError('Cannot establish private installation temporary directory') from None
+    return temp
+
+
 def environment(component):
     config = settings()
     env = {k: v for k, v in os.environ.items()
            if not k.upper().startswith(('HOH_', 'COV_CORE', 'COVERAGE'))
            and k.upper() not in {'PYTHONPATH', 'PYTHONHOME'}}
-    # Keep worker paths short inside the installation's existing private boundary.
-    temp = ROOT / 't'
-    temp.mkdir(exist_ok=True)
+    temp = private_temp(config)
     env.update(TEMP=str(temp), TMP=str(temp))
     env.update(HOH_DATABASE_PATH=config['database_path'],
                HOH_WORKER_MODE='supervised', HOH_HOST='127.0.0.1',
