@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from concurrent.futures import ThreadPoolExecutor
 import ctypes
 import json
@@ -11,6 +12,7 @@ import os
 from pathlib import Path
 import secrets
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -44,14 +46,79 @@ def initialize():
     print('Initialized local settings and four private role credentials; values were not printed.')
 
 
+def private_temp():
+    """Publish a short temp path only after establishing its private boundary."""
+    temp = ROOT / 't'
+    try:
+        for path in (ROOT, temp):
+            if path.exists() or path.is_symlink():
+                info = path.lstat()
+                if (stat.S_ISLNK(info.st_mode) or
+                        getattr(info, 'st_file_attributes', 0) & 0x400):
+                    raise OSError('Reparse point')
+        temp.mkdir(mode=0o700, exist_ok=True)
+        if os.name != 'nt':
+            temp.chmod(0o700)
+            if stat.S_IMODE(temp.stat().st_mode) != 0o700:
+                raise OSError('Private mode verification failed')
+        else:
+            # Request Access only: setting even an unchanged owner requires
+            # WRITE_OWNER, which a non-elevated installation owner may lack.
+            script = r'''
+$ErrorActionPreference = 'Stop'
+$temp = $env:HOH_PRIVATE_TEMP
+$directory = [IO.DirectoryInfo]::new($temp)
+if ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse point' }
+$before = Get-Acl -LiteralPath $temp
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+$owner = $before.GetOwner([Security.Principal.SecurityIdentifier]).Value
+$group = $before.GetGroup([Security.Principal.SecurityIdentifier]).Value
+if ($owner -ne $sid.Value) { throw 'Unexpected temp owner' }
+$allowed = @($sid, [Security.Principal.SecurityIdentifier]::new('S-1-5-18'), [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+$acl = $directory.GetAccessControl([Security.AccessControl.AccessControlSections]::Access)
+$acl.SetAccessRuleProtection($true, $false)
+foreach ($rule in @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))) { $acl.RemoveAccessRuleAll($rule) }
+foreach ($identity in $allowed) {
+    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($identity, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+}
+$directory.SetAccessControl($acl)
+$verified = Get-Acl -LiteralPath $temp
+$rules = @($verified.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+$expected = @($allowed | ForEach-Object { $_.Value } | Sort-Object -Unique)
+$actual = @($rules | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique)
+if (-not $verified.AreAccessRulesProtected -or $rules.Count -ne 3 -or
+    @(Compare-Object $expected $actual).Count -or
+    $verified.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $owner -or
+    $verified.GetGroup([Security.Principal.SecurityIdentifier]).Value -ne $group -or
+    @($rules | Where-Object { $_.IsInherited -or $_.AccessControlType -ne 'Allow' -or
+        $_.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+        $_.InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit' -or
+        $_.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None }).Count -or
+    ([IO.DirectoryInfo]::new($temp).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    throw 'Private ACL verification failed'
+}
+'''
+            helper_env = {k: v for k, v in os.environ.items()
+                          if k.upper() != 'PSMODULEPATH'}
+            helper_env['HOH_PRIVATE_TEMP'] = str(temp)
+            powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+            result = subprocess.run([str(powershell), '-NoProfile', '-NonInteractive',
+                '-EncodedCommand', base64.b64encode(script.encode('utf-16le')).decode('ascii')],
+                env=helper_env, capture_output=True, timeout=30, creationflags=HIDDEN)
+            if result.returncode:
+                raise OSError('Private ACL setup failed')
+    except (OSError, KeyError, subprocess.SubprocessError):
+        # Helper output/environment may contain sensitive caller information.
+        raise RuntimeError('Cannot establish private installation temporary directory') from None
+    return temp
+
+
 def environment(component):
     config = settings()
     env = {k: v for k, v in os.environ.items()
            if not k.upper().startswith(('HOH_', 'COV_CORE', 'COVERAGE'))
            and k.upper() not in {'PYTHONPATH', 'PYTHONHOME'}}
-    # Keep worker paths short inside the installation's existing private boundary.
-    temp = ROOT / 't'
-    temp.mkdir(exist_ok=True)
+    temp = private_temp()
     env.update(TEMP=str(temp), TMP=str(temp))
     env.update(HOH_DATABASE_PATH=config['database_path'],
                HOH_WORKER_MODE='supervised', HOH_HOST='127.0.0.1',
