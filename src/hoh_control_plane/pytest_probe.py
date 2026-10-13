@@ -20,6 +20,18 @@ import uuid
 # Sent directly over the xdist gateway; never imported from candidate source.
 _EXCEPTION_OBSERVER = '''import pytest
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_configure(config):
+    import os
+    # The worker has registered us; subprocesses cannot import this in-memory module.
+    plugins = os.environ.get("PYTEST_PLUGINS", "").split(",")
+    if __name__ in plugins:
+        remaining = ",".join(plugin for plugin in plugins if plugin != __name__)
+        if remaining:
+            os.environ["PYTEST_PLUGINS"] = remaining
+        else:
+            os.environ.pop("PYTEST_PLUGINS", None)
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield

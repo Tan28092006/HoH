@@ -18,12 +18,18 @@ def observe(tmp_path, monkeypatch):
     root = tmp_path / "candidate"
     root.mkdir()
 
-    def run(source, workers, *, flags=(), modules=()):
+    def run(source, workers, *, flags=(), modules=(), plugins=()):
         (root / "test_sample.py").write_text(source, encoding="utf-8")
         command = [sys.executable, *flags, "-m", "pytest", "-p", "xdist.plugin",
                    "-n", str(workers), "-q", "--tb=short", str(root)]
-        execution = ProjectTestRunner(tmp_path / "evidence").execute(command, str(root), 120,
-                                                                   provenance_modules=list(modules))
+        runner = ProjectTestRunner(tmp_path / "evidence")
+        if plugins:
+            # Exercise worker plugin preservation after the runner's environment sanitization.
+            original_environment = runner._build_environment
+            monkeypatch.setattr(runner, "_build_environment", lambda path: {
+                **original_environment(path), "PYTEST_PLUGINS": ",".join(plugins),
+            })
+        execution = runner.execute(command, str(root), 120, provenance_modules=list(modules))
         child = execution.environment_manifest["child"]
         assert not execution.timed_out, execution.stderr
         assert not execution.capture_errors, execution.capture_errors
@@ -105,3 +111,30 @@ def test_printed_summary_cannot_supply_trusted_counts(observe, workers):
     execution, child = observe("def test_a():\n    print('999 passed, 77 failed, 55 skipped')\n", workers)
     assert child["test_counts"] == {"passed": 1, "failed": 0, "skipped": 0, "collection_errors": 0}
     assert execution.termination_reason == "passed"
+
+
+@pytest.mark.parametrize("workers", [0, 2], ids=["serial", "xdist"])
+@pytest.mark.parametrize("resource", [False, True], ids=["passed", "resource-failure"])
+def test_nested_pytest_preserves_user_plugins_and_worker_observation(observe, workers, resource):
+    source = (
+        "import builtins, os, subprocess, sys\n"
+        "def test_nested(tmp_path):\n"
+        "    (tmp_path / 'test_child.py').write_text('def test_child(): assert True\\n')\n"
+        "    result = subprocess.run([sys.executable, '-B', '-m', 'pytest', '-q', "
+        "'-p', 'no:cacheprovider', 'test_child.py'], cwd=tmp_path, "
+        "capture_output=True, text=True, timeout=60)\n"
+        "    assert result.returncode == 0, result.stdout + result.stderr\n"
+        "    assert os.environ['PYTEST_PLUGINS'] == 'pytest_cov'\n"
+    )
+    if resource:
+        source += (
+            "    AllocationFailure = type('AllocationFailure', "
+            "(getattr(builtins, 'Memory' + 'Error'),), {})\n"
+            "    raise AllocationFailure('neutral failure')\n"
+        )
+    execution, child = observe(source, workers, flags=("-B",), modules=("test_sample",), plugins=("pytest_cov",))
+    assert child["resource_failures"] == int(resource), execution.stdout + execution.stderr
+    assert child["test_counts"] == {
+        "passed": int(not resource), "failed": int(resource), "skipped": 0, "collection_errors": 0,
+    }, execution.stdout + execution.stderr
+    assert execution.termination_reason == ("resource_exhausted" if resource else "passed")
