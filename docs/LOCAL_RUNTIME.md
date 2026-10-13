@@ -60,6 +60,50 @@ neither are the `accidental-diagnostic-*` and `*-before-*` files in
   Codex restart does not stop the shared endpoint.
 - Generated setup commands use `python -I -m` inside a fenced block (0.3.23).
 
+## Private temporary directory
+
+The desktop launcher gives each component and its workers private `TEMP` and
+`TMP` values. Without `private_temp_path` in `config/settings.json`, it creates
+and protects installation `t` (for example `D:/HoH-service/t`). Windows requires
+operator ownership and replaces that directory's DACL with protected explicit
+operator, SYSTEM and Administrators FullControl entries, inherited by files and
+subdirectories; owner and group are retained. It also refuses unsafe ancestors.
+
+For a shorter worker path, the operator may provision an existing private
+local directory outside the installation and `D:/HoH/data`, then set the optional
+JSON field `"private_temp_path": "D:/q7e91"` in the installation settings. This
+example is a path choice, not a directory created by the launcher. Keep the
+settings under operator control. Short paths matter: the unchanged development
+scripts reject temp fixtures inside the installation, and the supervisor's
+bounded command repeats pytest's temp path several times. Choosing an external
+path does not guarantee every test passes; validate the unchanged commands on
+the configured path before deploying it.
+
+An explicit path is verification-only: it must be absolute, local, already
+present and owned by the launching operator. Windows checks native drive type
+for local storage and resolves the existing physical path before checking
+protected locations and ancestors; a drive alias cannot hide a protected
+installation/data directory. Original path ancestors are still checked for
+reparse points. On Windows its DACL must be
+protected and contain exactly the same three explicit FullControl entries with
+ObjectInherit and ContainerInherit and no propagation restrictions. Every
+ancestor must be free of reparse points, owned by operator, SYSTEM or
+Administrators, and have no applicable untrusted DELETE_CHILD, WRITE_DAC or
+WRITE_OWNER grant; non-root ancestors must also have no untrusted DELETE grant
+that permits moving the directory; a null parent DACL is refused. Broad readable
+parents are allowed only when
+these replacement checks pass. A private leaf alone is insufficient. On POSIX,
+the leaf must be operator-owned with mode 0700; ancestors must belong to that
+operator or root and prevent group/other replacement (a trusted-owned sticky
+directory also protects its owned child).
+
+Empty, relative, UNC, missing, protected-location or unsafe paths refuse startup
+with a generic error before publishing `TEMP`/`TMP`. The launcher never creates
+or repairs an explicit directory, changes its owner/group, falls back to public
+temp, or changes global environment, registry, pytest flags or runner profiles.
+No automatic permissions repair is performed on ancestors; the operator must
+provide a safe boundary, including for the default installation directory.
+
 ## Clients
 
 All installed Codex and Claude profiles use authenticated shared HTTP. A profile
