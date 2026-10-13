@@ -13,6 +13,33 @@ from pathlib import Path
 import platform
 import subprocess
 import sys
+import types
+import uuid
+
+
+# Sent directly over the xdist gateway; never imported from candidate source.
+_EXCEPTION_OBSERVER = '''import pytest
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_configure(config):
+    import os
+    # The worker has registered us; subprocesses cannot import this in-memory module.
+    plugins = os.environ.get("PYTEST_PLUGINS", "").split(",")
+    if __name__ in plugins:
+        remaining = ",".join(plugin for plugin in plugins if plugin != __name__)
+        if remaining:
+            os.environ["PYTEST_PLUGINS"] = remaining
+        else:
+            os.environ.pop("PYTEST_PLUGINS", None)
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    report.hoh_resource_failure = bool(call.excinfo and any(
+        c.__name__ in {"MemoryError", "ArrowMemoryError"}
+        for c in type(call.excinfo.value).__mro__))
+'''
 
 
 def _drop_own_directory():
@@ -101,6 +128,9 @@ def main():
 
     save()
     import pytest
+    observer_name = "_hoh_exception_observer_" + uuid.uuid4().hex
+    observer = types.ModuleType(observer_name)
+    exec(compile(_EXCEPTION_OBSERVER, __file__, "exec"), observer.__dict__)
 
     def verify_sources():
         names = settings["modules"]
@@ -162,15 +192,26 @@ def main():
                         {"nodeid": report.nodeid[:500], "path": foreign[:500]})
                 save()
 
-        @pytest.hookimpl(hookwrapper=True)
-        def pytest_runtest_makereport(self, item, call):
-            outcome = yield
-            report = outcome.get_result()
-            # Preserve exception-type inspection in serial runs. Workers send
-            # their report representations to the controller instead.
-            report.hoh_resource_failure = bool(call.excinfo and any(
-                c.__name__ in {"MemoryError", "ArrowMemoryError"}
-                for c in type(call.excinfo.value).__mro__))
+        @pytest.hookimpl(optionalhook=True, tryfirst=True)
+        def pytest_configure_node(self, node):
+            # pytest.main's plugin objects are not passed to xdist workers.
+            # Preload a unique module in the worker, before its pytest config;
+            # PYTEST_PLUGINS resolves that module without changing sys.path.
+            bootstrap = (
+                "import os, sys, types\n"
+                f"name = {observer_name!r}\n"
+                "if name in sys.modules: raise RuntimeError('HoH observer collision')\n"
+                "module = types.ModuleType(name)\n"
+                f"exec(compile({_EXCEPTION_OBSERVER!r}, {__file__!r}, 'exec'), module.__dict__)\n"
+                "sys.modules[name] = module\n"
+                "existing = os.environ.get('PYTEST_PLUGINS', '')\n"
+                "os.environ['PYTEST_PLUGINS'] = existing + (',' if existing else '') + name\n"
+                "channel.send(name)\n"
+            )
+            channel = node.gateway.remote_exec(bootstrap)
+            if channel.receive() != observer_name:
+                raise RuntimeError("HoH worker observer registration failed")
+            channel.waitclose()
 
         def pytest_runtest_logreport(self, report):
             # This hook receives both serial and xdist controller reports;
@@ -204,7 +245,7 @@ def main():
                 facts["provenance_status"] = "mismatch"
             save()
 
-    return int(pytest.main(arguments, plugins=[Probe()]))
+    return int(pytest.main(arguments, plugins=[Probe(), observer]))
 
 
 if __name__ == "__main__":
