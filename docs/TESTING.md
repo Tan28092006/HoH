@@ -15,7 +15,8 @@ when to run it.
 
 The gate is not in `pyproject.toml` `addopts`: a targeted run that passes must
 exit 0. `test.ps1` adds the coverage options only when the arguments select
-nothing (no path, node id, `-k`, `-m`, `--lf` or `--deselect`).
+  nothing (no path, node id, `-k`, `-m`, `--lf` or `--deselect`).
+  `--ff`/`--failed-first` only reorder the full population and retain its gate.
 
 Markers (`tests/conftest.py` assigns `slow` and `git` per module at collection):
 
@@ -40,6 +41,12 @@ Markers (`tests/conftest.py` assigns `slow` and `git` per module at collection):
 - Lets pytest finish even when it writes to stderr.
 - Writes the whole output to `<root>\logs\<checkout-hash>-<pid>.log` and ends
   with a summary: exit code, pass/fail line, coverage total and log path.
+- Full runs pin this checkout's `pyproject.toml`, measure only
+  `hoh_control_plane` with branches, and enforce at least 80% coverage even
+  when reporting options are supplied. Higher explicit thresholds remain.
+  They reject `--no-cov`, stale `--cov-append`, foreign pytest/coverage configs,
+  `addopts` overrides and ambient `PYTEST_ADDOPTS`/`COVERAGE*`/`COV_CORE*`.
+  Pass legitimate selection explicitly for a targeted run.
 
 ## CI
 
@@ -47,6 +54,33 @@ Markers (`tests/conftest.py` assigns `slow` and `git` per module at collection):
 Ubuntu with Python 3.12 and 3.13 (`requires-python = ">=3.12"`). It uses no
 secrets: the PostgreSQL suite skips without `HOH_TEST_POSTGRES_DSN` and the
 browser tests skip without `--run-ui`.
+
+Each matrix job invokes [`scripts/verify-ci-evidence.py`](../scripts/verify-ci-evidence.py)
+with the same lane, worker setting and private basetemp. It owns the child tree
+through `run_managed`, retains command/native status, source path, revision and
+content/dirty-state fingerprint, and requires positive passing cases. JUnit
+identities, counters and revision must agree; only the explicitly listed
+existing node/reason/platform exclusions are accepted. Full runs retain XML
+coverage with valid line/branch counts and the 80% gate. Adding an optional skip
+requires an explicit policy review; a familiar reason on a new node is refused.
+
+Each job uploads its manifest, log, XML and pass/skip inventory even on failure.
+Failure, cancellation, missing artifacts, malformed reports, all-skipped runs
+and source changes cannot become successful evidence. Coverage and report hashes
+bind the retained files to that run; previous results are never cached as proof.
+All four Windows/Ubuntu and Python 3.12/3.13 combinations remain.
+
+For a read-only artifact recheck, pass the exact recorded revision and lane:
+
+```powershell
+& 'D:/HoH/.venv-hoh/Scripts/python.exe' scripts/verify-ci-evidence.py validate --lane fast --evidence D:/.hoh-pytest/verify-hoh-ci-fast --expected-revision (git rev-parse HEAD)
+```
+
+The project-local [verification skill](../.codex/skills/verify-hoh-ci/SKILL.md)
+documents doctor, real supported CLI drives, isolated fixture side effects and
+owned cleanup. Its feature map distinguishes targeted, fast, full and evidence
+checks. A targeted drive proves only that entry point; CI portability and the
+full frozen QA suite require their own executions.
 
 ## Rules for test code
 

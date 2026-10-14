@@ -62,8 +62,8 @@ jobs:
         env:
           PYTHONPATH: src
         run: >
-          python -m pytest -q -n auto -p no:cacheprovider
-          -m "not slow and not git"
+          python scripts/verify-ci-evidence.py run --lane fast --workers auto
+          --evidence="${{ runner.temp }}/hoh-ci-evidence"
           --basetemp="${{ runner.temp }}/p"
 
       - name: Full suite with coverage gate
@@ -71,7 +71,14 @@ jobs:
         env:
           PYTHONPATH: src
         run: >
-          python -m pytest -q -n auto -p no:cacheprovider
-          --cov=hoh_control_plane --cov-branch --cov-report=term-missing
-          --cov-fail-under=80
+          python scripts/verify-ci-evidence.py run --lane full --workers auto
+          --evidence="${{ runner.temp }}/hoh-ci-evidence"
           --basetemp="${{ runner.temp }}/p"
+
+      - name: Retain test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-${{ matrix.os }}-python-${{ matrix.python }}
+          path: ${{ runner.temp }}/hoh-ci-evidence
+          if-no-files-found: error
