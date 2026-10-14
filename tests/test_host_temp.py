@@ -7,21 +7,35 @@ from pathlib import Path
 import subprocess
 import sys
 import stat
-import uuid
+import tempfile
 
 import pytest
 
 
 @pytest.fixture
-def launcher(tmp_path, monkeypatch):
+def launcher_boundary(tmp_path):
+    if os.name != 'nt':
+        yield tmp_path
+        return
+    # Keep short Windows paths without leaving one directory per case at D:/.
+    parent = Path('D:/.hoh-test-temp')
+    parent.mkdir(exist_ok=True)
+    if parent.is_symlink() or parent.is_junction():
+        raise RuntimeError('Test temp root must not be a reparse point')
+    protect_windows_directory(parent)
+    with tempfile.TemporaryDirectory(prefix='host-', dir=parent) as directory:
+        boundary = Path(directory)
+        protect_windows_directory(boundary)
+        yield boundary
+
+
+@pytest.fixture
+def launcher(launcher_boundary, monkeypatch):
     source = Path(__file__).resolve().parents[1] / 'deploy/desktop/hoh_desktop.py'
     spec = importlib.util.spec_from_file_location('host_temp_launcher', source)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    boundary = Path('D:/') / ('h291-' + uuid.uuid4().hex[:8]) if os.name == 'nt' else tmp_path
-    if os.name == 'nt':
-        boundary.mkdir()
-        protect_windows_directory(boundary)
+    boundary = launcher_boundary
     root = boundary / 'install'
     (root / 'config').mkdir(parents=True)
     config = root / 'config/settings.json'
@@ -126,6 +140,33 @@ rules=@($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])
 @{sid=$_.IdentityReference.Value; rights=[int]$_.FileSystemRights; type=$_.AccessControlType.ToString();
 inherited=$_.IsInherited; inheritance=[int]$_.InheritanceFlags; propagation=[int]$_.PropagationFlags}})} | ConvertTo-Json -Depth 5
 ''', path))
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows fixture cleanup contract')
+@pytest.mark.parametrize('failed', [False, True])
+def test_windows_fixture_cleans_its_boundary_without_following_junction(tmp_path, failed):
+    target = tmp_path / 'retained'
+    target.mkdir()
+    sentinel = target / 'keep.txt'
+    sentinel.write_text('untouched', encoding='utf-8')
+    fixture = launcher_boundary.__wrapped__(tmp_path)
+    boundary = next(fixture)
+    try:
+        assert boundary.parent == Path('D:/.hoh-test-temp')
+        (boundary / 'owned.txt').write_text('test data', encoding='utf-8')
+        # Cleanup must unlink the junction, preserving the unrelated target.
+        windows_script("$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path "
+                       "(Join-Path $env:HOH_TEST_PATH 'alias') -Target '" +
+                       str(target).replace("'", "''") + "' | Out-Null", boundary)
+        if failed:
+            with pytest.raises(RuntimeError, match='synthetic case failure'):
+                fixture.throw(RuntimeError('synthetic case failure'))
+        else:
+            fixture.close()
+        assert not boundary.exists()
+        assert sentinel.read_text(encoding='utf-8') == 'untouched'
+    finally:
+        fixture.close()
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='Windows DACL contract')
