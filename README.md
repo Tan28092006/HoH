@@ -1,39 +1,47 @@
-# Harness Control Plane
+# Harness Control Plane (HoH)
 
-Native worker supervision and crash recovery are documented in
-[RUNTIME_OPERATIONS.md](docs/RUNTIME_OPERATIONS.md). The supervisor runs on
-Windows without Docker/WSL; PostgreSQL may be native or remote.
+HoH coordinates independent AI agents working on a Git repository. It keeps
+contracts, leases, immutable candidates, QA evidence and merge decisions in a
+shared control plane, so a chat can resume from recorded state instead of its
+transcript. A read-only dashboard shows tickets, dispatch and redacted activity.
 
-A runnable MVP for coordinating independent Planner, Developer, QA and Integrator agents through a shared MCP control plane.
+## Four roles, one protected delivery flow
 
-The implementation includes:
+| Role | Responsibility |
+| --- | --- |
+| Planner | Define bounded tickets and validation contracts; reconcile repository changes and resolve exceptions. |
+| Developer | Claim a lease, work in isolation and submit one immutable Git candidate. |
+| QA | Independently test the frozen candidate and record findings and required evidence. |
+| Integrator | Run the protected merge gate and advance the default branch when its checks pass. |
 
-- Project -> Feature -> Subfeature-ready data model -> Ticket hierarchy.
-- SQLite persistence, append-only domain audit events and redacted MCP invocation logs.
-- Typed feature/ticket context references.
-- Role-aware discovery.
-- Timed, single-writer leases and optimistic concurrency.
-- Claim-time dependency and conservative write-scope conflict gates.
-- Durable role hand-offs: presence, queue, fan-out offers and an outbox boundary.
-- Planner-frozen test commands run by QA against clean, candidate-bound Git worktrees.
-- Immutable Git candidate identity.
-- Evidence-bound QA verdicts and rework context.
-- Integrator-only fast-forward merge gate, with base drift returned to Developer rework.
-- Read-only Jira-style Kanban UI with ticket progress, dispatch queue and Agent activity.
-- Official MCP Python SDK server over stdio.
-- Local role skills under `skills/`.
-- Authenticated HTTP MCP, portable per-role kits and `session.bootstrap` for fresh chats.
-- Optional browser QA with candidate-specific fixtures, screenshots and traces.
+The service enforces role permissions, lease fencing, dependency and write-scope
+gates, fresh context snapshots and candidate identity. QA uses a different model
+family from the maker, with host-proven execution capabilities. Risk policy can
+require adversarial evidence and an explicit high-risk approval.
 
-See the [production audit](docs/PRODUCTION_AUDIT.md) for measured improvements and
-remaining scale limits, [agent kit setup](docs/AGENT_KIT.md) to onboard a new chat,
-and [browser QA](docs/UI_QA.md) for candidate UI acceptance.
+Candidates remain frozen after submission. If the base drifts, the server can
+derive a candidate on current main and run the frozen suite before landing it;
+conflicts and failed checks require recovery. External landings trigger repository
+reconciliation. Delivery also queues a check of main, and failures can pause the
+merge queue. See [architecture and invariants](docs/ARCHITECTURE.md).
 
-How the code is organized, and where each invariant is enforced, is in [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md). The original product specification, which also contains requirements that were never built, is [HOH_MULTI_AGENT_CONTROL_PLANE.md](./HOH_MULTI_AGENT_CONTROL_PLANE.md).
+## Connect agents
 
-## Local quick start
+New Codex and Claude Code profiles use **shared authenticated HTTP MCP** by
+default: each role has its own project-scoped identity and connects to the running
+host. Generate profiles with `local_agent setup` or a portable agent kit rather
+than hand-writing client configuration. Restart the client after setup, then
+bootstrap the role session before discovering work.
 
-Python 3.12 is recommended.
+See [local setup](docs/LOCAL_SETUP.md), [portable agent kits](docs/AGENT_KIT.md)
+and [role wake-ups](docs/ROLE_WAKEUPS.md). Stdio remains a compatibility option.
+Remote HTTP access requires separately provisioned credentials, TLS and host
+allowlists; follow [deployment boundaries](docs/DEPLOYMENT.md).
+
+## Safe development quick start on this Windows checkout
+
+Python 3.12 or newer is required. Bootstrap only from `D:\HoH` on `main`, with
+no process using the shared development environment:
 
 ```powershell
 cd D:\HoH
@@ -41,85 +49,73 @@ cd D:\HoH
 .\scripts\start-dashboard.ps1
 ```
 
-In a second PowerShell window, keep expired leases from stalling the board and
-dispatch queued work to live agents:
+Keep that terminal running. In two additional PowerShell windows:
 
 ```powershell
+cd D:\HoH
 .\scripts\start-scheduler.ps1
 ```
 
-In a third window, start the supervisor. Workers run in supervised mode by
-default, so without it queued worktree provisioning, candidate submissions, QA
-test runs and merges stay `QUEUED`:
-
 ```powershell
+cd D:\HoH
 .\scripts\start-supervisor.ps1
 ```
 
-Open <http://127.0.0.1:8775>. These scripts start a development instance on its own database, `D:\HoH\tmp\dev\control-plane.db`, and refuse the real one under `D:\HoH\data` and the installed host's ports; they enable local identity headers and seed nothing unless `start-dashboard.ps1 -SeedDemo` asks for the demo project. To attach the role-scoped MCP to separate Codex or Claude agents, follow [docs/LOCAL_SETUP.md](./docs/LOCAL_SETUP.md).
+Open <http://127.0.0.1:8775>. These scripts use a separate development database
+under `D:\HoH\tmp\dev`, reject installed-service locations and ports, and seed
+nothing unless explicitly requested. The supervisor executes queued worktree,
+submission, QA and merge jobs; without it those jobs remain queued. Follow
+[LOCAL_SETUP.md](docs/LOCAL_SETUP.md) for role setup and repository/test policy.
 
-For how a long-lived Codex or Claude Code role worker waits for hand-offs,
-see [docs/ROLE_WAKEUPS.md](./docs/ROLE_WAKEUPS.md).
+The installed Windows host is a separate runtime. Source edits do not update it.
+Read [LOCAL_RUNTIME.md](docs/LOCAL_RUNTIME.md) before operating or upgrading it;
+[desktop deployment](deploy/desktop/README.md) documents the launcher. Preserve
+its database, credentials, candidate worktrees and evidence. Never bootstrap or
+reset an existing installation as part of development setup.
 
-To use this repository as the first project managed by HoH itself, follow the
-role-by-role [dogfood runbook](./docs/DOGFOOD_HOH.md).
+## Tests
 
-Run the test suite with the pinned interpreter and this checkout's source:
-
-```powershell
-.\scripts\test.ps1
-```
-
-Start with the [documentation map](docs/README.md) and the
-[architecture map](docs/ARCHITECTURE.md).
-
-## MCP server
-
-Each agent gets its own stdio MCP process and role identity. Example environment for a Developer:
-
-```text
-HOH_DATABASE_PATH=D:\HoH\tmp\dev\control-plane.db
-HOH_AGENT_ID=dev-agent-03
-HOH_AGENT_ROLE=developer
-HOH_PROJECT_IDS=demo
-PYTHONPATH=D:\HoH\src
-```
-
-Launch command:
+Use the wrapper to pin the interpreter and this checkout's source:
 
 ```powershell
-python -m hoh_control_plane.mcp_server
+.\scripts\test.ps1 tests\test_repo_docs.py -n 2
+.\scripts\test.ps1 --fast -n 2
+.\scripts\test.ps1 -n 2
 ```
 
-Use the same command with role `planner`, `qa` or `integrator` for other agents. The backend, not the skill, enforces role permissions.
+These select targeted, fast and full lanes respectively. Only the full lane adds
+the 80% coverage gate. The default worker count is six; use `-n 2` on a machine
+with limited RAM or `-n 0` for serial execution. The wrapper assigns a unique
+basetemp under the short `D:\.hoh-pytest` root; keep any `HOH_TEST_TEMP_ROOT`
+override short and outside repositories. See [TESTING.md](docs/TESTING.md) for
+lane definitions, logs and CI.
 
-The tool list is role-scoped: an agent only receives tools it is allowed to use.
-`identity.get_capabilities` returns the caller's list; `mcp/tools/` defines
-every tool and the role blocks that expose it.
+Optional PostgreSQL checks require the `postgres` extra and a disposable database
+configured through `HOH_TEST_POSTGRES_DSN`. Browser checks require the `ui` extra,
+Playwright and a browser installation, plus an explicit `--run-ui`; ordinary
+backend runs skip them. See [browser QA](docs/UI_QA.md) for candidate isolation
+and retained artifacts.
 
-All roles receive `identity.get_capabilities`, `work.discover`, `feature.get_context`, `ticket.get_context`, `agent.register` and `agent.heartbeat`; only execution roles receive `work.inbox`. Every execution agent calls `agent.register` once per session and `work.inbox` whenever it becomes available. A hand-off remains pending with no QA/Dev online; when one or more eligible agents check in, each gets a short-lived offer. The first successful ticket lease wins atomically and closes the other offers. Each call is persisted with the calling agent, role, tool name, opaque target reference, timestamp and outcome. Free-text content, evidence observations, branch names, commit IDs, lease IDs and credentials are not copied to the activity log.
+## Scope and limits
 
-The browser UI is observation-only: it shows the Kanban ticket state and the redacted MCP activity feed. Ticket creation, state changes and evidence submission happen only through an authenticated role MCP server. In local mode the UI uses a local read identity; a production dashboard must be placed behind an authenticated reverse proxy or session layer rather than embedding bearer tokens in browser JavaScript.
+HoH is under development for a trusted execution host. SQLite is the default;
+PostgreSQL is optional and serializes writes to preserve workflow invariants.
+Native worker supervision supports Windows without requiring Docker or WSL.
+Workers run as the host user; this is not a sandbox for untrusted code.
 
-The server supports stdio and authenticated Streamable HTTP/SSE. Network clients
-require configured bearer identities, TLS and a public-host allowlist.
-See [deployment](docs/DEPLOYMENT.md).
+The autonomous crew runner is **not ready for operational use**. The documented
+[Firstmate workflow](docs/FIRSTMATE.md) uses an active coordinator chat and fresh
+native subagents; it does not establish an unattended crew after that chat closes.
+Multi-host worker routing, shared artifact delivery, HA, managed OAuth and quotas
+remain additional work. Automatic conflict resolution and provider PR creation
+are outside the protected merge flow.
 
-## REST API
+## Documentation
 
-Interactive API documentation is available at <http://127.0.0.1:8775/docs> on the development instance.
-
-Local mode accepts `X-HOH-Agent-Id` and `X-HOH-Role` headers. Never expose local mode on a network interface.
-
-Production mode is the default when `HOH_LOCAL_MODE` is unset. It ignores claimed identity headers and derives identity from bearer tokens configured through `HOH_AGENT_TOKENS_JSON`. `HOH_ADMIN_TOKEN` optionally supplies a separate admin identity. Real secrets must only be supplied at runtime.
-
-## Current scope
-
-The modular monolith supports SQLite and an optional PostgreSQL store, SSE board
-updates, durable outbox notifications and release gates. PostgreSQL currently
-serializes write transactions to preserve service invariants; multi-host execution
-still needs artifact storage and worker routing. The Integrator uses a guarded
-fast-forward; automatic textual conflict resolution and provider PR creation are
-outside this implementation. Notification delivery requires a receiver/host adapter
-to wake a stopped chat. Managed OAuth, sandboxed worker supervision, quotas,
-artifact lifecycle and large-board pagination remain production work.
+Start with the [documentation map](docs/README.md), which distinguishes current
+runbooks from dated reviews. Use [ARCHITECTURE.md](docs/ARCHITECTURE.md) for code
+and invariants, [RUNTIME_OPERATIONS.md](docs/RUNTIME_OPERATIONS.md) for worker
+recovery, and the [release index](docs/releases/README.md) for historical changes.
+[AGENTS.md](AGENTS.md) contains repository rules. The
+[original specification](HOH_MULTI_AGENT_CONTROL_PLANE.md) includes unbuilt
+requirements and is not a description of current implementation.
