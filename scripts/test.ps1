@@ -33,16 +33,78 @@ $PytestArgs = @($PytestArgs | Where-Object { $_ -ne "--fast" })
 # A run that names tests or filters them is targeted; anything else is the full
 # suite and must clear the coverage gate (it is not in pyproject addopts, so a
 # targeted run never fails on coverage).
-$selects = @($PytestArgs | Where-Object {
-    ($_ -match '::') -or ($_ -match '\.py$') -or ($_ -match '^(tests|\.\\tests|\./tests)([\\/]|$)') -or ($_ -match '^-(k|m)$') -or ($_ -match '^--(lf|last-failed|ff|deselect)')
-})
-$fullRun = (-not $fast) -and ($selects.Count -eq 0)
+$selected = $false
+$ambiguous = $false
+# Option values are not test paths (e.g. --junitxml report.py). Keep this
+# bounded to supported/common options; unknown ambiguous values stay full.
+$valueOptions = @('-n', '--numprocesses', '-p', '-o', '--override-ini', '-c', '--config-file',
+    '--junitxml', '--junit-xml', '--cov', '--cov-report', '--cov-config', '--cov-fail-under',
+    '--basetemp', '--log-file', '--durations', '--durations-min', '--maxfail', '--dist', '--maxschedchunk')
+$flags = @('-q', '-v', '-vv', '-s', '-x', '--ff', '--failed-first', '--no-cov', '--cov-branch',
+    '--cov-append', '--collect-only', '--co', '--strict-markers', '--run-ui', '--disable-warnings')
+for ($index = 0; $index -lt $PytestArgs.Count; $index++) {
+    $argument = $PytestArgs[$index]
+    if ($argument -match '^-(k|m)(=|[^-]|$)' -or $argument -match '^--(lf|last-failed|deselect)(=|$)') {
+        $selected = $true
+        if ($argument -in @('-k', '-m', '--deselect')) { $index++ }
+    } elseif ($argument -in $valueOptions) {
+        $index++
+    } elseif ($argument.StartsWith('-')) {
+        if ($argument -notin $flags -and $argument -notmatch '=') { $ambiguous = $true }
+    } elseif ($argument -match '::|\.py$|^(tests|\.\\tests|\./tests)([\\/]|$)') {
+        $selected = $true
+    } else {
+        $ambiguous = $true
+    }
+}
+$fullRun = (-not $fast) -and ((-not $selected) -or $ambiguous)
 if ($fast) {
     $PytestArgs = @('-m', 'not slow and not git') + @($PytestArgs)
 }
-if ($fullRun -and -not ($PytestArgs -match '^--cov')) {
-    $PytestArgs = @('--cov=hoh_control_plane', '--cov-branch', '--cov-report=term-missing',
-                    '--cov-fail-under=80') + @($PytestArgs)
+if ($fullRun) {
+    # A full run owns its coverage policy. One user --cov option must not
+    # suppress the gate, and stale coverage must not attest this revision.
+    if ($env:PYTEST_ADDOPTS) {
+        throw "A full run requires empty PYTEST_ADDOPTS; pass explicit pytest arguments."
+    }
+    if (Get-ChildItem Env: | Where-Object { $_.Name -match '^(COVERAGE|COV_CORE)' }) {
+        throw "A full run requires no ambient COVERAGE/COV_CORE configuration."
+    }
+    if ($PytestArgs -match '^(addopts=|-o=?addopts=|--override-ini=addopts=)') {
+        throw "A full run cannot replace pytest addopts through --override-ini."
+    }
+    if ($PytestArgs -match '(^-c|^--config-file(?:=|$))') {
+        throw "A full run uses this checkout's pyproject.toml, not a foreign pytest config."
+    }
+    if ($PytestArgs -match '^--(no-cov|cov-append|cov-config)(=|$)') {
+        throw "A full run cannot disable coverage, append stale data or replace its coverage config."
+    }
+    if (@($PytestArgs | Where-Object { $_ -match '^--cov(?:=|$)' -and $_ -ne '--cov=hoh_control_plane' }).Count) {
+        throw "A full run measures only --cov=hoh_control_plane."
+    }
+    $coverageGate = 80.0
+    for ($index = 0; $index -lt $PytestArgs.Count; $index++) {
+        $argument = $PytestArgs[$index]
+        if ($argument -match '^--cov-fail-under(?:=(.*))?$') {
+            $value = $Matches[1]
+            if ($argument -eq '--cov-fail-under') {
+                $index++
+                if ($index -ge $PytestArgs.Count) { throw "Missing --cov-fail-under value." }
+                $value = $PytestArgs[$index]
+            }
+            $threshold = 0.0
+            if (-not [double]::TryParse($value, [System.Globalization.NumberStyles]::Float,
+                [System.Globalization.CultureInfo]::InvariantCulture, [ref]$threshold) -or
+                [double]::IsNaN($threshold) -or [double]::IsInfinity($threshold) -or
+                $threshold -lt 80 -or $threshold -gt 100) {
+                throw "A full run requires --cov-fail-under between 80 and 100."
+            }
+            $coverageGate = [Math]::Max($coverageGate, $threshold)
+        }
+    }
+    $gateArgument = $coverageGate.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+    $PytestArgs = @($PytestArgs) + @('-c', (Join-Path $checkout 'pyproject.toml'), '--cov=hoh_control_plane', '--cov-branch',
+        '--cov-report=term-missing', "--cov-fail-under=$gateArgument")
 }
 
 $env:PYTHONPATH = Join-Path $checkout "src"
@@ -75,6 +137,8 @@ if (-not ($PytestArgs -match '^--basetemp')) {
 $logDir = Join-Path $tempRoot "logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $log = Join-Path $logDir "$runName.log"
+# Tee-Object creates no file when a native child is silent.
+New-Item -ItemType File -Force -Path $log | Out-Null
 
 Push-Location $checkout
 try {
