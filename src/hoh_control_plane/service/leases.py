@@ -83,6 +83,9 @@ def _bounded_claim_result(result: dict[str, Any]) -> dict[str, Any]:
     }
     if "family_check" in result:
         bounded["family_check"] = result["family_check"]
+    for field in ("admitted", "run_id", "attempt_id"):
+        if field in result:
+            bounded[field] = result[field]
     return bounded
 
 
@@ -321,10 +324,19 @@ class LeaseMixin:
         next_status: TicketStatus,
         event_type: str,
         context_snapshot_id: str | None = None,
+        *,
+        autonomy_run_id: str | None = None,
+        autonomy_key: str | None = None,
     ) -> dict[str, Any]:
         if not 30 <= lease_seconds <= 3600:
             raise ValidationError("Lease duration must be between 30 and 3600 seconds")
         with self.store.connection(immediate=True) as connection:
+            admission_request = json.dumps({"ticket_id": ticket_id, "expected_version": expected_version,
+                "lease_seconds": lease_seconds, "context_snapshot_id": context_snapshot_id}, sort_keys=True)
+            replay = self._autonomy_claim_preflight(connection, actor, ticket_id,
+                autonomy_run_id, autonomy_key, admission_request)
+            if replay is not None:
+                return replay
             self._expire_lease(connection, ticket_id)
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             self._require_repository_reconciled(connection, project_id, ticket_id)
@@ -428,6 +440,9 @@ class LeaseMixin:
             }
             if family_check is not None:
                 result["family_check"] = family_check
+            if autonomy_run_id:
+                self._autonomy_record_claim(connection, actor, autonomy_run_id, autonomy_key,
+                    admission_request, result)
         # The packet ticket.get_context returns right now, compiled and recorded
         # after the claim committed: an agent can write from it without spending
         # a round trip and a full packet on re-reading.

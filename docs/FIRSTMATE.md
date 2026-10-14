@@ -80,3 +80,63 @@ subagent's decision and records it in the run record.
   closes; a closed coordinator leaves leases to expire and offers to return.
 - Native subagents may not survive compaction or a session end; on `resume`,
   reconcile the run record against HoH before claiming again.
+# Server-owned run foundation
+
+Schema 4 adds `autonomy_runs`, `autonomy_attempts`, `autonomy_reservations` and
+`autonomy_notifications`. Planner/Admin starts a run with a frozen explicit
+ticket set (or the current tickets of one feature), selected registered
+Developer/QA/Integrator identities and finite admission limits. Start checks
+independent known Developer/QA families and machine-approved QA capabilities.
+There is no CLI launch in this foundation; subscription process adapters and
+their repository/provider stop detectors belong to the crew client.
+
+Selected execution identities use `autonomy.admit` with a stable key and fresh
+packet. Claim, launch reservation and attempt identity commit together through
+the ordinary lease checks. Replay returns that attempt, including after a
+lost response; ordinary claims cannot bypass retained run scope. A controller
+persists the attempt before spawning and reconciles it before any restart.
+`autonomy.finish_attempt` settles optional token telemetry once and reads
+durable submission/QA/merge jobs, so nonzero exit cannot erase a submitted
+candidate or assert delivery. Lost usage pauses admissions. Tokens are an
+observed admission threshold with possible running-worker overshoot, never a
+hard subscription token cap.
+
+Actual QA, integration-gate and post-main executions reserve a suite unit
+immediately before a child starts, including the runner's infrastructure retry.
+Reused QA evidence starts no child and charges zero. Distinct ticket landings
+reserve before Git; known failed landings release capacity, while ambiguous
+Git outcomes retain the reservation until existing merge recovery settles it.
+The existing supervisor test lane continues to serialize suites. Accepted jobs
+may finish during drain within the count ceiling; an unreserved extra suite
+or landing holds its queued job for explicit review. The supervisor excludes
+held jobs; any already-executed infrastructure outcome remains durable evidence.
+
+`autonomy.stop` and typed execution `autonomy.signal` prevent launches while
+accepted workers retain heartbeat authority. States are ACTIVE, DRAINING,
+PAUSED and COMPLETED. Wall time is an admission window, not cancellation of
+accepted work. Versioned resume retains count and usage ledgers; Planner can
+explicitly replace finite limits to extend an exhausted ceiling or wall window.
+The server audits old/new limits and refuses ceilings below consumed/reserved
+units. Without replacement limits, the original wall deadline remains. Idle,
+provider limits, worker failures, unknown usage,
+count ceilings and the project's red-main/repeated-failure guardrails drain.
+Client-observed rewritten history, stale intent, repeated failure or missing
+capacity can signal drain; implementing those client detectors remains crew
+work. Resume requires Planner/Admin, current version, settled drain and fresh
+availability/capability/barrier checks. Child identities cannot resume.
+Expired controller attempts with no running durable job settle as unknown
+usage and pause, preserving the claim and artifacts instead of retrying blindly.
+Operator landings outside the service cannot be blocked by an admission budget;
+their recorded Git truth counts once and drains at the ceiling without claiming
+gated approval.
+
+Completion refreshes repository observation and transactionally checks that
+all scoped tickets are terminal, no scoped live lease/provision/submission/QA/
+merge/main-check job or reservation remains, and the latest check of the exact
+observed main SHA is green or covered by gate. An empty queue and historical
+green evidence cannot complete. A pause/completion transition stores one
+redacted durable notice with delivered/blocked tickets and required action;
+status returns it until Planner acknowledges it. No external message is sent.
+
+Schema-3 serving processes remain untouched. Validation and migrations use
+disposable stores only; installation requires a separately authorized upgrade.

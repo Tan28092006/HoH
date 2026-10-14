@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from hoh_control_plane.domain import AutonomyExecutionPaused
 
 from hoh_control_plane.qa_runner import INFRASTRUCTURE_REASONS as _INFRASTRUCTURE_OUTCOMES
 
@@ -457,7 +458,7 @@ class QaMixin:
         preflight_error: str | None = None
         with self.store.connection(immediate=True) as connection:
             job = self._qa_test_job(connection, test_run_id)
-            if job["status"] != "QUEUED":
+            if job["status"] != "QUEUED" or job.get("autonomy_hold_run_id"):
                 return job
             actor = Actor(job["requested_by"], Role.QA, frozenset({job["project_id"]}))
             ticket = self._ticket(connection, job["ticket_id"])
@@ -492,7 +493,7 @@ class QaMixin:
                 with self.git_worktrees.qa_checkout(repository_path=repository["repository_path"],
                         test_run_id=test_run_id, candidate_commit=job["candidate_commit"]) as path:
                     execution = self._execute_frozen_profile(
-                        job["test_command"], path, job["timeout_seconds"], job["candidate_id"])
+                        job["test_command"], path, job["timeout_seconds"], job["candidate_id"], execution_ref=f"qa:{test_run_id}")
                     if execution.artifact_mismatch and execution.termination_reason == "unclassified":
                         return self._fail_with_artifact_mismatch(test_run_id, job, execution)
                     return self._complete_queued_project_test(test_run_id, execution)
@@ -500,15 +501,17 @@ class QaMixin:
                 job["worktree_path"], job["candidate_commit"]
             )
             execution = self._execute_frozen_profile(
-                job["test_command"], worktree_path, job["timeout_seconds"], job["candidate_id"]
+                job["test_command"], worktree_path, job["timeout_seconds"], job["candidate_id"], execution_ref=f"qa:{test_run_id}"
             )
             if execution.artifact_mismatch and execution.termination_reason == "unclassified":
                 return self._fail_with_artifact_mismatch(test_run_id, job, execution)
             return self._complete_queued_project_test(test_run_id, execution)
+        except AutonomyExecutionPaused as error:
+            return self._autonomy_hold_job(f"qa:{test_run_id}", error)
         except (DomainError, OSError) as error:
             return self.fail_queued_project_test(test_run_id, str(error))
 
-    def _execute_frozen_profile(self, command, path, timeout_seconds, candidate_id):
+    def _execute_frozen_profile(self, command, path, timeout_seconds, candidate_id, *, execution_ref=None):
         """Run the candidate's registered command with its frozen provenance list.
 
         The list comes from candidate_test_profiles, never from the candidate's
@@ -521,9 +524,11 @@ class QaMixin:
                 (candidate_id,),
             ).fetchone())
         modules = (profile or {}).get("provenance_modules")
+        guard = self._autonomy_execution_guard(execution_ref) if execution_ref else None
+        kwargs = {"execution_guard": guard} if guard else {}
         if modules:
-            return self.project_tests.execute(command, path, timeout_seconds, provenance_modules=modules)
-        return self.project_tests.execute(command, path, timeout_seconds)
+            return self.project_tests.execute(command, path, timeout_seconds, provenance_modules=modules, **kwargs)
+        return self.project_tests.execute(command, path, timeout_seconds, **kwargs)
 
     def _fail_with_artifact_mismatch(
         self, test_run_id: str, job: dict[str, Any], execution: TestExecution

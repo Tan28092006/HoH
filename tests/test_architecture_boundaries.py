@@ -33,6 +33,7 @@ TRANSPORTS = {
     "mcp", "mcp.errors", "mcp.invoke", "mcp.workers", "mcp.server", "mcp.http_app",
     "mcp.tools", "mcp.tools.common", "mcp.tools.planner", "mcp.tools.developer",
     "mcp.tools.qa", "mcp.tools.integrator",
+    "mcp.tools.autonomy",
 }
 CLIENT_SETUP = {
     "agent_kit", "local_agent", "local_credentials", "desktop_control",

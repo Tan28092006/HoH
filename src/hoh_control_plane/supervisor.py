@@ -147,7 +147,8 @@ class Supervisor:
         pending = []
         with self.service.store.connection() as db:
             for kind, (table, key, _, _) in JOBS.items():
-                for row in db.execute(f"SELECT {key}, created_at FROM {table} WHERE status = 'QUEUED' ORDER BY created_at LIMIT ?", (self.max_workers * 2,)).fetchall():
+                hold_filter = " AND autonomy_hold_run_id IS NULL" if kind in {'qa', 'merge', 'mainline'} else ""
+                for row in db.execute(f"SELECT {key}, created_at FROM {table} WHERE status = 'QUEUED'{hold_filter} ORDER BY created_at LIMIT ?", (self.max_workers * 2,)).fetchall():
                     pending.append((row['created_at'], kind, row[key]))
         return [(kind, identifier) for _, kind, identifier in sorted(pending)]
 
@@ -252,7 +253,7 @@ class Supervisor:
             job = self._job(kind, identifier)
             if kind == 'merge' and job and job['status'] == 'RUNNING':
                 self.service.reconcile_merge_job(ADMIN, identifier)
-            elif job and (job['status'] == 'RUNNING' or (job['status'] == 'QUEUED' and outcome != 'exit 0')):
+            elif job and not job.get('autonomy_hold_run_id') and (job['status'] == 'RUNNING' or (job['status'] == 'QUEUED' and outcome != 'exit 0')):
                 getattr(self.service, JOBS[kind][3])(identifier, 'Worker stopped before publishing a result: ' + outcome)
             self.service.finalize_pending_ticket_retirements(ADMIN)
             with self.service.store.connection(immediate=True) as db:
