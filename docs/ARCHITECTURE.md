@@ -88,6 +88,7 @@ helper you are about to change across `service/`.
 | `session.py` | `session.bootstrap` |
 | `developer.py` | Progress and blockers |
 | `board.py` | Board, event lists and digests for the UI; `cycle_metrics` |
+| `autonomy.py` | Scoped autonomy runs, admission budgets, reservations, draining and durable stop notifications |
 | `usage.py` | `work.report_usage` and the dispatcher session soft cap |
 | `risk_policy.py` | Model families, checker distinct from maker, per-candidate risk tiers and `policy.approve_high_risk` |
 | `idempotency.py` | Idempotency key reservation and replay |
