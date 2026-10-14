@@ -45,13 +45,16 @@ def deliver_token(name, token):
     os.environ[name] = token
 
 
-def register_local_credential(root, actor, rotate=False):
+def register_local_credential(root, actor, rotate=False, *, delivery=None, apply=None, recovery_token=None):
     """Issue or migrate the credential for ``actor``.
 
     Returns the plaintext token when the caller must deliver it: a new token, a
     rotated one, or a pre-8A plaintext entry being re-keyed to its digest.
-    Returns None when a hashed credential already exists: the token cannot be
-    recovered from the file, and the one delivered earlier stays valid.
+    With delivery/apply callbacks, preflight the client before calling this
+    function. Delivery and installation run under the credential lock before
+    publication; failure leaves the previous server credential valid.
+    Returns None for an existing digest; delivery then requires a recoverable
+    token from a recognized legacy profile or the persistent user environment.
     """
     path = Path(root) / 'config/agent-credentials.json'
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -60,22 +63,37 @@ def register_local_credential(root, actor, rotate=False):
         credentials = credentials_from_environment(raw)
         records = json.loads(raw) if raw else {}
         own = [credential for credential in credentials if credential.actor == actor]
+        try:
+            previous = recovery_token or (read_token(token_env_var(actor.agent_id)) if delivery and own else None)
+        except Exception:
+            raise RuntimeError('Credential recovery needed: user token variable could not be read') from None
+        if not previous or not previous.isascii() or not any(c.digest == token_digest(previous) for c in own):
+            previous = next((c.token for c in own if not c.hashed), None)
         token = None
         if own and not rotate:
-            plaintext = [credential for credential in own if not credential.hashed]
-            if not plaintext:
-                return None
-            token = plaintext[0].token
-            for credential in plaintext:
-                records[credential.digest] = records.pop(credential.token)
+            plaintext = [c for c in own if not c.hashed]
+            if plaintext:
+                token = plaintext[0].token
+                for credential in plaintext:
+                    records[credential.digest] = records.pop(credential.token)
+            elif delivery and previous is None:
+                raise RuntimeError('Credential recovery needed: restore the user token variable or explicitly rotate the token')
         else:
             for credential in own:
                 records.pop(credential.token, None)
             token = secrets.token_urlsafe(48)
             records[token_digest(token)] = {'agent_id': actor.agent_id, 'role': actor.role.value,
                                             'project_ids': sorted(actor.project_ids)}
+        # No credential is published/revoked until delivery and client installation
+        # finish. Retain a usable previous token for rollback without a disk backup.
         temporary = None
         try:
+            if delivery:
+                delivery(token_env_var(actor.agent_id), token or previous)
+            if apply:
+                apply()
+            if token is None:
+                return None
             with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
                                              prefix='.credentials-', delete=False) as stream:
                 temporary = Path(stream.name)
@@ -84,10 +102,30 @@ def register_local_credential(root, actor, rotate=False):
                 os.fsync(stream.fileno())
             os.chmod(temporary, 0o600)
             os.replace(temporary, path)
+        except Exception:
+            if delivery and previous:
+                try:
+                    delivery(token_env_var(actor.agent_id), previous)
+                except Exception:
+                    pass
+            raise RuntimeError('Credential setup incomplete; previous credentials remain valid. Retry setup; explicit token recovery may be needed') from None
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
         return token
+
+
+def read_token(name):
+    """Read the persistent user environment, not a potentially stale parent copy."""
+    if os.name == 'nt':
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, 'Environment') as key:
+                value, kind = winreg.QueryValueEx(key, name)
+                return value if kind == winreg.REG_SZ else None
+        except FileNotFoundError:
+            return None
+    return os.environ.get(name)
 
 
 def credential_provider(base, path):
