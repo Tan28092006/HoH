@@ -110,15 +110,31 @@ def test_a_moved_branch_is_reported_and_left_untouched(tmp_path):
 
 def test_a_git_slower_than_the_command_budget_still_finishes_the_move(tmp_path, monkeypatch):
     repository, base, candidate = _repository(tmp_path)
-    monkeypatch.setattr(git_worktrees, "_GIT_COMMAND_TIMEOUT_SECONDS", 1)
     monkeypatch.setattr(git_worktrees, "_GIT_PROGRAM", (sys.executable, str(_fake_git(tmp_path, 3))))
+    manager = _manager(tmp_path)
+    real_git = manager._git
+    mutations = []
 
-    merged, head = _manager(tmp_path).fast_forward_default_branch(
+    def mutation_budget(path, *arguments, **kwargs):
+        if arguments[0] not in {"update-ref", "read-tree"}:
+            return real_git(path, *arguments, **kwargs)
+        mutations.append(arguments[0])
+        # Only the delayed mutation faces the artificial budget; metadata keeps its own.
+        with monkeypatch.context() as mutation:
+            mutation.setattr(git_worktrees, "_GIT_COMMAND_TIMEOUT_SECONDS", 1)
+            return real_git(path, *arguments, **kwargs)
+
+    monkeypatch.setattr(manager, "_git", mutation_budget)
+
+    merged, head = manager.fast_forward_default_branch(
         repository_path=str(repository), default_branch="main",
         expected_base_commit=base, candidate_commit=candidate)
 
     assert (merged, head) == (True, candidate)
+    assert mutations == ["update-ref", "read-tree"]
     _assert_consistent_at(repository, candidate)
+    assert (repository / "src" / "feature.txt").read_text(encoding="utf-8") == "candidate change\n"
+    assert not (repository / "gone.txt").exists()
 
 
 def _interrupt_after_the_ref_moved(repository: Path, base: str, candidate: str) -> None:
