@@ -198,6 +198,7 @@ BARE_REFERENCE_KINDS: dict[str, str] = {
     "ticket": "ticket",
     "feature": "feature",
     "experience": "experience",
+    "mainline_check": "mainline_check",
     "test_run": "test_run",
     "qa_test_job": "test_run",
     "qa_test_jobs": "test_run",

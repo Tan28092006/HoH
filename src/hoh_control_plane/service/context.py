@@ -36,6 +36,7 @@ from hoh_control_plane.service._common import (
     agent_facing,
     _validated_budget,
     require_project,
+    require_role,
 )
 
 
@@ -554,6 +555,8 @@ class ContextMixin:
         if kind == "experience" and len(parts) == 3:
             return {"reference": reference, **self.get_experience(actor, parts[2])}
         with self.store.connection() as connection:
+            if kind == "mainline_check" and len(parts) == 3:
+                return self._resolve_mainline_check(connection, actor, parts[2])
             if kind == "entry" and len(parts) == 3:
                 return self._resolve_entry(connection, actor, parts[2])
             if kind == "candidate" and len(parts) == 4 and parts[3] in {
@@ -587,7 +590,7 @@ class ContextMixin:
         raise ValidationError(
             "Unsupported reference; resolvable forms are ctx:entry:<id>, "
             "ctx:candidate:<id>[:developer_claims|:changed_paths], "
-            "ctx:finding:<id>, ctx:experience:<id>, "
+            "ctx:finding:<id>, ctx:experience:<id>, ctx:mainline_check:<id>, "
             + ", ".join(f"ctx:{kind}:<id>" for kind in _JOB_REFERENCES)
             + ", "
             "ctx:ticket:<id>[:v<n>][:<section>|:history] and "
@@ -656,6 +659,28 @@ class ContextMixin:
                 f"ctx:candidate:{candidate_id}:changed_paths",
             ],
         }
+
+    def _resolve_mainline_check(
+        self, connection: Connection, actor: Actor, check_id: str
+    ) -> dict[str, Any]:
+        require_role(actor, Role.PLANNER, Role.INTEGRATOR, Role.ADMIN)
+        check = _row(connection.execute(
+            "SELECT * FROM mainline_checks WHERE check_id = ?", (check_id,)
+        ).fetchone())
+        if check is None:
+            raise NotFoundError("Mainline check not found")
+        require_project(actor, check["project_id"])
+        summary = {field: check.get(field) for field in (
+            "check_id", "project_id", "mainline_commit", "status", "outcome",
+            "exit_code", "termination_reason", "revert_ticket_id", "completed_at",
+        )}
+        # Subprocess text can contain credentials; expose only structural diagnostics.
+        summary["diagnostic"] = {
+            "output_present": bool(check.get("output_tail")),
+            "error_present": bool(check.get("error_message")),
+            "evidence_ref": f"mainline_check:{check_id}",
+        }
+        return {"reference": f"ctx:mainline_check:{check_id}", "mainline_check": summary}
 
     def _resolve_job(
         self, connection: Connection, actor: Actor, kind: str, job_id: str

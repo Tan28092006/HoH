@@ -18,6 +18,8 @@ It never touches ``ExecutionGate``: development and QA keep flowing.
 """
 from __future__ import annotations
 
+from hoh_control_plane.qa_runner import INFRASTRUCTURE_REASONS
+
 from hoh_control_plane.service._common import (
     Actor,
     Any,
@@ -46,11 +48,6 @@ FAILURE_PAUSE = "consecutive_failures_exceeded"
 RED_MAIN_PAUSE = "mainline_check_failed"
 SYSTEM_GUARDRAIL_ACTOR = "system:run-guardrails"
 _OUTPUT_TAIL_CHARS = 3000
-_INFRASTRUCTURE = frozenset({
-    "resource_unready", "resource_exhausted", "native_termination", "timeout", "cancelled",
-    "capture_failure", "output_truncated", "launch_failure", "incomplete_evidence",
-    "artifact_mismatch", "test_configuration_error",
-})
 
 
 def _guard_actor(project_id: str) -> Actor:
@@ -444,7 +441,7 @@ class RunGuardrailsMixin:
             return self.fail_queued_mainline_check(check_id, str(error))
         infrastructure = (
             execution.artifact_mismatch
-            or execution.termination_reason in _INFRASTRUCTURE
+            or execution.termination_reason in INFRASTRUCTURE_REASONS
             or bool(execution.capture_errors)
         )
         if infrastructure:
@@ -499,6 +496,20 @@ class RunGuardrailsMixin:
                 {"mainline_commit": commit, "exit_code": exit_code,
                  "termination_reason": termination_reason},
             )
+            # A newer exact green current main supersedes historical accounting,
+            # without changing the original result or clearing any existing pause.
+            superseded = connection.execute(
+                "SELECT 1 FROM project_repositories r JOIN mainline_checks newer "
+                "ON newer.project_id = r.project_id "
+                "AND newer.mainline_commit = r.observed_mainline_commit "
+                "WHERE r.project_id = ? AND r.observed_mainline_commit != ? "
+                "AND newer.status = 'COMPLETED' "
+                "AND newer.outcome IN ('green', 'covered_by_gate') "
+                "AND newer.created_at > ? LIMIT 1",
+                (project_id, commit, check["created_at"]),
+            ).fetchone()
+            if superseded is not None:
+                return self._mainline_check(connection, check_id)
             trigger = (
                 self._ticket(connection, check["trigger_ticket_id"])
                 if check.get("trigger_ticket_id") else None
