@@ -340,7 +340,14 @@ never put a second suite on the host.
   merge queue (`mainline_check_failed`), opens a priority-95 BACKLOG ticket of
   type `revert` naming the commit (git revert or a fix, through the gate; never a
   reset), and raises a high-severity Planner job. An unrunnable check counts as
-  a failure but never as red.
+  a failure but never as red. Main checks share the runner's canonical
+  `INFRASTRUCTURE_REASONS`. A historical result remains recorded but does not
+  affect pauses, revert tickets or failure counters when a newer completed green
+  or `covered_by_gate` check covers the exact observed current main. Existing
+  pauses still require Planner review. Planner, Integrator and Admin can resolve
+  `mainline_check:<id>` (or `ctx:mainline_check:<id>`) within their project scope;
+  the bounded summary exposes the commit, outcome, reason and structural evidence
+  diagnostics while withholding raw subprocess output and errors.
 - **Budgets.** `project_run_guardrails` holds `max_merges_per_hour` (default 12,
   one test slot's suite rate) and `max_consecutive_failures` (default 3: merge
   gate regressions and infrastructure failures, red or unrunnable checks; reset
