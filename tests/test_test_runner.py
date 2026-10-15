@@ -12,9 +12,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 POWERSHELL = shutil.which("powershell") or shutil.which("pwsh")
+SHELLS = tuple(dict.fromkeys(filter(None, (shutil.which("powershell"), shutil.which("pwsh")))))
 
 
-def invoke(tmp_path, arguments=(), *, child_exit=0, addopts="", extra_env=None, silent=False):
+def invoke(tmp_path, arguments=(), *, child_exit=0, addopts="", extra_env=None, silent=False, shell=None):
     if POWERSHELL is None:
         pytest.fail("PowerShell is required to verify the supported test wrapper")
     capture = tmp_path / "capture.json"
@@ -36,10 +37,28 @@ def invoke(tmp_path, arguments=(), *, child_exit=0, addopts="", extra_env=None, 
         HOH_TEST_CHILD_EXIT=str(child_exit), HOH_TEST_TEMP_ROOT=str(tmp_path / "run"),
         PYTEST_ADDOPTS=addopts, HOH_TEST_SILENT="1" if silent else "0")
     environment.update(extra_env or {})
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-File",
+    result = subprocess.run([shell or POWERSHELL, "-NoProfile", "-NonInteractive", "-File",
         str(ROOT / "scripts/test.ps1"), *arguments], env=environment,
         capture_output=True, text=True, timeout=60)
     return result, json.loads(capture.read_text()) if capture.exists() else None
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("arguments,targeted", [
+    (["--cov-report=xml:report.py", "--no-cov"], False),
+    (["--deselect=tests/test_api.py::test_health"], True),
+    (["--deselect", "tests/test_api.py::test_health"], True),
+])
+def test_file_entrypoint_preserves_colon_option_tokens(tmp_path, shell, arguments, targeted):
+    result, arguments_seen = invoke(tmp_path, arguments, shell=shell)
+    if targeted:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert all(argument in arguments_seen for argument in arguments)
+        assert not any(argument.startswith("--cov") for argument in arguments_seen)
+    else:
+        assert result.returncode != 0
+        assert "cannot disable coverage" in result.stderr
+        assert arguments_seen is None
 
 
 @pytest.mark.parametrize("arguments", [[], ["--cov-report=term"], ["--cov=hoh_control_plane"], ["--cov-fail-under=90"], ["--ff"], ["--failed-first"]])

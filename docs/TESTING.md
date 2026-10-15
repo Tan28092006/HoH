@@ -32,6 +32,9 @@ Markers (`tests/conftest.py` assigns `slow` and `git` per module at collection):
 
 - Pins `.venv-hoh` (or `HOH_TEST_PYTHON`) and puts this checkout's `src/` first.
 - Sets `PYTHONUTF8=1`.
+- Preserves original process arguments for direct `powershell/pwsh -File`
+  entry points. PowerShell 7 otherwise splits colon-bearing options such as
+  `--cov-report=xml:report.py` and `--deselect=tests/test_api.py::test_health`.
 - Runs with `-n 6` unless you pass `-n`.
 - Gives each run its own basetemp, `<HOH_TEST_TEMP_ROOT or D:\.hoh-pytest>\<checkout-hash>-<pid>`.
   pytest empties its basetemp at start, so a shared one let two concurrent
@@ -88,6 +91,10 @@ full frozen QA suite require their own executions.
   A test that needs one sets it with `monkeypatch`.
 - A test module never imports another test module. A setup that two modules
   need lives in `tests/helpers/`.
+- Synthetic CI report tests use a fixed source snapshot, independent of shared
+  checkout activity. Source-byte and dirty-state rejection exercise the real
+  snapshot and gate in a disposable directory with controlled Git inventory and
+  status output; the production fingerprint gate remains active.
 - Do not prove that something did not happen by sleeping and then checking.
   Give the process or job something to report (a PID, a terminal status) and
   wait for that with a deadline.
