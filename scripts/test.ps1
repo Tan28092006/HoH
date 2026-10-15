@@ -28,6 +28,18 @@ if (-not $python) {
 }
 
 $PytestArgs = @($args)
+# PowerShell 7's -File binder splits e.g. --cov-report=xml:report.py at
+# the colon. Recover the original tokens only when this is the CLI entry point;
+# calls from another PowerShell script must keep their own invocation arguments.
+$nativeArgs = [Environment]::GetCommandLineArgs()
+for ($index = 1; $index -lt ($nativeArgs.Count - 1); $index++) {
+    if ($nativeArgs[$index] -ieq '-File' -or $nativeArgs[$index] -ieq '-f') {
+        if ([System.IO.Path]::GetFullPath($nativeArgs[$index + 1]) -eq $PSCommandPath) {
+            $PytestArgs = @($nativeArgs | Select-Object -Skip ($index + 2))
+        }
+        break
+    }
+}
 $fast = $PytestArgs -contains "--fast"
 $PytestArgs = @($PytestArgs | Where-Object { $_ -ne "--fast" })
 # A run that names tests or filters them is targeted; anything else is the full

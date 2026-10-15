@@ -14,6 +14,14 @@ spec = importlib.util.spec_from_file_location("ci_evidence", ROOT / "scripts/ver
 evidence = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(evidence)
 REVISION = "a" * 40
+REAL_SOURCE_SNAPSHOT = evidence.source_snapshot
+
+
+@pytest.fixture(autouse=True)
+def synthetic_source_snapshot(monkeypatch):
+    # Report-format tests must not observe unrelated workers' checkout changes.
+    snapshot = {"files_sha256": "1" * 64, "dirty_status": ""}
+    monkeypatch.setattr(evidence, "source_snapshot", lambda: snapshot.copy())
 
 
 def report(tmp_path, *, lane="fast", cases=None, coverage=None):
@@ -29,8 +37,8 @@ def report(tmp_path, *, lane="fast", cases=None, coverage=None):
         suite.set(field, str(sum(outcome is not None and outcome[0] == tag for _, _, outcome in cases)))
     xml = ET.tostring(document)
     (tmp_path / "tests.xml").write_bytes(xml)
-    manifest = {"revision": REVISION, "lane": lane, "checkout": str(ROOT),
-                "source_path": str(ROOT / "src/hoh_control_plane/__init__.py"),
+    manifest = {"revision": REVISION, "lane": lane, "checkout": str(evidence.ROOT),
+                "source_path": str(evidence.ROOT / "src/hoh_control_plane/__init__.py"),
                 "platform": "win32", "exit_code": 0, "termination_reason": "passed",
                 "source_snapshot": evidence.source_snapshot(),
                 "junit_sha256": hashlib.sha256(xml).hexdigest()}
@@ -177,11 +185,44 @@ def test_source_fingerprint_changes_when_actual_owned_source_bytes_change(tmp_pa
     monkeypatch.setattr(evidence, "ROOT", tmp_path)
     monkeypatch.setattr(evidence.subprocess, "check_output", lambda command, **kwargs:
         b"sample.py\0" if command[1] == "ls-files" else b"")
-    original = evidence.source_snapshot()
+    original = REAL_SOURCE_SNAPSHOT()
     (tmp_path / "sample.py").write_text("VALUE = 2\n")
-    changed = evidence.source_snapshot()
+    changed = REAL_SOURCE_SNAPSHOT()
     assert changed["files_sha256"] != original["files_sha256"]
     assert changed["dirty_status"] == original["dirty_status"] == ""
+
+
+def test_synthetic_reports_do_not_read_shared_checkout_state(tmp_path, monkeypatch):
+    def unrelated_repository_activity(*args, **kwargs):
+        raise AssertionError("Synthetic reports must not query the shared repository")
+
+    monkeypatch.setattr(evidence.subprocess, "check_output", unrelated_repository_activity)
+    report(tmp_path)
+    assert evidence.validate(tmp_path, REVISION, "fast")["passed"] == [["tests.test_api", "test_health"]]
+
+
+@pytest.mark.parametrize("change", ["source_bytes", "dirty_state"])
+def test_real_source_gate_rejects_changes_in_an_isolated_checkout(tmp_path, monkeypatch, change):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    source = checkout / "sample.py"
+    source.write_text("VALUE = 1\n")
+    status = b""
+    # Keep only Git inventory/status controlled; hash real bytes and run the gate.
+    monkeypatch.setattr(evidence.subprocess, "check_output", lambda command, **kwargs:
+        b"sample.py\0" if command[1] == "ls-files" else status)
+    monkeypatch.setattr(evidence, "ROOT", checkout)
+    monkeypatch.setattr(evidence, "source_snapshot", REAL_SOURCE_SNAPSHOT)
+    original = report(tmp_path)["source_snapshot"]
+    assert evidence.validate(tmp_path, REVISION, "fast")["passed"]
+    if change == "source_bytes":
+        source.write_text("VALUE = 3\n")
+        assert evidence.source_snapshot()["dirty_status"] == original["dirty_status"]
+    else:
+        status = b"?? unrelated.txt\0"
+        assert evidence.source_snapshot()["files_sha256"] == original["files_sha256"]
+    with pytest.raises(ValueError, match="Source fingerprint or dirty state changed"):
+        evidence.validate(tmp_path, REVISION, "fast")
 
 
 @pytest.mark.parametrize("module", ["tests.test_postgres_store", "tests.test_postgres_concurrency"])
