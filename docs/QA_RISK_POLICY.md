@@ -53,25 +53,32 @@ Readiness recovery replaces review slots explicitly while retaining old feedback
 Owners reuse one active or current passing suite job for the same candidate,
 frozen command digest and timeout. Polling renews only the caller's own lease.
 Reuse additionally requires the trusted runner's versioned execution-environment
-digest at queueing, execution and both reuse consumers. A bounded isolated probe
-in the selected Python hashes its runtime and the actual installed distribution
-file contents, including metadata and bytecode, rather than trusting version
-labels, RECORD checksums or interpreter timestamps. Editable dependencies outside
-the candidate import policy and missing file manifests are unproved.
+digest at queueing, execution and both reuse consumers. Distribution inventories
+do not prove actual consumption. General module commands, dynamic imports,
+unpackaged/omitted dependencies and editable packages remain UNKNOWN. No package
+name, nonempty RECORD or nominal interpreter probe confers reusable authority.
 
-Execution removes inherited PYTHON controls, then enforces candidate/src imports,
-no user site, no bytecode writes and hash seed 0. Optimization flags explicitly
-present in the frozen command remain part of its identity. Relevant OMP/OpenBLAS
-inputs and frozen provenance modules are also bound. Arbitrary inline commands
-can introduce external dependency paths: only literal pass/assert/print statements
-are attested for inline reuse. Other unsupported or unproved commands may execute
-but do not confer reusable applicability. This probe never executes the candidate
-command to predict its result.
+Execution removes inherited PYTHON controls. The narrow certifiable boundary is
+literal inline pass/assert/print code with no imports or dynamic expressions,
+using the runner's enforced `-I -S -B` startup. The selected runtime capture uses
+that same isolated/no-site startup and hashes the actual runtime image and loaded
+startup software, including source/cache bytes. If that proof is unavailable,
+the ordinary declared invocation executes with UNKNOWN applicability. Other flags/commands remain authorized to execute
+normally, subject to existing provenance guards, but are not certified for reuse.
+There is no editable-package name exemption or blanket `-m` certification.
+Command, timeout, provenance modules and OMP/OpenBLAS controls remain bound.
 
 The digest excludes checkout paths, free memory, reviewer identity and secret
 environment values. Old partial or unknown attestations are not backfilled with
 today's fingerprint. Unknown or changed applicability cannot reuse a passing run;
 an active unproved/mismatched join is refused without creating another job.
+Observation or continuation of one authorized UNKNOWN run is not reusable
+certification and does not alone revoke its independent observers.
+External capture runs outside DB transactions; publication/authority checks
+re-read the current profile, candidate, lease/review, retirement and latest attempt
+under short transactions. A no-test-slot merge retains that capability through
+the locked consumer: a late applicability miss removes its owned intent and
+defers to QUEUED for proper re-admission, never a suite outside its slot.
 The immutable requesting lease remains execution provenance; an active peer or
 the completed required passes can sustain the shared execution after it ends.
 A newer pending or failed attempt fences an older green result. Source,

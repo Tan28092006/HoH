@@ -747,12 +747,12 @@ class IntegrationMixin:
             return self.fail_queued_merge(merge_job_id, 'Project repository is required')
         try:
             with self.git_worktrees.repository_lock(repository['repository_path']):
-                return self._execute_queued_merge_locked(merge_job_id)
+                return self._execute_queued_merge_locked(merge_job_id, run_suite=run_suite)
         except ConflictError:
             with self.store.connection() as connection:
                 return self._merge_job(connection, merge_job_id)
 
-    def _execute_queued_merge_locked(self, merge_job_id: str) -> dict[str, Any]:
+    def _execute_queued_merge_locked(self, merge_job_id: str, *, run_suite: bool = True) -> dict[str, Any]:
         preflight_error: str | None = None
         outcome = "barrier_pending"
         with self.store.connection(immediate=True) as connection:
@@ -825,6 +825,25 @@ class IntegrationMixin:
         if reused is not None:
             return self._finish_gate_and_merge(
                 merge_job_id, job, actor, candidate, repository, project, reused, gate_mode="reused_qa_run")
+        if not run_suite:
+            try:
+                with self.store.connection(immediate=True) as connection:
+                    current = self._merge_job(connection, merge_job_id)
+                    current_ticket = self._ticket(connection, job["ticket_id"])
+                    if (current["status"] != "RUNNING" or current["candidate_id"] != job["candidate_id"]
+                            or current["expected_version"] != job["expected_version"] or current["lease_id"] != job["lease_id"]):
+                        raise ConflictError("Merge job changed while checking applicability")
+                    self._expect_version(current_ticket, job["expected_version"])
+                    self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
+                    self._require_repository_reconciled(connection, job["project_id"], job["ticket_id"])
+                    if (current_ticket["status"] != TicketStatus.MERGE_READY.value
+                            or current_ticket["candidate_commit"] != candidate["commit_sha"]):
+                        raise ConflictError("Merge artifact changed while checking applicability")
+                    connection.execute("DELETE FROM merge_intents WHERE merge_job_id=?", (merge_job_id,))
+                    connection.execute("UPDATE merge_jobs SET status='QUEUED',started_at=NULL WHERE merge_job_id=?", (merge_job_id,))
+                    return self._merge_job(connection, merge_job_id)
+            except DomainError as error:
+                return self.fail_queued_merge(merge_job_id, str(error))
         try:
             with self.git_worktrees.integration_checkout(
                 repository_path=repository["repository_path"], project_id=job["project_id"],
@@ -1044,11 +1063,18 @@ class IntegrationMixin:
         Only a QA job (not an earlier gate) with the same digest and timeout counts.
         """
         with self.store.connection() as connection:
+            observed = self._candidate_suite_state(connection, candidate_id, command, timeout_seconds)
+        if not self._qa_job_passed(observed["qa_job"]):
+            return None
+        captured = self._capture_qa_environment(candidate_id)
+        with self.store.connection() as connection:
             state = self._candidate_suite_state(connection, candidate_id, command, timeout_seconds)
+            if state != observed:
+                return None
             job = state["qa_job"]
             candidate = _row(connection.execute("SELECT commit_sha FROM candidates WHERE candidate_id=?",
                                                 (candidate_id,)).fetchone())
-            environment_matches = self._qa_job_environment_matches(connection, job)
+            environment_matches = self._qa_job_environment_matches(connection, job, captured=captured)
         return (job["test_run_id"] if self._qa_job_passed(job) and candidate is not None
                 and environment_matches
                 and job["candidate_commit"] == candidate["commit_sha"]

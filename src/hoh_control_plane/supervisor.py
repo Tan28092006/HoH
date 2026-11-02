@@ -243,13 +243,17 @@ class Supervisor:
                 if terminal_since is None:
                     terminal_since = time.monotonic()
                 return time.monotonic() - terminal_since >= TERMINAL_EXIT_GRACE_SECONDS
+            captured = self.service._capture_qa_environment(job['candidate_id']) if kind == 'qa' else None
             with self.service.store.connection(immediate=True) as db:
                 db.execute('UPDATE worker_executions SET heartbeat_at = ? WHERE execution_id = ?', (now(), execution_id))
                 if 'lease_id' not in job:
                     return False  # A main check belongs to no lease.
                 if kind == 'qa':
                     try:
-                        self.service._qa_test_authority(db, job)
+                        current = self.service._qa_test_job(db, identifier)
+                        if current['status'] not in {'QUEUED', 'RUNNING'}:
+                            return False  # The next guard applies terminal-exit grace.
+                        self.service._qa_test_authority(db, current, captured=captured)
                     except DomainError:
                         return True
                     return False

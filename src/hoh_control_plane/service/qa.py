@@ -381,6 +381,11 @@ class QaMixin:
         full suite. ``rerun=True`` forces a fresh run, e.g. to investigate flakiness.
         """
         require_role(actor, Role.QA)
+        with self.store.connection() as connection:
+            observed, _ = self._authorized_ticket(connection, actor, ticket_id)
+            self._require_active_lease(connection, actor, ticket_id, lease_id)
+            observed_candidate = self._current_qa_candidate(connection, observed)
+        captured = self._capture_qa_environment(observed_candidate["candidate_id"])
         with self.store.connection(immediate=True) as connection:
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             if ticket["status"] != TicketStatus.QA_IN_PROGRESS.value:
@@ -406,6 +411,13 @@ class QaMixin:
             )
             if test_profile is None:
                 raise ValidationError("Candidate has no Planner-frozen project test command")
+            if (ticket["version"] != observed["version"] or candidate["candidate_id"] != observed_candidate["candidate_id"]
+                    or test_profile != captured["profile"]):
+                raise ConflictError("Candidate or frozen profile changed during environment capture")
+            self._current_qa_candidate(connection, ticket)
+            if connection.execute("SELECT 1 FROM ticket_retirement_requests WHERE ticket_id=? AND status='PENDING'",
+                                  (ticket_id,)).fetchone():
+                raise ConflictError("Candidate has a pending retirement")
             worktree = _row(
                 connection.execute("SELECT * FROM worktrees WHERE ticket_id = ?", (ticket_id,)).fetchone()
             )
@@ -420,8 +432,7 @@ class QaMixin:
             timeout_seconds = test_profile["timeout_seconds"]
             if not isinstance(timeout_seconds, int) or not 5 <= timeout_seconds <= 1800:
                 raise ValidationError("Candidate test command timeout is invalid")
-            execution_identity = self.project_tests.execution_environment_digest(
-                command, timeout_seconds, test_profile.get("provenance_modules") or None)
+            execution_identity = captured["digest"]
             if active_job is not None:
                 active = self._qa_test_job(connection, active_job["test_run_id"])
                 if (not execution_identity or active.get("execution_environment_digest") != execution_identity
@@ -433,7 +444,7 @@ class QaMixin:
             if not rerun:
                 state = self._candidate_suite_state(connection, candidate["candidate_id"], command, timeout_seconds)
                 passing = state["qa_job"]
-                if (self._qa_job_passed(passing) and self._qa_job_environment_matches(connection, passing)
+                if (self._qa_job_passed(passing) and self._qa_job_environment_matches(connection, passing, captured=captured)
                         and passing["candidate_commit"] == candidate["commit_sha"]
                         and state["run"] is not None
                         and self._run_passed(state["run"])):
@@ -499,11 +510,17 @@ class QaMixin:
         require_role(actor, Role.QA)
         if not 30 <= lease_seconds <= 3600:
             raise ValidationError("Lease duration must be between 30 and 3600 seconds")
+        with self.store.connection() as connection:
+            self._authorized_ticket(connection, actor, ticket_id)
+            observed = self._qa_test_job(connection, test_run_id)
+            if observed["ticket_id"] != ticket_id:
+                raise AuthorizationError("Project test run does not belong to this ticket")
+        captured = self._capture_qa_environment(observed["candidate_id"])
         with self.store.connection(immediate=True) as connection:
             job = self._qa_test_job(connection, test_run_id)
             if job["ticket_id"] != ticket_id:
                 raise AuthorizationError("Project test run does not belong to this ticket")
-            authority = self._qa_test_authority(connection, job, actor=actor, lease_id=lease_id)
+            authority = self._qa_test_authority(connection, job, actor=actor, lease_id=lease_id, captured=captured)
             lease = authority["lease"]
             if lease is not None:
                 timestamp = _now()
@@ -515,12 +532,17 @@ class QaMixin:
     def execute_queued_project_test(self, test_run_id: str) -> dict[str, Any]:
         """Worker-only execution for a previously authorized, immutable QA test job."""
         preflight_error: str | None = None
+        with self.store.connection() as connection:
+            observed = self._qa_test_job(connection, test_run_id)
+            if observed["status"] != "QUEUED":
+                return observed
+        captured = self._capture_qa_environment(observed["candidate_id"])
         with self.store.connection(immediate=True) as connection:
             job = self._qa_test_job(connection, test_run_id)
             if job["status"] != "QUEUED":
                 return job
             try:
-                self._qa_test_authority(connection, job)
+                self._qa_test_authority(connection, job, captured=captured)
             except DomainError as error:
                 preflight_error = str(error)
             if preflight_error is None:
@@ -612,12 +634,12 @@ class QaMixin:
         )
 
     def _require_project_test_current(
-        self, connection: Connection, job: dict[str, Any]
+        self, connection: Connection, job: dict[str, Any], *, captured=None
     ) -> tuple[Actor, dict[str, Any]]:
-        authority = self._qa_test_authority(connection, job)
+        authority = self._qa_test_authority(connection, job, captured=captured)
         return authority["actor"], authority["ticket"]
 
-    def _qa_test_authority(self, connection, job, *, actor=None, lease_id=None):
+    def _qa_test_authority(self, connection, job, *, actor=None, lease_id=None, captured=None):
         active_job = job["status"] in {"QUEUED", "RUNNING"}
         ticket = self._ticket(connection, job["ticket_id"])
         if actor is not None:
@@ -633,7 +655,13 @@ class QaMixin:
             candidate = self._current_qa_candidate(connection, ticket)
             if candidate["candidate_id"] != job["candidate_id"] or candidate["commit_sha"] != job["candidate_commit"]:
                 raise ConflictError("Candidate changed while project tests were running")
-            if job.get("execution_environment_digest") and not self._qa_job_environment_matches(connection, job):
+            profile = self._qa_environment_profile(connection, job["candidate_id"])
+            if profile is not None and (profile["timeout_seconds"] != job["timeout_seconds"] or
+                    hashlib.sha256("\0".join(profile["test_command"]).encode()).hexdigest() != job["command_digest"]):
+                raise ConflictError("Job no longer matches its frozen profile")
+            if captured is not None and captured["profile"] != profile:
+                raise ConflictError("Frozen profile changed during environment capture")
+            if job.get("execution_environment_digest") and not self._qa_job_environment_matches(connection, job, captured=captured):
                 raise ConflictError("Suite execution environment changed", {"reason": "execution_environment_changed"})
             if ticket["status"] == TicketStatus.QA_IN_PROGRESS.value:
                 active = connection.execute("""SELECT 1 FROM qa_reviews r JOIN leases l ON l.lease_id=r.lease_id
@@ -686,25 +714,42 @@ class QaMixin:
                 and run["candidate_id"] == job["candidate_id"] and run["command_digest"] == job["command_digest"]
                 and run["termination_reason"] == "passed" and run["exit_code"] == 0 and not run["timed_out"])
 
-    def _qa_job_environment_matches(self, connection, job):
-        if job is None or not job.get("execution_environment_digest"):
+    @staticmethod
+    def _qa_environment_profile(connection, candidate_id):
+        return _row(connection.execute("SELECT * FROM candidate_test_profiles WHERE candidate_id=?",
+                                       (candidate_id,)).fetchone())
+
+    def _capture_qa_environment(self, candidate_id):
+        """Read/capture only; never retain a transaction across external work."""
+        with self.store.connection() as connection:
+            profile = self._qa_environment_profile(connection, candidate_id)
+        digest = (self.project_tests.execution_environment_digest(profile["test_command"], profile["timeout_seconds"],
+                  profile.get("provenance_modules") or None) if profile is not None else None)
+        return {"profile": profile, "digest": digest}
+
+    def _qa_job_environment_matches(self, connection, job, *, captured=None):
+        """Pure DB/binding check: absence of an external capture is not proof."""
+        if job is None or not job.get("execution_environment_digest") or not captured or not captured["digest"]:
             return False
-        profile = _row(connection.execute("SELECT * FROM candidate_test_profiles WHERE candidate_id=?",
-                                          (job["candidate_id"],)).fetchone())
-        return profile is not None and job["execution_environment_digest"] == self.project_tests.execution_environment_digest(
-            profile["test_command"], profile["timeout_seconds"], profile.get("provenance_modules") or None)
+        profile = self._qa_environment_profile(connection, job["candidate_id"])
+        return profile is not None and profile == captured["profile"] and job["execution_environment_digest"] == captured["digest"]
 
     def _complete_queued_project_test(
         self, test_run_id: str, execution: TestExecution
     ) -> dict[str, Any]:
         try:
+            with self.store.connection() as connection:
+                observed = self._qa_test_job(connection, test_run_id)
+                if observed["status"] != "RUNNING":
+                    return observed
+            captured = self._capture_qa_environment(observed["candidate_id"])
             # Read and check, write the report file with no transaction held, then
             # re-check under the write lock before recording the run.
             with self.store.connection() as connection:
                 job = self._qa_test_job(connection, test_run_id)
                 if job["status"] != "RUNNING":
                     return job
-                self._require_project_test_current(connection, job)
+                self._require_project_test_current(connection, job, captured=captured)
                 profile = self._one(connection, "SELECT * FROM candidate_test_profiles WHERE candidate_id = ?",
                                     (job["candidate_id"],))
             manifest = {**execution.environment_manifest,
@@ -731,7 +776,7 @@ class QaMixin:
                 job = self._qa_test_job(connection, test_run_id)
                 if job["status"] != "RUNNING":
                     return job
-                actor, ticket = self._require_project_test_current(connection, job)
+                actor, ticket = self._require_project_test_current(connection, job, captured=captured)
                 timestamp = _iso()
                 connection.execute(
                     """

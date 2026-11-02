@@ -61,8 +61,8 @@ def test_dependency_change_prevents_queue_and_merge_reuse(service, actors, seede
     result = service.execute_queued_project_test(first["test_run_id"])
     assert result["exit_code"] == 0 and result["termination_reason"] == "passed"
     candidate_id = submitted["candidate"]["candidate_id"]
-    assert service.queue_project_tests(*args)["test_run"]["test_run_id"] == first["test_run_id"]
-    assert service._reusable_qa_run(candidate_id, command, first["timeout_seconds"]) == first["test_run_id"]
+    assert result["execution_environment_digest"] is None
+    assert service._reusable_qa_run(candidate_id, command, first["timeout_seconds"]) is None
     with service.store.connection() as db:
         assert db.execute("SELECT COUNT(*) FROM qa_test_jobs").fetchone()[0] == 1
     (metadata / "METADATA").write_text("Metadata-Version: 2.1\nName: audit-addon\nVersion: 2.0\n", encoding="utf-8")
@@ -71,14 +71,15 @@ def test_dependency_change_prevents_queue_and_merge_reuse(service, actors, seede
     assert service._reusable_qa_run(candidate_id, command, first["timeout_seconds"]) is None
     second = service.queue_project_tests(*args)
     assert not second.get("reused") and second["test_run"]["test_run_id"] != first["test_run_id"]
-    assert second["test_run"]["execution_environment_digest"] != first["execution_environment_digest"]
+    assert second["test_run"]["execution_environment_digest"] is first["execution_environment_digest"] is None
     (packages / "audit_addon.py").write_text("VALUE = 2\n", encoding="utf-8")
     with pytest.raises(ConflictError) as denied:
         service.queue_project_tests(*args)
     assert denied.value.details["reason"] == "execution_environment_changed"
     with service.store.connection() as db:
-        with pytest.raises(ConflictError):
-            service._qa_test_authority(db, service._qa_test_job(db, second["test_run"]["test_run_id"]))
+        # Unknown is not reusable certification, but does not revoke an
+        # authorized observer/continuation of the one current execution.
+        assert service._qa_test_authority(db, service._qa_test_job(db, second["test_run"]["test_run_id"]))["ticket"]["ticket_id"] == t["ticket_id"]
         assert db.execute("SELECT COUNT(*) FROM qa_test_jobs WHERE status IN ('QUEUED','RUNNING')").fetchone()[0] == 1
         review = db.execute("SELECT review_id,status FROM qa_reviews WHERE lease_id=?", (owner["lease"]["lease_id"],)).fetchone()
         assert tuple(review) == (owner["review"]["review_id"], "IN_PROGRESS")
@@ -93,14 +94,14 @@ def test_dependency_bytes_not_only_version_are_identity(tmp_path, private_softwa
     (packages / "audit_addon.py").write_text("VALUE = 2\n", encoding="utf-8")
     second = runner.execution_environment_digest(command, 30)
     assert runner.execute(command, str(tmp_path), 30).exit_code == 1
-    assert first and second and first != second
+    assert first is second is None  # Module consumption is not proved by an inventory.
 
 
 def test_missing_dependency_manifest_stays_unproved(tmp_path, private_software):
     python, _, metadata = private_software
     runner = ProjectTestRunner(tmp_path / "reports")
     command = [str(python), "-B", "-m", "audit_command"]
-    assert runner.execution_environment_digest(command, 30)
+    assert runner.execution_environment_digest(command, 30) is None
     (metadata / "RECORD").unlink()
     assert runner.execution_environment_digest(command, 30) is None
     result = runner.execute(command, str(tmp_path), 30)
@@ -124,11 +125,13 @@ def test_unproved_external_path_command_is_not_reusable(service, actors, seeded,
     with service.store.connection(immediate=True) as db:
         db.execute("INSERT INTO candidate_test_profiles(candidate_id,test_command,timeout_seconds,configured_at,provenance_modules) VALUES (?,?,30,'fixture','[]')",
                    (artifact["candidate_id"], json.dumps(command)))
-        key = service.project_tests.execution_environment_digest(command, 30)
-        job = {"candidate_id": artifact["candidate_id"], "execution_environment_digest": key}
-        assert not service._qa_job_environment_matches(db, job)
+    captured = service._capture_qa_environment(artifact["candidate_id"])
+    job = {"candidate_id": artifact["candidate_id"], "execution_environment_digest": captured["digest"]}
+    with service.store.connection() as db:
+        assert not service._qa_job_environment_matches(db, job, captured=captured)
     assert service.project_tests.execute(command, str(tmp_path), 30).exit_code == 0
     (metadata / "METADATA").write_text("Metadata-Version: 2.1\nName: audit-addon\nVersion: 2.0\n", encoding="utf-8")
     assert service.project_tests.execute(command, str(tmp_path), 30).exit_code == 1
+    changed = service._capture_qa_environment(artifact["candidate_id"])
     with service.store.connection() as db:
-        assert not service._qa_job_environment_matches(db, job)
+        assert not service._qa_job_environment_matches(db, job, captured=changed)

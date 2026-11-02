@@ -33,32 +33,39 @@ _SOURCE_IDENTITY_PROBE = (
 _PYTHON_INTERPRETER_NAMES = frozenset({"python", "python3", "python.exe", "pythonw.exe"})
 _SOURCE_IDENTITY_PROBE_TIMEOUT_SECONDS = 30
 
-# Runs in the selected interpreter, not the control plane's Python. Hash actual
-# distribution bytes rather than trusting version labels or RECORD checksums.
+# Only certifies literal inline commands run with this identical isolated,
+# no-site startup. General module/dependency consumption remains UNKNOWN.
 _SOFTWARE_IDENTITY_PROBE = r"""
-import hashlib, importlib.metadata, json, pathlib, sys
+import hashlib, json, pathlib, sys, sysconfig
+assert sys.flags.isolated and sys.flags.no_site and 'site' not in sys.modules
 h = hashlib.sha256()
 def add(value):
     data = value if isinstance(value, bytes) else value.encode()
     h.update(len(data).to_bytes(8, 'big')); h.update(data)
 add(sys.version); add(pathlib.Path(sys.executable).read_bytes())
-distributions = sorted(importlib.metadata.distributions(), key=lambda d: (d.metadata['Name'] or '', d.version))
-for dist in distributions:
-    add(dist.metadata['Name'] or ''); add(dist.version)
-    direct = json.loads(dist.read_text('direct_url.json') or '{}')
-    if direct.get('dir_info', {}).get('editable') and dist.metadata['Name'] != 'hoh-control-plane':
-        raise ValueError('Unattested editable dependency')
-    files = dist.files
-    if files is None:
-        raise ValueError('Missing dependency file manifest')
-    for name in sorted(files, key=str):
-        path = pathlib.Path(dist.locate_file(name))
-        add(str(name))
-        if not path.exists() and str(name).endswith(('.pyc', '.pyo')):
-            add('absent-bytecode')
-        else:
-            add(path.read_bytes())
-print(json.dumps({'schema': 1, 'digest': h.hexdigest()}))
+add(repr((sys.flags.optimize, sys.flags.utf8_mode,
+          sys.stdout.encoding, sys.stderr.encoding,
+          sys.stdout.errors, sys.stderr.errors)))
+if sys.platform == 'win32':
+    import ctypes
+    buffer = ctypes.create_unicode_buffer(32768)
+    locate = ctypes.windll.kernel32.GetModuleFileNameW
+    locate.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint]
+    length = locate(sys.dllhandle, buffer, len(buffer))
+    if not length or length >= len(buffer):
+        raise ValueError('Unproved loaded runtime')
+    add(pathlib.Path(buffer.value).read_bytes())
+elif sysconfig.get_config_var('Py_ENABLE_SHARED'):
+    runtime = pathlib.Path(sysconfig.get_config_var('LIBDIR')) / sysconfig.get_config_var('LDLIBRARY')
+    add(runtime.read_bytes())
+for name, module in sorted(tuple(sys.modules.items())):
+    source = getattr(module, '__file__', None)
+    if source:
+        add(name); add(pathlib.Path(source).read_bytes())
+        cache = getattr(module, '__cached__', None)
+        if cache and pathlib.Path(cache).is_file():
+            add(pathlib.Path(cache).read_bytes())
+print(json.dumps({'schema': 2, 'digest': h.hexdigest()}))
 """
 
 # Wave 7A: a run that failed because of the host, not the candidate. These are
@@ -242,7 +249,7 @@ class ProjectTestRunner:
         completed = None
         try:
             completed = run_managed(
-                command,
+                self._execution_command(command) if execution_identity else command,
                 cwd=worktree_path,
                 env=environment,
                 timeout=timeout_seconds,
@@ -312,19 +319,19 @@ class ProjectTestRunner:
         if identity is None:
             return None
         try:
-            captured = subprocess.run([executable, '-I', '-B', '-c', _SOFTWARE_IDENTITY_PROBE],
+            captured = subprocess.run([executable, '-I', '-S', '-B', '-c', _SOFTWARE_IDENTITY_PROBE],
                 env=environment, capture_output=True, text=True, timeout=20)
             software = json.loads(captured.stdout) if captured.returncode == 0 else {}
-            if (not isinstance(software, dict) or software.get('schema') != 1
+            if (not isinstance(software, dict) or software.get('schema') != 2
                     or not isinstance(software.get('digest'), str)
                     or not re.fullmatch(r'[0-9a-f]{64}', software['digest'])):
                 return None
         except (OSError, subprocess.TimeoutExpired, ValueError):
             return None
-        material = {"schema": 2, "command": command, "timeout_seconds": timeout_seconds,
+        material = {"schema": 3, "command": command, "timeout_seconds": timeout_seconds,
                     "provenance_modules": provenance_modules or None, "executable": identity,
                     "software": software['digest'], "platform": platform.platform(),
-                    "python_no_user_site": "1", "candidate_imports": "candidate/src",
+                    "startup": "isolated-no-site-literal-v1",
                     "python_environment": "normalized-no-inherited-python-controls-v1",
                     "inputs": {key: environment.get(key) for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS")}}
         return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
@@ -334,11 +341,9 @@ class ProjectTestRunner:
         if not command or not cls._looks_like_python_interpreter(command[0]):
             return False
         mode = next((i for i, arg in enumerate(command[1:], 1) if arg in {'-c', '-m'}), None)
-        if mode is None or any(arg not in {'-B', '-O', '-OO', '-I', '-E', '-s', '-S', '-u', '-q'}
+        if mode is None or command[mode] != '-c' or any(arg != '-B'
                                for arg in command[1:mode]):
             return False  # Unproved interpreter hooks/options are not reusable.
-        if command[mode] == '-m':
-            return len(command) > mode + 1
         # Inline code can add arbitrary external software paths. Only literal,
         # dependency-free statements have proved applicability here; other
         # commands can execute, but cannot reuse an attestation of sys.path alone.
@@ -359,6 +364,12 @@ class ProjectTestRunner:
                 continue
             return False
         return True
+
+    @classmethod
+    def _execution_command(cls, command):
+        if cls._attestable_command(command):
+            return [command[0], '-I', '-S', '-B', *command[command.index('-c'):]]
+        return command
 
     @staticmethod
     def environment_digest(command: list[str], resolved_source: str | None) -> str:

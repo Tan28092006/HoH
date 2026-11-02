@@ -185,3 +185,29 @@ def test_unknown_or_mismatched_capture_cannot_use_the_merge_only_lane(service, a
     with service.store.connection() as db:
         assert db.execute("SELECT 1 FROM merge_intents WHERE merge_job_id=?", (job_id,)).fetchone() is None
         assert db.execute("SELECT execution_environment_digest FROM qa_test_jobs WHERE test_run_id=?", (run_id,)).fetchone()[0] == identity
+
+
+def test_late_capture_miss_defers_without_the_slot_then_resumes(service, actors, seeded, tmp_path, monkeypatch):
+    from helpers.integration import _git
+    repository, candidate, job_id, _ = _queued_reuse_merge(service, actors, seeded, tmp_path)
+    before = _git(repository, "rev-parse", "main")
+    original = service.project_tests.execution_environment_digest
+    key = original(["python", "-c", "pass"], 60)
+    calls = []
+    def changing(*args, **kwargs):
+        calls.append(True)
+        return key if len(calls) == 1 else None
+    monkeypatch.setattr(service.project_tests, "execution_environment_digest", changing)
+    execute = service._execute_frozen_profile
+    monkeypatch.setattr(service, "_execute_frozen_profile", lambda *a, **k: pytest.fail("Late miss ran outside the test slot"))
+    deferred = service.execute_queued_merge(job_id, run_suite=False)
+    assert len(calls) >= 2
+    assert deferred["status"] == "QUEUED" and deferred["started_at"] is None
+    assert _git(repository, "rev-parse", "main") == before
+    with service.store.connection() as db:
+        assert db.execute("SELECT 1 FROM merge_intents WHERE merge_job_id=?", (job_id,)).fetchone() is None
+        assert db.execute("SELECT COUNT(*) FROM leases WHERE lease_id=?", (deferred["lease_id"],)).fetchone()[0] == 1
+    monkeypatch.setattr(service, "_execute_frozen_profile", execute)
+    resumed = service.execute_queued_merge(job_id, run_suite=True)
+    assert resumed["status"] == "COMPLETED" and resumed["merge_status"] == "merged"
+    assert _git(repository, "rev-parse", "main") == candidate["candidate"]["commit_sha"]
