@@ -91,6 +91,12 @@ option operands are not selectors. The observer restores implicit cwd only for
 ordinary module startup, not safe-path (`-P`) or isolated (`-I`) startup. A fresh
 pytest result still needs completed counts and frozen source provenance; UNKNOWN
 cache applicability never permits an all-skipped run to pass.
+Observed failures, collection errors or a recorded non-success pytest status
+also preclude a fresh pass, even when a project hook overrides process exit to
+zero and other tests passed. Existing infrastructure/provenance classifications
+remain distinct. The observer's skippable first line preserves accepted
+interpreter `-x` prefixes during module-to-script adaptation; pytest's trailing
+`-x` argument remains unchanged.
 
 The deadline/stop controller performs only fresh DB state/profile/lease/review/
 candidate/retirement checks. It does not call external capture. The existing

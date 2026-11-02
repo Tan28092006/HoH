@@ -615,6 +615,8 @@ class ProjectTestRunner:
                     child = json.loads(report.read_text(encoding="utf-8"))
                 except (ValueError, OSError):
                     pass
+            # Process zero cannot erase the observer's recorded non-success status.
+            pytest_status = completed.returncode or child.get("pytest_exit_status", 0)
             reason = "passed"
             if completed.cancelled:
                 reason = "cancelled"
@@ -637,19 +639,21 @@ class ProjectTestRunner:
                 reason = "artifact_mismatch"
             elif child.get("foreign_import_errors"):
                 reason = "foreign_import"
-            elif completed.returncode == 2 and not (child.get("test_counts") or {}).get("collection_errors"):
+            elif pytest_status == 2 and not (child.get("test_counts") or {}).get("collection_errors"):
                 reason = "pytest_interrupted"
-            elif completed.returncode == 3:
+            elif pytest_status == 3:
                 reason = "pytest_internal_error"
-            elif completed.returncode == 4:
+            elif pytest_status == 4:
                 reason = "pytest_usage_error"
             elif child.get("phase") != "session_finished":
                 reason = "incomplete_evidence"
-            elif completed.returncode != 0:
+            elif pytest_status != 0:
                 # 1: tests failed; 2 here: the candidate's own collection errors.
-                reason = "test_failure" if completed.returncode in (1, 2) else "test_configuration_error"
+                reason = "test_failure" if pytest_status in (1, 2) else "test_configuration_error"
             elif child.get("provenance_status") not in {"verified", "not_applicable"}:
                 reason = "incomplete_evidence"
+            elif any((child.get("test_counts") or {}).get(name) for name in ("failed", "collection_errors")):
+                reason = "test_failure"
             elif not (child.get("test_counts") or {}).get("passed"):
                 # Exit 0 with nothing passed (every test skipped or deselected)
                 # proves nothing; the candidate answers for it (wave 8A, R8).

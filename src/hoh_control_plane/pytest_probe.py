@@ -1,3 +1,4 @@
+# Safe to skip under interpreter -x when adapting the declared module to a script.
 """Trusted pytest instrumentation, launched by absolute path in the candidate Python.
 
 The original Python flags and pytest arguments are retained. This file and its
