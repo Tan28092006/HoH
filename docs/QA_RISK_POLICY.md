@@ -60,10 +60,15 @@ name, nonempty RECORD or nominal interpreter probe confers reusable authority.
 
 Execution removes inherited PYTHON controls. The narrow certifiable boundary is
 literal inline pass/assert/print code with no imports or dynamic expressions,
-using the runner's enforced `-I -S -B` startup. The selected runtime capture uses
+restricted to at most 1,024 characters of unescaped ASCII source, with integers
+at most 64 bits and no comments/directives. A host AST
+constant alone does not prove the selected compiler's dependencies; other forms
+remain UNKNOWN and execute ordinarily. Proved forms use the runner's enforced
+`-I -S -B` startup. The selected CPython runtime capture uses
 that same isolated/no-site startup and hashes the actual runtime image and loaded
 startup software, including source/cache bytes. If that proof is unavailable,
-the ordinary declared invocation executes with UNKNOWN applicability. Other flags/commands remain authorized to execute
+the ordinary declared invocation executes with UNKNOWN applicability. Other
+flags/commands remain authorized to execute
 normally, subject to existing provenance guards, but are not certified for reuse.
 There is no editable-package name exemption or blanket `-m` certification.
 Command, timeout, provenance modules and OMP/OpenBLAS controls remain bound.
@@ -79,6 +84,16 @@ re-read the current profile, candidate, lease/review, retirement and latest atte
 under short transactions. A no-test-slot merge retains that capability through
 the locked consumer: a late applicability miss removes its owned intent and
 defers to QUEUED for proper re-admission, never a suite outside its slot.
+Python dispatch selects the interpreter's command mode before program argv;
+trailing `-m pytest` after `-c` or a script does not select instrumentation.
+
+The deadline/stop controller performs only fresh DB state/profile/lease/review/
+candidate/retirement checks. It does not call external capture. The existing
+managed worker performs full capture/binding checks before execution and result
+publication, outside writer transactions. Monitoring is not an environment or
+reuse certificate: unavailable or changed known bindings still cannot be used
+by the worker's full checks. No background observer/cache or extra executor is
+needed, and blocked capture cannot occupy the managed cancellation/deadline loop.
 The immutable requesting lease remains execution provenance; an active peer or
 the completed required passes can sustain the shared execution after it ends.
 A newer pending or failed attempt fences an older green result. Source,

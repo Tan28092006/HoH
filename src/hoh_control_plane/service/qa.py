@@ -640,6 +640,21 @@ class QaMixin:
         return authority["actor"], authority["ticket"]
 
     def _qa_test_authority(self, connection, job, *, actor=None, lease_id=None, captured=None):
+        authority = self._qa_test_state_authority(connection, job, actor=actor, lease_id=lease_id)
+        if job["status"] in {"QUEUED", "RUNNING"}:
+            profile = self._qa_environment_profile(connection, job["candidate_id"])
+            if captured is not None and captured["profile"] != profile:
+                raise ConflictError("Frozen profile changed during environment capture")
+            if job.get("execution_environment_digest") and not self._qa_job_environment_matches(connection, job, captured=captured):
+                raise ConflictError("Suite execution environment changed", {"reason": "execution_environment_changed"})
+        return authority
+
+    def _qa_test_state_authority(self, connection, job, *, actor=None, lease_id=None):
+        """Fresh DB-only monitoring authority, never a capture/reuse certificate.
+
+        The managed worker still requires full capture authority at execution
+        and publication. The deadline controller must not wait for that capture.
+        """
         active_job = job["status"] in {"QUEUED", "RUNNING"}
         ticket = self._ticket(connection, job["ticket_id"])
         if actor is not None:
@@ -659,10 +674,6 @@ class QaMixin:
             if profile is not None and (profile["timeout_seconds"] != job["timeout_seconds"] or
                     hashlib.sha256("\0".join(profile["test_command"]).encode()).hexdigest() != job["command_digest"]):
                 raise ConflictError("Job no longer matches its frozen profile")
-            if captured is not None and captured["profile"] != profile:
-                raise ConflictError("Frozen profile changed during environment capture")
-            if job.get("execution_environment_digest") and not self._qa_job_environment_matches(connection, job, captured=captured):
-                raise ConflictError("Suite execution environment changed", {"reason": "execution_environment_changed"})
             if ticket["status"] == TicketStatus.QA_IN_PROGRESS.value:
                 active = connection.execute("""SELECT 1 FROM qa_reviews r JOIN leases l ON l.lease_id=r.lease_id
                     WHERE r.candidate_id=? AND r.status='IN_PROGRESS' AND l.role='qa'

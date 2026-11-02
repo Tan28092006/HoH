@@ -180,6 +180,9 @@ def test_authority_capture_releases_writer_and_rechecks(service, actors, seeded,
             return service.execute_queued_project_test(run_id)
         if phase == "complete":
             return service._complete_queued_project_test(run_id, execution)
+        # Capture belongs to the worker phase, not the cancellation controller.
+        # The real managed-loop tests independently exercise that separation.
+        service._capture_qa_environment(submitted["candidate"]["candidate_id"])
         return Supervisor(service)._execute("fixture-execution", "qa", run_id)
     def write():
         service.create_feature(actors["planner"], "project-1", "unrelated", "Unrelated", "Independent lifecycle")

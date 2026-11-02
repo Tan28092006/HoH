@@ -37,6 +37,7 @@ _SOURCE_IDENTITY_PROBE_TIMEOUT_SECONDS = 30
 # no-site startup. General module/dependency consumption remains UNKNOWN.
 _SOFTWARE_IDENTITY_PROBE = r"""
 import hashlib, json, pathlib, sys, sysconfig
+assert sys.implementation.name == 'cpython'
 assert sys.flags.isolated and sys.flags.no_site and 'site' not in sys.modules
 h = hashlib.sha256()
 def add(value):
@@ -338,17 +339,28 @@ class ProjectTestRunner:
 
     @classmethod
     def _attestable_command(cls, command):
-        if not command or not cls._looks_like_python_interpreter(command[0]):
+        selected = cls._python_mode(command)
+        if selected is None:
             return False
-        mode = next((i for i, arg in enumerate(command[1:], 1) if arg in {'-c', '-m'}), None)
-        if mode is None or command[mode] != '-c' or any(arg != '-B'
+        kind, mode = selected
+        if kind != '-c' or command[mode] != '-c' or any(arg != '-B'
                                for arg in command[1:mode]):
             return False  # Unproved interpreter hooks/options are not reusable.
         # Inline code can add arbitrary external software paths. Only literal,
         # dependency-free statements have proved applicability here; other
         # commands can execute, but cannot reuse an attestation of sys.path alone.
         try:
-            body = ast.parse(command[mode + 1]).body
+            source = command[mode + 1]
+            # Host AST constants can hide selected-compiler imports (e.g. \N).
+            # Restrict proof to plain ASCII source, not escapes or directives.
+            if (not isinstance(source, str) or len(source) > 1024 or not source.isascii()
+                    or "\\" in source or "#" in source):
+                return False
+            tree = ast.parse(source)
+            if any(isinstance(node, ast.Constant) and isinstance(node.value, int)
+                   and node.value.bit_length() > 64 for node in ast.walk(tree)):
+                return False  # Large integer compilation/formatting is outside this core-only fragment.
+            body = tree.body
         except (ValueError, IndexError, SyntaxError):
             return False
         for node in body:
@@ -368,7 +380,7 @@ class ProjectTestRunner:
     @classmethod
     def _execution_command(cls, command):
         if cls._attestable_command(command):
-            return [command[0], '-I', '-S', '-B', *command[command.index('-c'):]]
+            return [command[0], '-I', '-S', '-B', *command[cls._python_mode(command)[1]:]]
         return command
 
     @staticmethod
@@ -451,14 +463,32 @@ class ProjectTestRunner:
         return environment
 
     @classmethod
-    def _pytest_arguments(cls, command):
+    def _python_mode(cls, command):
+        """Select interpreter mode before script/inline/module program argv."""
         if not command or not cls._looks_like_python_interpreter(command[0]):
             return None
-        try:
-            index = command.index("-m")
-        except ValueError:
+        index = 1
+        while index < len(command):
+            arg = command[index]
+            if arg.startswith(('-c', '-m')):
+                return arg[:2], index
+            if arg in {'-W', '-X', '--check-hash-based-pycs'}:
+                index += 2  # These interpreter options consume their own value.
+            elif arg.startswith(('-W', '-X', '--check-hash-based-pycs=')) or re.fullmatch(r'-[bBdEiIOPqRsSuvx]+', arg):
+                index += 1
+            else:
+                return None  # Script, stdin, --, help/version or unsupported flag.
+        return None
+
+    @classmethod
+    def _pytest_arguments(cls, command):
+        selected = cls._python_mode(command)
+        if selected is None or selected[0] != '-m':
             return None
-        return (command[1:index], command[index + 2:]) if command[index + 1:index + 2] == ["pytest"] else None
+        _, index = selected
+        separate = command[index] == '-m'
+        module = command[index + 1:index + 2] if separate else [command[index][2:]]
+        return (command[1:index], command[index + (2 if separate else 1):]) if module == ['pytest'] else None
 
     @staticmethod
     def _provenance_modules(worktree):
