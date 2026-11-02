@@ -319,17 +319,14 @@ def test_a_sign_off_for_an_older_candidate_does_not_count(service, actors, seede
         )
     second = submit_fake(service, actors, "DEV-142", attempt=2)
     assert second["candidate"]["candidate_id"] != first["candidate"]["candidate_id"]
-
+    with service.store.connection(immediate=True) as connection:
+        connection.execute("INSERT INTO candidate_changed_paths VALUES (?,?)",
+                           (second["candidate"]["candidate_id"], "src/checkout/retry.py"))
+    from helpers.w7 import pass_all
+    pass_all(service, actors, "DEV-142", extra=[finding("Review", evidence_type="adversarial_review")])
     with service.store.connection() as connection:
         risk = service._ticket_risk(connection, "project-1", service._ticket(connection, "DEV-142"))
         with pytest.raises(ReleasePolicyError) as refused:
-            connection.execute(
-                "INSERT INTO evidence (evidence_id, candidate_id, criterion, evidence_type, "
-                "observation, storage_ref, storage_checksum, checksum_source, created_by, created_at) "
-                "VALUES ('ev-review', ?, 'review', 'adversarial_review', 'ok', 'evidence://qa/r', "
-                "'x', 'claimed', 'qa-01', '2026-01-01T00:00:00Z')",
-                (second["candidate"]["candidate_id"],),
-            )
             service._require_risk_tier_cleared(
                 connection, "project-1", service._ticket(connection, "DEV-142"),
                 {"candidate_id": second["candidate"]["candidate_id"]},

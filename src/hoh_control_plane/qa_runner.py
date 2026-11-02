@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 import re
 import tempfile
+import shutil
 import tomllib
 
 from hoh_control_plane.domain import ValidationError
@@ -185,6 +186,7 @@ class ProjectTestRunner:
         command_digest = hashlib.sha256("\0".join(command).encode()).hexdigest()
         started = time.perf_counter()
         environment = self._build_environment(worktree_path)
+        execution_identity = self.execution_environment_digest(command, timeout_seconds, provenance_modules, environment)
         if self._pytest_arguments(command) is not None:
             return self._execute_pytest(command, worktree_path, timeout_seconds, environment,
                                         frozen_modules=provenance_modules)
@@ -257,7 +259,32 @@ class ProjectTestRunner:
             environment_digest=self.environment_digest(command, resolved_source),
             termination_reason=reason, capture_errors=capture_errors,
             stdout_truncated=stdout_truncated, stderr_truncated=stderr_truncated,
+            environment_manifest={"execution_environment_digest": execution_identity},
         )
+
+    @staticmethod
+    def execution_environment_digest(command, timeout_seconds, provenance_modules=None, environment=None):
+        """Stable host-controlled execution inputs, not reviewer identity or free memory.
+
+        Only a digest is retained. Worktree-local import paths are already bound
+        by candidate identity; their temporary directory names are not identity.
+        """
+        environment = os.environ if environment is None else environment
+        executable = shutil.which(command[0], path=environment.get("PATH"))
+        identity = None
+        if executable:
+            path = Path(executable).resolve()
+            try:
+                stat = path.stat()
+                identity = [str(path), stat.st_size, stat.st_mtime_ns]
+            except OSError:
+                pass  # Unavailable executables cannot produce a reusable pass.
+        material = {"schema": 1, "command": command, "timeout_seconds": timeout_seconds,
+                    "provenance_modules": provenance_modules or None, "executable": identity,
+                    "python": sys.version, "platform": platform.platform(),
+                    "python_no_user_site": "1", "candidate_imports": "candidate/src",
+                    "inputs": {key: environment.get(key) for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS")}}
+        return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
 
     @staticmethod
     def environment_digest(command: list[str], resolved_source: str | None) -> str:
@@ -383,6 +410,7 @@ class ProjectTestRunner:
                     f"{error.__cause__ or error}")
         resources = resource_snapshot()
         manifest = {"schema_version": 1, "command": command, "command_digest": digest,
+                     "execution_environment_digest": self.execution_environment_digest(command, timeout, frozen_modules, environment),
                     "provenance_modules": modules, "provenance_modules_source": modules_source,
                     "host_resources": resources,
                     "environment_inputs": {k: environment[k] for k in

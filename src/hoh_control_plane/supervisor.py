@@ -16,7 +16,7 @@ import threading
 import time
 from uuid import uuid4
 
-from hoh_control_plane.domain import Actor, Role, ConflictError
+from hoh_control_plane.domain import Actor, Role, ConflictError, DomainError
 from hoh_control_plane.managed_process import run_managed
 from hoh_control_plane.resource_lock import exclusive_file_lock
 from hoh_control_plane.uncancellable import clear as clear_uncancellable, is_uncancellable
@@ -247,6 +247,12 @@ class Supervisor:
                 db.execute('UPDATE worker_executions SET heartbeat_at = ? WHERE execution_id = ?', (now(), execution_id))
                 if 'lease_id' not in job:
                     return False  # A main check belongs to no lease.
+                if kind == 'qa':
+                    try:
+                        self.service._qa_test_authority(db, job)
+                    except DomainError:
+                        return True
+                    return False
                 lease = db.execute('SELECT expires_at FROM leases WHERE lease_id = ?', (job['lease_id'],)).fetchone()
             return lease is None or datetime.fromisoformat(lease['expires_at'].replace('Z', '+00:00')) <= datetime.now(UTC)
         def holding():

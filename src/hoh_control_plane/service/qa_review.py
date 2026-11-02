@@ -61,7 +61,7 @@ class QaReviewMixin:
                     raise ValidationError("Each leaf needs at most eight distinct files, including related paths")
                 for path in paths:
                     if (path.startswith("/") or any(part in {"", ".", ".."} for part in path.split("/"))
-                            or any(char in path for char in "\\:*?[]") or any(ord(char) < 32 for char in path)):
+                            or any(char in path for char in "\\:*?") or any(ord(char) < 32 for char in path)):
                         raise ValidationError("Review paths must be literal repository-relative files")
                 if not set(scope["paths"]).issubset(changed):
                     raise ValidationError("Review paths must belong to this frozen candidate's changed paths")

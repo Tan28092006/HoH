@@ -464,6 +464,7 @@ CREATE INDEX IF NOT EXISTS qa_test_runs_candidate_created
 
 CREATE TABLE IF NOT EXISTS qa_test_jobs (
     test_run_id TEXT PRIMARY KEY,
+    execution_environment_digest TEXT,
     project_id TEXT NOT NULL REFERENCES projects(project_id),
     candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),
     ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),

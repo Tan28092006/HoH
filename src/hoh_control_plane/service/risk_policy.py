@@ -366,11 +366,27 @@ class RiskPolicyMixin:
         if risk["tier"] == "low":
             return risk
         candidate_id = candidate["candidate_id"]
-        review = connection.execute(
-            "SELECT evidence_id FROM evidence WHERE candidate_id = ? AND evidence_type = ? LIMIT 1",
+        findings = [_row(row) for row in connection.execute(
+            "SELECT f.* FROM qa_findings f JOIN qa_reviews r ON r.review_id=f.review_id "
+            "WHERE f.candidate_id=? AND r.candidate_id=f.candidate_id AND r.status='PASSED' AND f.status='verified'",
+            (candidate_id,),
+        ).fetchall()]
+        stored = self._one(connection, "SELECT * FROM candidates WHERE candidate_id=?", (candidate_id,))
+        attempted = connection.execute("SELECT 1 FROM qa_reviews WHERE candidate_id=? LIMIT 1", (candidate_id,)).fetchone()
+        if not attempted and not stored.get("qa_review_plan") and stored["required_qa_reviews"] == 1:
+            # Untouched pre-review records have no review IDs. Use only their
+            # latest verified finding batch, never an unattached evidence row.
+            legacy = [_row(row) for row in connection.execute(
+                "SELECT * FROM qa_findings WHERE candidate_id=? ORDER BY created_at DESC", (candidate_id,),
+            ).fetchall()]
+            findings = [f for f in legacy if f["created_at"] == legacy[0]["created_at"]
+                        and f["status"] == "verified" and f.get("review_id") is None] if legacy else []
+        eligible_ids = {ref for finding in findings for ref in finding["evidence_refs"]}
+        review = any(row["evidence_id"] in eligible_ids for row in connection.execute(
+            "SELECT evidence_id FROM evidence WHERE candidate_id=? AND evidence_type=?",
             (candidate_id, ADVERSARIAL_REVIEW_EVIDENCE),
-        ).fetchone()
-        if review is None:
+        ).fetchall())
+        if not review:
             raise ReleasePolicyError(
                 f"A {risk['tier']}-risk candidate needs an {ADVERSARIAL_REVIEW_EVIDENCE} "
                 "evidence item before merge",

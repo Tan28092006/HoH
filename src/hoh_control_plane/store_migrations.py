@@ -54,7 +54,8 @@ class SchemaVersionError(SchemaMigrationError):
 #        project_ and candidate_test_profiles.provenance_modules (R8).
 #   4 -- candidate-bound independent QA reviews, shipped in installed 0.3.35.
 #   5 -- frozen risk-directed review plans; existing candidate counts stay intact.
-SCHEMA_VERSION = 5
+#   6 -- trusted stable execution environment identity on shared QA jobs.
+SCHEMA_VERSION = 6
 
 
 def read_schema_version(connection: Any, columns_of: Any) -> int:
@@ -239,6 +240,7 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("candidate_test_profiles", "provenance_modules", "TEXT"),
     ("candidates", "required_qa_reviews", "INTEGER NOT NULL DEFAULT 1 CHECK (required_qa_reviews IN (1, 2))"),
     ("candidates", "qa_review_plan", "TEXT"),
+    ("qa_test_jobs", "execution_environment_digest", "TEXT"),
     ("evidence", "review_id", "TEXT REFERENCES qa_reviews(review_id)"),
     ("qa_findings", "review_id", "TEXT REFERENCES qa_reviews(review_id)"),
 )

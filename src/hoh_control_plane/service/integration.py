@@ -866,13 +866,11 @@ class IntegrationMixin:
 
         The candidate's one commit is cherry-picked onto current main in a
         private integration checkout. A clean result becomes a new derived
-        candidate (``derived_from``; parent = current main; same patch). When
-        the paths main changed since the old base are disjoint, by scope root,
-        from the candidate's paths, the QA verdict carries over
-        (``qa_evidence_from``) and this same merge job is re-queued, so the
-        normal gate executes the frozen suite on the rebased tree and the
-        landing is a compare-and-set ref update. Otherwise the derived
-        candidate goes to QA_READY. A conflict keeps today's rework path; the
+        candidate (``derived_from``; parent = current main; same patch), with
+        its own frozen review plan and QA_READY flow. Disjoint paths are
+        recorded for provenance, never permission to carry an old verdict.
+        Fresh QA and the normal frozen-suite/CAS gate precede any landing.
+        A conflict keeps today's rework path; the
         ``MAX_AUTO_REBASES``th + 1 drift blocks the ticket for Planner.
         Only drift onto a main HoH already observed is rebased: unobserved
         outside work still closes the project through the drift path.
@@ -969,8 +967,7 @@ class IntegrationMixin:
                  f"refs/hoh/rebased/{job['ticket_id']}/{derived_id_hint}",
                  candidate["developer_claims"] if isinstance(candidate["developer_claims"], str)
                  else json.dumps(candidate["developer_claims"]),
-                 actor.agent_id, timestamp, timestamp, candidate["candidate_id"],
-                 (candidate.get("qa_evidence_from") or candidate["candidate_id"]) if carry_qa else None),
+                 actor.agent_id, timestamp, timestamp, candidate["candidate_id"], None),
             )
             # The patch is still the Developer's: the derived candidate keeps the
             # original maker's family, never the Integrator's (wave 7C3).
@@ -986,6 +983,7 @@ class IntegrationMixin:
                 connection.execute(
                     "INSERT INTO candidate_changed_paths (candidate_id, path) VALUES (?, ?)",
                     (derived_id, path))
+            self._freeze_review_plan(connection, derived_id, job["project_id"], current_ticket, rebased_paths)
             connection.execute(
                 """INSERT INTO candidate_test_profiles
                        (candidate_id, test_command, timeout_seconds, configured_at, provenance_modules)
@@ -994,25 +992,8 @@ class IntegrationMixin:
                 (derived_id, candidate["candidate_id"]))
             payload = {"candidate_id": derived_id, "derived_from": candidate["candidate_id"],
                        "commit_sha": rebased, "base_commit": current_main,
-                       "qa_reused": carry_qa, "main_changed_paths": main_paths[:50],
+                       "qa_reused": False, "scope_disjoint": carry_qa, "main_changed_paths": main_paths[:50],
                        "auto_rebase": rebases + 1, "merge_job_id": merge_job_id}
-            if carry_qa:
-                next_version = _transition_ticket(
-                    connection, job["ticket_id"], actor=actor, expected_version=current_ticket["version"],
-                    from_statuses=(TicketStatus.MERGE_READY,),
-                    changes={"candidate_commit": rebased, "base_commit": current_main,
-                             "updated_at": timestamp})
-                self._event(connection, actor, job["project_id"], "candidate.rebased", "ticket",
-                            job["ticket_id"], next_version, payload)
-                # Same job, same lease: the Integrator keeps polling it. The
-                # supervisor re-admits it through the test slot, since the
-                # derived candidate has no QA run of its own to reuse.
-                connection.execute("DELETE FROM merge_intents WHERE merge_job_id = ?", (merge_job_id,))
-                connection.execute(
-                    """UPDATE merge_jobs SET status = 'QUEUED', started_at = NULL, candidate_id = ?,
-                       expected_version = ? WHERE merge_job_id = ?""",
-                    (derived_id, next_version, merge_job_id))
-                return self._merge_job(connection, merge_job_id)
             next_version = _transition_ticket(
                 connection, job["ticket_id"], actor=actor, expected_version=current_ticket["version"],
                 from_statuses=(TicketStatus.MERGE_READY,),
@@ -1067,7 +1048,9 @@ class IntegrationMixin:
             job = state["qa_job"]
             candidate = _row(connection.execute("SELECT commit_sha FROM candidates WHERE candidate_id=?",
                                                 (candidate_id,)).fetchone())
+            environment_matches = self._qa_job_environment_matches(connection, job)
         return (job["test_run_id"] if self._qa_job_passed(job) and candidate is not None
+                and environment_matches
                 and job["candidate_commit"] == candidate["commit_sha"]
                 and state["run"] is not None and self._run_passed(state["run"]) else None)
 

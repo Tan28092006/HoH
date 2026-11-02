@@ -44,11 +44,12 @@ def test_the_submitter_cannot_claim_its_own_candidate_for_qa(service, actors, se
 
     ticket, candidate, claim = _candidate_waiting_for_qa(
         service, actors, seeded, tmp_path, [sys.executable, "-c", "print('passed')"])
-    # Reproduce QA_READY without the lease, then try the claim as dev-01 holding QA.
+    # Supported expiry retires the review as well as releasing its lease.
     with service.store.connection(immediate=True) as connection:
-        connection.execute("DELETE FROM leases WHERE ticket_id = ?", (ticket["ticket_id"],))
-        connection.execute("UPDATE tickets SET status = 'QA_READY' WHERE ticket_id = ?",
-                           (ticket["ticket_id"],))
+        connection.execute("UPDATE leases SET expires_at='2000-01-01T00:00:00Z' WHERE lease_id=?", (claim["lease"]["lease_id"],))
+    service.sweep_expired_leases(Actor("sweeper", Role.ADMIN, frozenset({"*"})))
+    with service.store.connection() as connection:
+        assert connection.execute("SELECT status FROM qa_reviews WHERE lease_id=?", (claim["lease"]["lease_id"],)).fetchone()[0] == "EXPIRED"
         version = service._ticket(connection, ticket["ticket_id"])["version"]
     with pytest.raises(AuthorizationError) as refused:
         service.claim_qa(_as("dev-01", Role.QA), ticket["ticket_id"], version, 900)
@@ -57,7 +58,9 @@ def test_the_submitter_cannot_claim_its_own_candidate_for_qa(service, actors, se
     assert refused.value.details["submitted_by"] == "dev-01"
     assert refused.value.details["candidate_id"] == candidate["candidate"]["candidate_id"]
     # Any other QA identity still claims it.
-    assert service.claim_qa(actors["qa"], ticket["ticket_id"], version, 900)["lease"]
+    replacement = service.claim_qa(actors["qa"], ticket["ticket_id"], version, 900)
+    assert replacement["review"]["candidate_id"] == candidate["candidate"]["candidate_id"]
+    assert replacement["review"]["review_id"] != claim["review"]["review_id"]
 
 
 def test_a_verdict_from_the_submitter_is_refused_at_the_write(service, actors, seeded, tmp_path):

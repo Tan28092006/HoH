@@ -52,10 +52,15 @@ Readiness recovery replaces review slots explicitly while retaining old feedback
 
 Owners reuse one active or current passing suite job for the same candidate,
 frozen command digest and timeout. Polling renews only the caller's own lease.
+Reuse additionally requires the trusted runner's stable execution-environment
+digest. It binds interpreter identity, import policy, frozen provenance modules
+and relevant OMP/OpenBLAS inputs, not checkout paths, free memory or reviewer
+identity. It retains no secret environment values. An unknown or changed
+environment cannot reuse a passing run; an active mismatch is refused.
 The immutable requesting lease remains execution provenance; an active peer or
 the completed required passes can sustain the shared execution after it ends.
-A newer pending or failed attempt fences an older green result. Environment,
-source, checksum, command and frozen configuration binding remain unchanged.
+A newer pending or failed attempt fences an older green result. Source,
+checksum, command and frozen configuration binding remain required.
 When a shared job exists, the final passing owner keeps its lease until that
 attempt has a usable outcome; it cannot publish a pass ahead of a late red run.
 
@@ -70,6 +75,16 @@ Medium/high still need `adversarial_review` evidence. High also needs
 `policy.approve_high_risk` on the exact candidate. Merge checks the current owner
 passes and current regression identity, including after a queued gate runs.
 External landings remain ungated, never fabricated QA approval.
+
+Adversarial evidence must be referenced by a verified finding from a current
+passing review. Failed, expired, replaced or unreferenced evidence remains
+historical. Untouched legacy single-owner candidates without review attempts
+use their latest verified unbound finding batch.
+
+The legacy single-owner Git rebase mechanism remains. Every newly published
+derived identity freezes its own impact-based plan and returns to QA_READY,
+even for disjoint changes. It never inherits the old artifact's approvals or
+evidence linkage. The original historical row stays unchanged.
 
 Bootstrap and worker briefs advertise the budget. Role cards load existing
 practice skills only as needed. They do not add another dispatcher, change global

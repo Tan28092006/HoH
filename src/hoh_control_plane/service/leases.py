@@ -741,6 +741,15 @@ class LeaseMixin:
 
     @staticmethod
     def _unfinished_dependency_ids(connection: Connection, ticket_id: str) -> list[str]:
+        foreign = connection.execute("""SELECT 1 FROM ticket_dependencies d
+            JOIN tickets own ON own.ticket_id=d.ticket_id JOIN features f ON f.feature_id=own.feature_id
+            JOIN tickets dependency ON dependency.ticket_id=d.depends_on_ticket_id
+            JOIN features df ON df.feature_id=dependency.feature_id
+            WHERE d.ticket_id=? AND df.project_id != f.project_id LIMIT 1""", (ticket_id,)).fetchone()
+        if foreign is not None:
+            # Legacy invalid edges remain blocked regardless of private endpoint state.
+            raise ConflictError("Ticket has an invalid cross-project dependency; Planner repair is required",
+                                {"reason": "dependency_project_mismatch"})
         return [
             row["ticket_id"]
             for row in connection.execute(

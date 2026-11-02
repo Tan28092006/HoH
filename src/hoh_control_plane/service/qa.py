@@ -398,9 +398,6 @@ class QaMixin:
                 """,
                 (candidate["candidate_id"],),
             ).fetchone()
-            if active_job is not None:
-                return {"ticket": ticket, "test_run": self._qa_test_job(connection, active_job["test_run_id"]),
-                        "reused": True}
             test_profile = _row(
                 connection.execute(
                     "SELECT * FROM candidate_test_profiles WHERE candidate_id = ?",
@@ -423,10 +420,22 @@ class QaMixin:
             timeout_seconds = test_profile["timeout_seconds"]
             if not isinstance(timeout_seconds, int) or not 5 <= timeout_seconds <= 1800:
                 raise ValidationError("Candidate test command timeout is invalid")
+            execution_identity = self.project_tests.execution_environment_digest(
+                command, timeout_seconds, test_profile.get("provenance_modules") or None)
+            if active_job is not None:
+                active = self._qa_test_job(connection, active_job["test_run_id"])
+                if (active.get("execution_environment_digest") != execution_identity
+                        or active["candidate_commit"] != candidate["commit_sha"]
+                        or active["test_command"] != command or active["timeout_seconds"] != timeout_seconds):
+                    raise ConflictError("Active suite execution environment no longer matches",
+                                        {"reason": "execution_environment_changed"})
+                return {"ticket": ticket, "test_run": active, "reused": True}
             if not rerun:
                 state = self._candidate_suite_state(connection, candidate["candidate_id"], command, timeout_seconds)
                 passing = state["qa_job"]
-                if (self._qa_job_passed(passing) and state["run"] is not None
+                if (self._qa_job_passed(passing) and self._qa_job_environment_matches(connection, passing)
+                        and passing["candidate_commit"] == candidate["commit_sha"]
+                        and state["run"] is not None
                         and self._run_passed(state["run"])):
                     return {
                         "ticket": self._ticket(connection, ticket_id),
@@ -444,8 +453,8 @@ class QaMixin:
                 INSERT INTO qa_test_jobs
                     (test_run_id, project_id, candidate_id, ticket_id, lease_id, test_command,
                      command_digest, timeout_seconds, worktree_path, candidate_commit,
-                     requested_by, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'QUEUED', ?)
+                     requested_by, status, created_at, execution_environment_digest)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?)
                 """,
                 (
                     test_run_id,
@@ -460,6 +469,7 @@ class QaMixin:
                     candidate_commit,
                     actor.agent_id,
                     timestamp,
+                    execution_identity,
                 ),
             )
             self._event(
@@ -623,6 +633,8 @@ class QaMixin:
             candidate = self._current_qa_candidate(connection, ticket)
             if candidate["candidate_id"] != job["candidate_id"] or candidate["commit_sha"] != job["candidate_commit"]:
                 raise ConflictError("Candidate changed while project tests were running")
+            if job.get("execution_environment_digest") and not self._qa_job_environment_matches(connection, job):
+                raise ConflictError("Suite execution environment changed", {"reason": "execution_environment_changed"})
             if ticket["status"] == TicketStatus.QA_IN_PROGRESS.value:
                 active = connection.execute("""SELECT 1 FROM qa_reviews r JOIN leases l ON l.lease_id=r.lease_id
                     WHERE r.candidate_id=? AND r.status='IN_PROGRESS' AND l.role='qa'
@@ -673,6 +685,14 @@ class QaMixin:
         return (job is not None and job["status"] == "COMPLETED" and run is not None
                 and run["candidate_id"] == job["candidate_id"] and run["command_digest"] == job["command_digest"]
                 and run["termination_reason"] == "passed" and run["exit_code"] == 0 and not run["timed_out"])
+
+    def _qa_job_environment_matches(self, connection, job):
+        if job is None or not job.get("execution_environment_digest"):
+            return False
+        profile = _row(connection.execute("SELECT * FROM candidate_test_profiles WHERE candidate_id=?",
+                                          (job["candidate_id"],)).fetchone())
+        return profile is not None and job["execution_environment_digest"] == self.project_tests.execution_environment_digest(
+            profile["test_command"], profile["timeout_seconds"], profile.get("provenance_modules") or None)
 
     def _complete_queued_project_test(
         self, test_run_id: str, execution: TestExecution
@@ -743,10 +763,11 @@ class QaMixin:
                 connection.execute(
                     """
                     UPDATE qa_test_jobs
-                    SET status = 'COMPLETED', completed_at = ?, error_message = NULL
+                    SET status = 'COMPLETED', completed_at = ?, error_message = NULL,
+                        execution_environment_digest = ?
                     WHERE test_run_id = ?
                     """,
-                    (timestamp, test_run_id),
+                    (timestamp, execution.environment_manifest.get("execution_environment_digest"), test_run_id),
                 )
                 entry_id = _id(connection, "ctx")
                 outcome = "timed out" if execution.timed_out else f"exited {execution.exit_code}"
