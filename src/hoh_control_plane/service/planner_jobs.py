@@ -442,7 +442,8 @@ class PlannerJobMixin:
                     connection, actor, project_id, ticket, failure_class,
                     [f"context:{entry_id}", source_ref, *evidence_refs],
                 )
-                if grouped is not None and grouped["planner_job"] is not None:
+                peer_continues = actor.role is Role.QA and self._retire_qa_reviewer(connection, actor, ticket_id)
+                if grouped is not None and grouped["planner_job"] is not None and not peer_continues:
                     return {
                         "ticket": self._return_ticket_to_qa(
                             connection, actor, project_id, ticket, grouped["planner_job"]
@@ -458,7 +459,7 @@ class PlannerJobMixin:
                     }
                 if grouped is not None:
                     machine_mark = grouped["mark"]
-                if ticket["status"] not in {
+                if not peer_continues and ticket["status"] not in {
                     TicketStatus.BLOCKED.value,
                     TicketStatus.REWORK.value,
                 }:

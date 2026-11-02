@@ -44,7 +44,7 @@ statusFilterElement.value = state.statusFilter;
 function escapeHtml(value) {
   const node = document.createElement("span");
   node.textContent = String(value ?? "");
-  return node.innerHTML;
+  return node.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 function initials(value) {
@@ -261,7 +261,7 @@ function renderContextReferences(context) {
   const refLine = context.context_ref ? `<p class="meta"><code>${escapeHtml(context.context_ref)}</code></p>` : "";
   const entries = context.context_entries || [];
   if (!entries.length) return `${refLine}<p class="meta">No recorded context entries.</p>`;
-  return `${refLine}<ul>${entries.map(entry => `<li><span class="badge">${escapeHtml(entry.entry_type)}</span> ${escapeHtml(entry.actor_id)} (${escapeHtml(roleLabel(entry.actor_role))}) · ${escapeHtml(new Date(entry.created_at).toLocaleString())}</li>`).join("")}</ul>`;
+  return `${refLine}<ul>${entries.map(entry => `<li><span class="badge">${escapeHtml(entry.entry_type)}</span> ${escapeHtml(roleLabel(entry.source || "Source not recorded"))} · <code>${escapeHtml(entry.reference || `ctx:entry:${entry.entry_id}`)}</code></li>`).join("")}</ul>`;
 }
 
 function renderLease(owner) {

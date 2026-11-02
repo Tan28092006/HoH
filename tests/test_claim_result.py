@@ -19,6 +19,7 @@ from hoh_control_plane.service._common import agent_facing, delivered_json
 _RESULT_KEYS = {
     "ticket", "lease", "context_snapshot_id", "current_context_snapshot_id", "worker_brief",
     "family_check",
+    "review",
 }
 _IDENTITY_KEYS = {
     "project_id", "ticket_id", "feature_id", "title", "status", "version", "required_role",

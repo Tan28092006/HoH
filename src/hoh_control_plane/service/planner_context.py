@@ -58,13 +58,14 @@ class PlannerContextMixin:
                     """
                     SELECT * FROM context_entries
                     WHERE entry_type = ? AND content = ?
+                      AND ((source_ref IS NULL AND ? IS NULL) OR source_ref = ?)
                       AND ((ticket_id IS NULL AND ? IS NULL) OR ticket_id = ?)
                       AND ((feature_id IS NULL AND ? IS NULL) OR feature_id = ?)
                       AND superseded_by IS NULL
                     ORDER BY created_at DESC LIMIT 1
                     """,
                     (
-                        recorded_type, content,
+                        recorded_type, content, source_ref, source_ref,
                         ticket_id, ticket_id,
                         resolved_feature_id, resolved_feature_id,
                     ),

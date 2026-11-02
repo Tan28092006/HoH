@@ -143,13 +143,28 @@ class Supervisor:
             return True  # The worker asks again before it touches Git.
 
     def _pending(self):
-        # Constants define all SQL identifiers. Limit each source before sorting.
-        pending = []
-        with self.service.store.connection() as db:
-            for kind, (table, key, _, _) in JOBS.items():
-                for row in db.execute(f"SELECT {key}, created_at FROM {table} WHERE status = 'QUEUED' ORDER BY created_at LIMIT ?", (self.max_workers * 2,)).fetchall():
-                    pending.append((row['created_at'], kind, row[key]))
-        return [(kind, identifier) for _, kind, identifier in sorted(pending)]
+        # Page past ineligible prefixes without retaining the whole queue. SQL
+        # identifiers and kind literals come only from JOBS, never job inputs.
+        sources = ' UNION ALL '.join(
+            f"SELECT created_at, '{kind}' AS kind, {key} AS identifier "
+            f"FROM {table} WHERE status = 'QUEUED'"
+            for kind, (table, key, _, _) in JOBS.items()
+        )
+        cursor = None
+        while True:
+            after = 'WHERE (created_at, kind, identifier) > (?, ?, ?)' if cursor else ''
+            parameters = (*cursor, self.max_workers * 2) if cursor else (self.max_workers * 2,)
+            with self.service.store.connection() as db:
+                rows = db.execute(
+                    f'SELECT created_at, kind, identifier FROM ({sources}) AS jobs {after} '
+                    'ORDER BY created_at, kind, identifier LIMIT ?', parameters,
+                ).fetchall()
+            if not rows:
+                return
+            for row in rows:
+                yield row['kind'], row['identifier']
+            last = rows[-1]
+            cursor = (last['created_at'], last['kind'], last['identifier'])
 
     def recover(self):
         with self.service.store.connection() as db:
@@ -309,7 +324,7 @@ class Supervisor:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             result = self.tick()
-            if not result['active'] and not self._pending():
+            if not result['active'] and not any(self._pending()):
                 return
             time.sleep(0.1)
         raise TimeoutError('Worker queue did not drain before the deadline')

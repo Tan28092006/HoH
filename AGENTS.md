@@ -67,16 +67,18 @@ The service enforces these; [ARCHITECTURE.md](docs/ARCHITECTURE.md) says where.
   obsolete tickets retire through the pending reconciliation, keeping their
   worktrees, candidates and evidence.
 - Every open ticket has an explicit validation contract. A candidate is one
-  ordinary commit on the frozen base or the prior assessed candidate; a server
-  rebase on drift derives one on current main that lands only after the frozen
-  suite passes on it. QA independently runs the declared scenarios on the
+  ordinary commit on the frozen base or the prior assessed candidate. New-plan
+  drift returns to Developer; only historical single-owner candidates retain
+  server rebase and its frozen-suite gate. QA independently runs the declared scenarios on the
   frozen candidate and attaches every required evidence type. A gated merge
   or ungated landing creates one `delivery_completed` Planner report and a
   check of `main`; a red check or spent budget pauses the merge queue.
 - QA claim authority is declared capabilities a host preflight proved on the
   same machine (stable hostname `machine_id`), server-approved; Planner may
   override. Missing capability is an infrastructure gap, never grounds to
-  weaken acceptance. QA's `model_family` must differ from the maker's. Merge needs `adversarial_review` evidence at
+  weaken acceptance. Frozen plans require one independent QA at low/medium risk,
+  two at high; model family is provenance only. See `docs/QA_RISK_POLICY.md`.
+  Merge needs `adversarial_review` evidence at
   medium risk, plus `policy.approve_high_risk` at high.
 - `dev.submit_candidate`, `qa.submit_verdict` and `integrator.merge_candidate`
   require the `context_snapshot_id` of a packet read just before the write.

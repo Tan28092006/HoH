@@ -5,7 +5,10 @@ import anyio
 from collections.abc import Callable
 from typing import Any
 from mcp.server.fastmcp import FastMCP
-from hoh_control_plane.contracts import Findings, Verdict, as_payload
+from hoh_control_plane.contracts import (
+    Findings, Verdict, as_payload, ReviewScopes, ReviewRevision, ReviewTaskKey,
+    ReviewTaskState, NativeTaskId, StorageRef,
+)
 from hoh_control_plane.domain import Actor, Role, ValidationError
 from hoh_control_plane.service import ControlPlaneService
 from hoh_control_plane.mcp.invoke import _require_snapshot
@@ -14,6 +17,44 @@ from hoh_control_plane.mcp import workers
 
 def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke: Callable[..., Any]) -> None:
     if actor.role is Role.QA:
+
+        @server.tool(name="qa.prepare_review_batch", structured_output=True)
+        def qa_prepare_review_batch(ticket_id: str, lease_id: str, scopes: ReviewScopes) -> dict[str, Any]:
+            """Freeze exactly three bounded A/B/C advisory briefs for a high-risk owner.
+
+            Resume recorded tasks after interruption. Never give a leaf the owner packet.
+            Low and medium candidates do not require advisory fanout.
+            """
+            arguments = {"ticket_id": ticket_id, "lease_id": lease_id, "scopes": as_payload(scopes)}
+            return invoke("qa.prepare_review_batch", arguments, lambda: service.prepare_review_batch(actor, **arguments))
+
+        @server.tool(name="qa.get_review_batch", structured_output=True)
+        def qa_get_review_batch(ticket_id: str, lease_id: str) -> dict[str, Any]:
+            """Resume your private live owner/candidate review batch, not a peer's reports."""
+            arguments = {"ticket_id": ticket_id, "lease_id": lease_id}
+            return invoke("qa.get_review_batch", arguments,
+                          lambda: {"review_batch": service.get_review_batch(actor, **arguments)})
+
+        @server.tool(name="qa.checkpoint_review_task", structured_output=True)
+        def qa_checkpoint_review_task(ticket_id: str, lease_id: str, batch_id: str,
+                                      expected_revision: ReviewRevision, task_key: ReviewTaskKey,
+                                      native_task_id: NativeTaskId, state: ReviewTaskState,
+                                      report_ref: StorageRef | None = None) -> dict[str, Any]:
+            """Retain actual native task IDs and reports; duplicate callbacks are idempotent.
+
+            This records evidence identity, not proof that a native reviewer executed.
+            Only the authenticated owner has lifecycle authority.
+            """
+            arguments = {"ticket_id": ticket_id, "lease_id": lease_id, "batch_id": batch_id,
+                         "expected_revision": expected_revision, "task_key": task_key,
+                         "native_task_id": native_task_id, "state": state, "report_ref": report_ref}
+            def checkpoint():
+                batch = service.checkpoint_review_task(actor, **arguments)
+                task = next(task for task in batch["tasks"] if task["task_key"] == task_key)
+                return {"batch_id": batch["batch_id"], "revision": batch["revision"],
+                        "ready_for_synthesis": batch["ready_for_synthesis"],
+                        "task": {key: value for key, value in task.items() if key != "brief"}}
+            return invoke("qa.checkpoint_review_task", arguments, checkpoint)
 
         @server.tool(name="qa.run_capability_preflight", structured_output=True)
         async def qa_run_capability_preflight(project_id: str) -> dict[str, Any]:
@@ -57,7 +98,7 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
         ) -> dict[str, Any]:
             """Queue the frozen candidate test in a detached worker and return its test_run_id.
 
-            If this candidate already has a completed passing run of the same frozen
+            If this candidate has an active or current passing run of the same frozen
             command, that run is returned with reused=true and nothing executes; poll
             it as usual. Pass rerun=true only to investigate a suspected flaky result.
             """

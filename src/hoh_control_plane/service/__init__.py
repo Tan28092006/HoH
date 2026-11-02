@@ -83,6 +83,7 @@ from hoh_control_plane.service.spec import SpecMixin
 from hoh_control_plane.service.worktrees import WorktreeMixin
 from hoh_control_plane.service.integration import IntegrationMixin
 from hoh_control_plane.service.qa import QaMixin
+from hoh_control_plane.service.qa_review import QaReviewMixin
 from hoh_control_plane.service.candidates import CandidateMixin
 from hoh_control_plane.service.developer import DeveloperMixin
 from hoh_control_plane.service.board import BoardMixin
@@ -113,6 +114,7 @@ class ControlPlaneService(
     WorktreeMixin,
     IntegrationMixin,
     QaMixin,
+    QaReviewMixin,
     CapabilityMixin,
     CandidateMixin,
     DeveloperMixin,

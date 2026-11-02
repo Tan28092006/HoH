@@ -272,6 +272,7 @@ class CandidateRecoveryMixin:
             provenance = self._verify_infrastructure_mismatch_provenance(
                 connection, candidate["candidate_id"], evidence_reference
             )
+            self._replace_qa_reviews(connection, candidate["candidate_id"])
             timestamp = _iso()
             next_version = ticket["version"] + 1
             _transition_ticket(

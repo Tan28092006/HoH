@@ -20,12 +20,17 @@ own equipment, or transfers evidence to another SHA.
    its packet. Delegate the ticket with the
    claim's `worker_brief` (base card: one ticket, one fresh worker); the worker
    does steps 4-6 and returns verdict, evidence bundle, Planner job and blockers.
-   A claim on a candidate whose maker shares your `model_family` is refused;
-   leave it for another family. An unknown family is marked `family_unverified`.
+   Read the candidate's frozen `qa_review_plan`: low/medium have one owner and
+   no mandatory leaf fanout; high has two distinct owners with three bounded
+   advisory reviewers each. Historical candidates keep their recorded count.
+   Model family is provenance, not permission; the maker cannot review its work.
+   Follow [risk-review.md](references/risk-review.md) before high-risk delegation.
 4. Run the frozen project command through `qa.run_project_tests` once; retain and
    poll the returned `test_run_id` with `qa.get_project_test_run`. Verify source,
    imports, environment and HEAD identify the frozen candidate. A repeat call
-   returns the passing run (`reused=true`); pass `rerun=true` only for suspected flakiness.
+   returns the active or current passing run (`reused=true`); all owners share
+   this exact-artifact execution, not their conclusions. Medium uses one full
+   suite for its bounded batch. Pass `rerun=true` only for suspected flakiness.
 5. Execute every `validation_contract` scenario with claim → observe → assess.
    Attach the declared evidence types and record the result for every criterion;
    each evidence item needs `type`, `observation` and `storage_ref`; only
@@ -40,11 +45,12 @@ own equipment, or transfers evidence to another SHA.
    contract and diff adversarially before reading those claims, and attach it
    as an evidence item of type `adversarial_review`; merge is refused without it.
 6. Submit a verdict only from evidence on this exact SHA, passing the
-   `context_snapshot_id` of a packet read after your claim, or the claim's
-   `current_context_snapshot_id` (refused without one). The verdict
+   `context_snapshot_id` of a packet read immediately before the write. Peer
+   claims or evidence stale an earlier packet. The verdict
    value is `passed` or `failed`. `passed` requires every
    mandatory contract/preservation condition; Developer claims are advisory.
-   Keep the returned `evidence_bundle` as the durable iteration report.
+   Keep `review_id`, `aggregate_verdict` and `evidence_bundle`. `pending` means
+   another required owner must finish; it is not permission to merge.
 
 ## Capability and failure routing
 

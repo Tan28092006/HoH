@@ -243,7 +243,8 @@ CREATE TABLE IF NOT EXISTS leases (
     heartbeat_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS leases_one_per_ticket ON leases(ticket_id);
+CREATE UNIQUE INDEX IF NOT EXISTS leases_one_exclusive_ticket ON leases(ticket_id) WHERE role != 'qa';
+CREATE UNIQUE INDEX IF NOT EXISTS leases_one_actor_ticket ON leases(ticket_id, agent_id);
 
 CREATE TABLE IF NOT EXISTS candidates (
     candidate_id TEXT PRIMARY KEY,
@@ -259,8 +260,29 @@ CREATE TABLE IF NOT EXISTS candidates (
     qa_evidence_from TEXT,
     -- The maker's model family at submission; NULL when it was unknown.
     maker_model_family TEXT,
-    maker_model TEXT
+    maker_model TEXT,
+    required_qa_reviews INTEGER NOT NULL DEFAULT 1 CHECK (required_qa_reviews IN (1, 2)),
+    qa_review_plan TEXT
 );
+
+-- Attempts retain lease identity as provenance after a live lease is released.
+CREATE TABLE IF NOT EXISTS qa_reviews (
+    review_id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),
+    ticket_id TEXT NOT NULL REFERENCES tickets(ticket_id),
+    slot INTEGER NOT NULL CHECK (slot IN (1, 2)),
+    reviewer_id TEXT NOT NULL,
+    lease_id TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (status IN ('IN_PROGRESS', 'PASSED', 'FAILED', 'EXPIRED', 'REPLACED')),
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    context_snapshot_id TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS qa_reviews_current_slot
+    ON qa_reviews(candidate_id, slot) WHERE status IN ('IN_PROGRESS', 'PASSED', 'FAILED');
+CREATE UNIQUE INDEX IF NOT EXISTS qa_reviews_distinct_actor
+    ON qa_reviews(candidate_id, reviewer_id) WHERE status IN ('IN_PROGRESS', 'PASSED', 'FAILED');
+CREATE INDEX IF NOT EXISTS qa_reviews_candidate_started ON qa_reviews(candidate_id, started_at);
 
 -- Changed paths are derived from immutable Git commits, rather than supplied
 -- by a Developer, so they can enforce the ticket's declared write scope.
@@ -464,6 +486,8 @@ CREATE INDEX IF NOT EXISTS qa_test_jobs_candidate_created
     ON qa_test_jobs(candidate_id, created_at);
 CREATE INDEX IF NOT EXISTS qa_test_jobs_active_candidate
     ON qa_test_jobs(candidate_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS qa_test_jobs_one_active_candidate
+    ON qa_test_jobs(candidate_id) WHERE status IN ('QUEUED', 'RUNNING');
 
 -- Provenance travels with the observation: which scenario or command produced
 -- it, which environment ran it, and the checksum of the artifact it points at.
@@ -484,7 +508,8 @@ CREATE TABLE IF NOT EXISTS evidence (
     -- and the difference is exactly what "verified" means here.
     checksum_source TEXT,
     created_by TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    review_id TEXT REFERENCES qa_reviews(review_id)
 );
 
 CREATE TABLE IF NOT EXISTS qa_findings (
@@ -496,7 +521,8 @@ CREATE TABLE IF NOT EXISTS qa_findings (
     observation TEXT NOT NULL,
     evidence_refs TEXT NOT NULL,
     created_by TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    review_id TEXT REFERENCES qa_reviews(review_id)
 );
 
 -- Presence is advisory: the authenticated Actor remains the authority for role
@@ -526,20 +552,16 @@ CREATE TABLE IF NOT EXISTS agent_presence (
     endpoint TEXT,
     -- When this agent last registered, i.e. when its current chat began.
     session_started_at TEXT,
-    -- Which model family runs this session (anthropic, openai, google, other),
-    -- as the launcher reports it. NULL means unknown: checker/maker
-    -- distinctness is then unverified, never assumed.
+    -- Optional session model provenance, never a QA admission rule.
     model_family TEXT,
     model TEXT
 );
 CREATE INDEX IF NOT EXISTS agent_presence_role_expiry
     ON agent_presence(role, expires_at);
 
--- Per-project risk policy (wave 7C3). Absence of a row means the defaults:
--- checker distinct from maker on, built-in high/medium patterns.
+-- Per-project risk policy. Absence of a row means built-in high/medium patterns.
 CREATE TABLE IF NOT EXISTS project_risk_policies (
     project_id TEXT PRIMARY KEY REFERENCES projects(project_id),
-    checker_distinct_from_maker INTEGER NOT NULL DEFAULT 1,
     high_risk_patterns TEXT NOT NULL,
     medium_risk_patterns TEXT NOT NULL,
     medium_max_files INTEGER NOT NULL,

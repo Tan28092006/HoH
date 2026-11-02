@@ -17,7 +17,8 @@ candidate; it does not repair candidate code or bypass QA and policy gates.
    `expected_version`.
 3. Claim one candidate with `integrator.claim_candidate` and delegate it with
    the claim's `worker_brief` (base card: one ticket, one fresh worker); the
-   worker resolves the candidate packet, confirms verified evidence, exact
+    worker resolves the candidate packet, confirms verified evidence, exact
+    frozen review plan and completed owner count, then checks
    candidate/base SHA and hold/authorization, and returns merge job ID, status,
    mainline SHA and blockers. It invokes
    `integrator.merge_candidate` once with the `context_snapshot_id` of the packet

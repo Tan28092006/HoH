@@ -54,10 +54,8 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
     ) -> dict[str, Any]:
         """Register this authenticated agent as available for durable work dispatch.
 
-        model_family (anthropic, openai, google or other) and the optional model
-        name say which model runs this session. QA cannot claim a candidate made
-        by the same family while the project's checker_distinct_from_maker
-        policy is on; an unknown family is allowed but marked family_unverified.
+        model_family and the optional model record provenance only. QA independence
+        is enforced by authenticated maker/reviewer identity, not model provider.
 
         execution_capabilities lists only observable project equipment this
         session has checked it can use. Strict QA work is offered and claimable

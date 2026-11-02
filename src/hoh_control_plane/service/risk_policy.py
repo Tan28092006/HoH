@@ -1,14 +1,7 @@
-"""Model families, checker/maker distinctness and per-candidate risk tiers (wave 7C3).
+"""Frozen risk-directed review budgets, maker identity and high-risk approval.
 
-Two policies a project owns, both enforced by the server rather than by prompt:
-
-* checker_distinct_from_maker -- a QA claim is refused when the QA session's
-  model family equals the family of the Developer that froze the candidate.
-  An unknown family on either side is allowed but marked ``family_unverified``.
-* risk tiers -- computed from the candidate's changed paths (or, before there
-  is a candidate, from the ticket's write scope). ``medium`` needs an
-  ``adversarial_review`` evidence item before merge; ``high`` additionally
-  waits for ``policy.approve_high_risk`` on that exact candidate.
+Model families are optional provenance, never permission. Medium needs
+adversarial evidence; high additionally requires two owners and policy approval.
 """
 from __future__ import annotations
 
@@ -35,7 +28,7 @@ RISK_TIERS = ("low", "medium", "high")
 ADVERSARIAL_REVIEW_EVIDENCE = "adversarial_review"
 
 # Families a launcher is expected to report. Any other portable token is
-# accepted and stored as given; "other" never proves distinctness.
+# accepted and stored as given for provenance.
 KNOWN_MODEL_FAMILIES = ("anthropic", "openai", "google", "other")
 _FAMILY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
 
@@ -47,6 +40,27 @@ DEFAULT_HIGH_RISK_PATTERNS = (
     "deploy/**",
     "skills/**",
     "docs/spec/**",
+    "**/service/risk_policy.py",
+    "**/service/project_policy.py",
+    "**/service/leases.py",
+    "**/service/qa*.py",
+    "**/service/integration.py",
+    "**/service/ticket_authoring.py",
+    "**/supervisor.py",
+    "**/git_worktrees.py",
+    "**/service/_common.py",
+    "**/service/capability.py",
+    "**/service/candidates.py",
+    "**/service/run_guardrails.py",
+    "**/service/context.py",
+    "**/service/discovery.py",
+    "**/skill_plan.py",
+    "**/api.py",
+    "**/mcp/**",
+    "docs/QA_RISK_POLICY.md",
+    "**/store.py",
+    "**/postgres_store.py",
+    "**/migrations/**",
 )
 DEFAULT_MEDIUM_RISK_PATTERNS = (
     "**/service/_common.py",
@@ -59,7 +73,7 @@ DEFAULT_MEDIUM_MAX_FILES = 10
 
 
 class RiskPolicyMixin:
-    """Model-family checks, risk classification and the high-risk sign-off."""
+    """Risk classification, frozen review plans and the high-risk sign-off."""
 
     # --- model families -------------------------------------------------
 
@@ -91,18 +105,6 @@ class RiskPolicyMixin:
             (presence.get("model_family"), presence.get("model"), candidate_id),
         )
 
-    def _maker_family(self, connection: Connection, candidate: dict[str, Any]) -> str | None:
-        family = candidate.get("maker_model_family")
-        if family:
-            return family
-        # A candidate frozen before the column, or derived by the server, falls
-        # back to its submitter's current registration.
-        presence = _row(connection.execute(
-            "SELECT model_family FROM agent_presence WHERE agent_id = ?",
-            (candidate.get("submitted_by"),),
-        ).fetchone())
-        return (presence or {}).get("model_family")
-
     @staticmethod
     def _candidate_maker_id(connection: Connection, candidate: dict[str, Any]) -> str | None:
         """The agent that wrote the patch: a server-rebased candidate is still
@@ -127,8 +129,7 @@ class RiskPolicyMixin:
         """Maker-checker by identity (wave 8A, R4): the agent that submitted a
         candidate never claims, judges or merges it, whatever role it holds now.
 
-        Independent of ``checker_distinct_from_maker``: that policy compares
-        model families and a project may turn it off; this one never turns off.
+        This restriction never turns off, whatever model family is reported.
         """
         if candidate is None:
             return
@@ -139,41 +140,6 @@ class RiskPolicyMixin:
                 {"reason": "self_review", "candidate_id": candidate.get("candidate_id"),
                  "submitted_by": maker, "role": actor.role.value},
             )
-
-    def _maker_checker_family_check(
-        self, connection: Connection, actor: Actor, project_id: str, ticket_id: str
-    ) -> dict[str, Any]:
-        """Refuse a same-family checker; otherwise say how distinctness was established.
-
-        Returns {"status": "distinct" | "family_unverified" | "disabled", ...}.
-        """
-        policy = self._risk_policy(connection, project_id)
-        if not policy["checker_distinct_from_maker"]:
-            return {"status": "disabled"}
-        candidate = _row(connection.execute(
-            "SELECT * FROM candidates WHERE ticket_id = ? ORDER BY submitted_at DESC LIMIT 1",
-            (ticket_id,),
-        ).fetchone())
-        if candidate is None:
-            return {"status": "family_unverified", "reason": "no_candidate"}
-        checker = (_row(connection.execute(
-            "SELECT model_family FROM agent_presence WHERE agent_id = ?", (actor.agent_id,)
-        ).fetchone()) or {}).get("model_family")
-        maker = self._maker_family(connection, candidate)
-        result = {
-            "candidate_id": candidate["candidate_id"],
-            "maker_model_family": maker,
-            "checker_model_family": checker,
-        }
-        if not checker or not maker or "other" in {checker, maker}:
-            return {"status": "family_unverified", **result}
-        if checker == maker:
-            raise AuthorizationError(
-                "Checker model family must differ from the maker's "
-                "(project policy checker_distinct_from_maker)",
-                {"reason": "checker_same_family_as_maker", **result},
-            )
-        return {"status": "distinct", **result}
 
     # --- policy ---------------------------------------------------------
 
@@ -186,7 +152,7 @@ class RiskPolicyMixin:
             return {
                 "project_id": project_id,
                 "configured": False,
-                "checker_distinct_from_maker": True,
+                "mandatory_high_risk_patterns": list(DEFAULT_HIGH_RISK_PATTERNS),
                 "high_risk_patterns": list(DEFAULT_HIGH_RISK_PATTERNS),
                 "medium_risk_patterns": list(DEFAULT_MEDIUM_RISK_PATTERNS),
                 "medium_max_files": DEFAULT_MEDIUM_MAX_FILES,
@@ -194,7 +160,7 @@ class RiskPolicyMixin:
         return {
             "project_id": project_id,
             "configured": True,
-            "checker_distinct_from_maker": bool(row["checker_distinct_from_maker"]),
+            "mandatory_high_risk_patterns": list(DEFAULT_HIGH_RISK_PATTERNS),
             "high_risk_patterns": json.loads(row["high_risk_patterns"]),
             "medium_risk_patterns": json.loads(row["medium_risk_patterns"]),
             "medium_max_files": int(row["medium_max_files"]),
@@ -211,12 +177,11 @@ class RiskPolicyMixin:
         self,
         actor: Actor,
         project_id: str,
-        checker_distinct_from_maker: bool = True,
         high_risk_patterns: list[str] | None = None,
         medium_risk_patterns: list[str] | None = None,
         medium_max_files: int = DEFAULT_MEDIUM_MAX_FILES,
     ) -> dict[str, Any]:
-        """Set the project's maker/checker and risk-tier policy (Planner or Admin)."""
+        """Set the project's risk classification policy for future candidates."""
         require_role(actor, Role.PLANNER, Role.ADMIN)
         require_project(actor, project_id)
         high = list(DEFAULT_HIGH_RISK_PATTERNS if high_risk_patterns is None else high_risk_patterns)
@@ -238,11 +203,10 @@ class RiskPolicyMixin:
             connection.execute(
                 """
                 INSERT INTO project_risk_policies
-                    (project_id, checker_distinct_from_maker, high_risk_patterns,
+                    (project_id, high_risk_patterns,
                      medium_risk_patterns, medium_max_files, configured_by, configured_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT (project_id) DO UPDATE SET
-                    checker_distinct_from_maker = excluded.checker_distinct_from_maker,
                     high_risk_patterns = excluded.high_risk_patterns,
                     medium_risk_patterns = excluded.medium_risk_patterns,
                     medium_max_files = excluded.medium_max_files,
@@ -250,7 +214,7 @@ class RiskPolicyMixin:
                     configured_at = excluded.configured_at
                 """,
                 (
-                    project_id, 1 if checker_distinct_from_maker else 0,
+                    project_id,
                     json.dumps(high), json.dumps(medium), medium_max_files,
                     actor.agent_id, timestamp,
                 ),
@@ -260,7 +224,6 @@ class RiskPolicyMixin:
                 connection, actor, project_id, "project.risk_policy_configured",
                 "project", project_id, project["version"],
                 {
-                    "checker_distinct_from_maker": policy["checker_distinct_from_maker"],
                     "medium_max_files": medium_max_files,
                 },
             )
@@ -283,12 +246,16 @@ class RiskPolicyMixin:
         policy: dict[str, Any],
         changed_paths: list[str] | None,
         file_scope: list[str],
+        *, enforce_impact: bool = True,
     ) -> dict[str, Any]:
         reasons: list[str] = []
         tier = "low"
+        high_patterns = list(dict.fromkeys([
+            *policy["high_risk_patterns"], *(DEFAULT_HIGH_RISK_PATTERNS if enforce_impact else ()),
+        ]))
         if changed_paths:
             for path in changed_paths:
-                for pattern in policy["high_risk_patterns"]:
+                for pattern in high_patterns:
                     if self._path_matches_scope(path, pattern):
                         reasons.append(f"high:{path} ~ {pattern}")
                         break
@@ -309,7 +276,7 @@ class RiskPolicyMixin:
             basis = "changed_paths"
         else:
             for scope in file_scope or []:
-                for pattern in policy["high_risk_patterns"]:
+                for pattern in high_patterns:
                     if self._scope_hits_pattern(scope, pattern):
                         reasons.append(f"high:scope {scope} ~ {pattern}")
                         break
@@ -334,7 +301,7 @@ class RiskPolicyMixin:
         candidate = None
         if ticket.get("candidate_commit"):
             candidate = _row(connection.execute(
-                "SELECT candidate_id FROM candidates WHERE ticket_id = ? AND commit_sha = ? "
+                "SELECT * FROM candidates WHERE ticket_id = ? AND commit_sha = ? "
                 "ORDER BY submitted_at DESC LIMIT 1",
                 (ticket["ticket_id"], ticket["candidate_commit"]),
             ).fetchone())
@@ -346,13 +313,18 @@ class RiskPolicyMixin:
                     (candidate["candidate_id"],),
                 ).fetchall()
             ]
-        risk = self._classify_risk(policy, changed, ticket.get("file_scope") or [])
+        plan = (candidate or {}).get("qa_review_plan")
+        risk = ({key: plan[key] for key in ("tier", "basis", "reasons")} if plan
+                else self._classify_risk(policy, changed, ticket.get("file_scope") or [],
+                                         enforce_impact=candidate is None))
         requires = ["suite", "scenarios"]
         if risk["tier"] in {"medium", "high"}:
             requires.append(ADVERSARIAL_REVIEW_EVIDENCE)
         if risk["tier"] == "high":
             requires.append("policy.approve_high_risk")
         risk["requires"] = requires
+        if plan:
+            risk["review_plan"] = plan
         if candidate is not None:
             risk["candidate_id"] = candidate["candidate_id"]
             if risk["tier"] == "high":
@@ -360,6 +332,19 @@ class RiskPolicyMixin:
                     connection, candidate["candidate_id"]
                 ) is not None
         return risk
+
+    def _freeze_review_plan(self, connection, candidate_id, project_id, ticket, changed_paths):
+        """Write once at submission; policy edits never change a frozen budget."""
+        risk = self._classify_risk(self._risk_policy(connection, project_id), changed_paths,
+                                   ticket.get("file_scope") or [])
+        high = risk["tier"] == "high"
+        plan = {"schema_version": "risk-directed-v1", **risk,
+                "required_qa_reviews": 2 if high else 1,
+                "advisory_reviewers_per_owner": 3 if high else 0,
+                "suite": "focused" if risk["tier"] == "low" else "shared_full_suite"}
+        connection.execute("UPDATE candidates SET qa_review_plan=?, required_qa_reviews=? "
+                           "WHERE candidate_id=? AND qa_review_plan IS NULL",
+                           (json.dumps(plan), plan["required_qa_reviews"], candidate_id))
 
     @staticmethod
     def _high_risk_approval(connection: Connection, candidate_id: str) -> dict[str, Any] | None:

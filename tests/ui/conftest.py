@@ -35,6 +35,10 @@ def qa_app(tmp_path_factory):
     service.create_feature(planner, "demo", "ui-backlog-feature", "UI backlog", "Filter fixture")
     service.create_ticket(planner, "ui-backlog-feature", "UI-BACKLOG", "Đơn hàng — pending review", "Visible backlog",
                           Role.DEVELOPER, ["Visible to operators"], [], ["ui/**"], ready=False)
+    service.create_ticket(planner, "ui-backlog-feature", 'UI-"QUOTED', "Quoted ticket", "Quoted detail",
+                          Role.DEVELOPER, ["Visible to operators"], [], ["quoted/**"], ready=False)
+    service.append_planner_context(planner, ticket_id="UI-BACKLOG", entry_type="known_failure",
+                                   content="A retained context checkpoint", source_ref="evidence://ui/checkpoint")
     dirty = bool(subprocess.check_output(["git", "-C", str(source), "status", "--porcelain"], text=True).strip())
     identity = {"candidate_commit": sha, "source_tree_dirty": dirty,
                 "source_root": str(source), "fixture_database": str(fixture_dir / "fixture.db")}

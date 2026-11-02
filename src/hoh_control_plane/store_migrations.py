@@ -52,7 +52,9 @@ class SchemaVersionError(SchemaMigrationError):
 #        column is additive and nullable, so a wave 7 build reads it safely):
 #        qa_test_runs.termination_reason and provenance_status (R1);
 #        project_ and candidate_test_profiles.provenance_modules (R8).
-SCHEMA_VERSION = 3
+#   4 -- candidate-bound independent QA reviews, shipped in installed 0.3.35.
+#   5 -- frozen risk-directed review plans; existing candidate counts stay intact.
+SCHEMA_VERSION = 5
 
 
 def read_schema_version(connection: Any, columns_of: Any) -> int:
@@ -235,6 +237,10 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # Wave 8A, R8: the import-attestation list, frozen outside the candidate.
     ("project_test_profiles", "provenance_modules", "TEXT"),
     ("candidate_test_profiles", "provenance_modules", "TEXT"),
+    ("candidates", "required_qa_reviews", "INTEGER NOT NULL DEFAULT 1 CHECK (required_qa_reviews IN (1, 2))"),
+    ("candidates", "qa_review_plan", "TEXT"),
+    ("evidence", "review_id", "TEXT REFERENCES qa_reviews(review_id)"),
+    ("qa_findings", "review_id", "TEXT REFERENCES qa_reviews(review_id)"),
 )
 
 
@@ -249,6 +255,8 @@ MIGRATED_INDEXES: tuple[str, ...] = (
     "ON audit_events (event_type, aggregate_id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS context_snapshots_content "
     "ON context_snapshots (content_digest)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS qa_test_jobs_one_active_candidate "
+    "ON qa_test_jobs (candidate_id) WHERE status IN ('QUEUED', 'RUNNING')",
 )
 
 
@@ -271,6 +279,25 @@ def apply_additive_columns(connection: Any, columns_of: Any) -> None:
     for statement in MIGRATED_INDEXES:
         connection.execute(statement)
     backfill_experience_scopes(connection)
+    migrate_dual_qa(connection)
+    if "checker_distinct_from_maker" in columns_of("project_risk_policies"):
+        connection.execute("ALTER TABLE project_risk_policies DROP COLUMN checker_distinct_from_maker")
+
+
+def migrate_dual_qa(connection: Any) -> None:
+    """Preserve historical counts and bind live pre-upgrade QA to its candidate."""
+    connection.execute("DROP INDEX IF EXISTS leases_one_per_ticket")
+    connection.execute("""INSERT INTO qa_reviews
+        (review_id, candidate_id, ticket_id, slot, reviewer_id, lease_id, status, started_at)
+        SELECT 'legacy_' || l.lease_id, c.candidate_id, l.ticket_id, 1, l.agent_id,
+               l.lease_id, 'IN_PROGRESS', l.acquired_at
+        FROM leases l JOIN tickets t ON t.ticket_id = l.ticket_id
+        JOIN candidates c ON c.ticket_id = t.ticket_id AND c.commit_sha = t.candidate_commit
+        WHERE l.role = 'qa' AND t.status = 'QA_IN_PROGRESS' AND c.required_qa_reviews = 1
+          AND NOT EXISTS (SELECT 1 FROM candidates newer WHERE newer.ticket_id = c.ticket_id
+                          AND newer.submitted_at > c.submitted_at)
+          AND NOT EXISTS (SELECT 1 FROM qa_reviews r WHERE r.lease_id = l.lease_id)
+        ON CONFLICT DO NOTHING""")
 
 
 def backfill_experience_scopes(connection: Any) -> int:

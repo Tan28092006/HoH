@@ -3,6 +3,35 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
+def test_quoted_ticket_id_round_trips_through_selection(qa_app, browser_case):
+    import re
+    from playwright.sync_api import expect
+    page, errors, _ = browser_case
+    page.goto(qa_app["url"] + "/?project=demo&status=BACKLOG")
+    quoted = page.get_by_role("button", name=re.compile('UI-"QUOTED'))
+    expect(quoted).to_have_attribute("data-ticket-id", 'UI-"QUOTED')
+    quoted.click()
+    expect(page.locator("#detail")).to_contain_text("Quoted detail")
+    page.locator('[data-ticket-id="UI-BACKLOG"]').click()
+    expect(page.locator("#detail")).to_contain_text("Visible backlog")
+    quoted.click()
+    expect(page.locator("#detail")).to_contain_text("Quoted detail")
+    assert not errors
+
+
+def test_context_reference_uses_projected_packet_fields(qa_app, browser_case):
+    from playwright.sync_api import expect
+    page, errors, _ = browser_case
+    page.goto(qa_app["url"] + "/?project=demo&status=BACKLOG")
+    page.locator('[data-ticket-id="UI-BACKLOG"]').click()
+    expect(page.locator("#detail")).to_contain_text("known_failure")
+    reference = page.locator("#detail li").filter(has_text="known_failure")
+    expect(reference).to_contain_text("Planner")
+    expect(reference).not_to_contain_text("Invalid Date")
+    expect(reference).not_to_contain_text("Unassigned")
+    assert not errors
+
+
 @pytest.mark.parametrize("viewport", [{"width": 1440, "height": 900}, {"width": 768, "height": 900}, {"width": 375, "height": 812}])
 def test_operator_can_follow_ticket_and_filter_state(qa_app, browser_case, viewport):
     from playwright.sync_api import expect

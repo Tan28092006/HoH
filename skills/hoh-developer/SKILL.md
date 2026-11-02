@@ -21,7 +21,9 @@ acceptance, QA verdicts or protected-branch integration.
 3. Verify path, branch, base and scope. Preserve dirty files from an owned prior
    attempt; never reset another agent's work.
 4. Read the validation contract, implement the bounded outcome, and create the
-   public observations QA needs. Run focused checks appropriate to the change.
+    public observations QA needs. Run focused checks appropriate to the change.
+    Load only the brief's risk-directed practice skills. Submission freezes the
+    authoritative review plan from actual changed paths; a new SHA needs fresh QA.
 5. Immediately before submit, refresh ticket context and pass its
    `context_snapshot_id` to `dev.submit_candidate` (refused without one, or if
    the packet moved since; pass `known_snapshot_id` to skip an unchanged packet). Confirm lease, current

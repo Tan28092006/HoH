@@ -6,7 +6,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from hoh_control_plane.domain import Role
+from hoh_control_plane.domain import Actor, Role
 
 REGRESSION_COMMAND = ["python", "-c", "pass"]
 
@@ -105,20 +105,40 @@ def finding(criterion: str, status: str = "verified", evidence_type: str = "test
 
 
 def verdict(service, actors, ticket_id: str, outcome: str, findings: list[dict],
-            qa: str = "qa") -> dict:
-    """Claim QA on the current candidate and submit one verdict."""
-    actor = actors[qa]
-    claim = service.claim_qa(actor, ticket_id, ticket(service, ticket_id)["version"], 900)
+             qa: str = "qa") -> dict:
+    """Complete the recorded owner count; policy-specific tests drive owners directly."""
     with service.store.connection() as connection:
-        candidate_id = connection.execute(
-            "SELECT candidate_id FROM candidates WHERE ticket_id = ? "
+        candidate = dict(connection.execute(
+            "SELECT * FROM candidates WHERE ticket_id = ? "
             "ORDER BY submitted_at DESC LIMIT 1", (ticket_id,),
-        ).fetchone()["candidate_id"]
-    return service.submit_qa_verdict(
-        actor, ticket_id, claim["lease"]["lease_id"], candidate_id,
-        claim["ticket"]["version"], outcome, findings,
-        context_snapshot_id=claim["current_context_snapshot_id"],
-    )
+        ).fetchone())
+    actor = actors[qa]
+    owners = [actor] + [Actor(actor.agent_id + "-peer", Role.QA, actor.project_ids)] * (candidate["required_qa_reviews"] - 1)
+    for owner in owners:
+        claim = service.claim_qa(owner, ticket_id, ticket(service, ticket_id)["version"], 900)
+        complete_advisory_review(service, owner, ticket_id, claim["lease"]["lease_id"], candidate)
+        packet = service.get_ticket_context(owner, ticket_id)
+        result = service.submit_qa_verdict(owner, ticket_id, claim["lease"]["lease_id"], candidate["candidate_id"],
+            packet["ticket"]["version"], outcome, findings, context_snapshot_id=packet["context_snapshot_id"])
+    return result
+
+
+def complete_advisory_review(service, actor, ticket_id, lease_id, candidate):
+    plan = candidate.get("qa_review_plan")
+    if isinstance(plan, str):
+        plan = json.loads(plan)
+    if not (plan or {}).get("advisory_reviewers_per_owner"):
+        return
+    with service.store.connection() as connection:
+        paths = [row[0] for row in connection.execute(
+            "SELECT path FROM candidate_changed_paths WHERE candidate_id=? ORDER BY path",
+            (candidate["candidate_id"],)).fetchall()]
+    assert paths, "High-risk fixtures must supply real changed paths for pinned advisory scopes"
+    scopes = [dict(task_key=key, paths=paths[:8], question=f"Fixture observation {key}") for key in "ABC"]
+    batch = service.prepare_review_batch(actor, ticket_id, lease_id, scopes)
+    for key in "ABC":
+        batch = service.checkpoint_review_task(actor, ticket_id, lease_id, batch["batch_id"], batch["revision"],
+            key, f"fixture-{actor.agent_id}-{key}", "completed", f"evidence://fixture/{actor.agent_id}/{key}")
 
 
 def pass_all(service, actors, ticket_id: str, extra: list[dict] | None = None,

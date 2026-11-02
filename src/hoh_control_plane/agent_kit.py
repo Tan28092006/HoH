@@ -69,6 +69,11 @@ host; the client needs no HoH Python package or database access for HTTP MCP.
    Code Agent/Task tool, Codex `spawn_agent`) and keep only its structured
    result. Without subagents, start a new session per ticket. Report each
    ticket with `work.report_usage`; on `advice: start_new_session` start anew.
+   Read the frozen candidate review plan before loading practice skills. Low and
+   medium use one independent owner without mandatory leaf fanout; medium shares
+   one exact-candidate full-suite result. High uses two owners and exactly three
+   read-only, non-recursive advisory leaves per owner. Resume recorded tasks and
+   wait for all reports. Never reuse approval from a different SHA.
 
 The authenticated role must match `{role}`. Each concurrently running worker
 needs a distinct identity. Reuse an identity to resume only after its previous

@@ -31,6 +31,7 @@ from hoh_control_plane.service._common import (
     REWORK_BUDGET_EXHAUSTED,
     Path,
     Role,
+    ReleasePolicyError,
     TestExecution,
     TicketStatus,
     ValidationError,
@@ -38,6 +39,7 @@ from hoh_control_plane.service._common import (
     _iso,
     _now,
     _row,
+    _audit_event_has_field,
     _transition_ticket,
     hashlib,
     json,
@@ -50,6 +52,77 @@ from hoh_control_plane.service._common import (
 
 class QaMixin:
     """QA test execution, evidence and criterion-level verdicts."""
+
+    def _current_qa_candidate(self, connection, ticket):
+        candidates = connection.execute(
+            "SELECT * FROM candidates WHERE ticket_id = ? ORDER BY submitted_at DESC LIMIT 2",
+            (ticket["ticket_id"],),
+        ).fetchall()
+        if (not candidates or candidates[0]["commit_sha"] != ticket.get("candidate_commit")
+                or (len(candidates) == 2 and candidates[0]["submitted_at"] == candidates[1]["submitted_at"])):
+            raise ConflictError("No unambiguous current candidate matches the ticket artifact",
+                                {"reason": "candidate_identity_mismatch"})
+        return _row(candidates[0])
+
+    @staticmethod
+    def _qa_review_slot(connection, candidate, reviewer_id):
+        rows = connection.execute(
+            "SELECT slot, reviewer_id FROM qa_reviews WHERE candidate_id = ? "
+            "AND status IN ('IN_PROGRESS', 'PASSED', 'FAILED')", (candidate["candidate_id"],),
+        ).fetchall()
+        if any(row["reviewer_id"] == reviewer_id for row in rows):
+            raise ConflictError("This actor already owns or completed a review of this candidate",
+                                {"reason": "qa_reviewer_already_assigned"})
+        occupied = {row["slot"] for row in rows}
+        for slot in range(1, candidate["required_qa_reviews"] + 1):
+            if slot not in occupied:
+                return slot
+        raise ConflictError("Candidate already has all required reviewers", {"reason": "qa_reviews_full"})
+
+    @staticmethod
+    def _candidate_qa_reviews(connection, candidate_id):
+        return [_row(row) for row in connection.execute(
+            "SELECT * FROM qa_reviews WHERE candidate_id = ? ORDER BY started_at, review_id",
+            (candidate_id,),
+        ).fetchall()]
+
+    def _qa_review_available(self, connection, ticket, reviewer_id=None):
+        try:
+            candidate = self._current_qa_candidate(connection, ticket)
+            if reviewer_id is not None:
+                self._refuse_self_review(connection, Actor(reviewer_id, Role.QA, frozenset()), candidate, "claim")
+            self._qa_review_slot(connection, candidate, reviewer_id)
+        except (AuthorizationError, ConflictError):
+            return False
+        return True
+
+    @staticmethod
+    def _replace_qa_reviews(connection, candidate_id):
+        connection.execute("UPDATE qa_reviews SET status = 'REPLACED', completed_at = COALESCE(completed_at, ?) "
+                           "WHERE candidate_id = ? AND status != 'REPLACED'", (_iso(), candidate_id))
+
+    def _retire_qa_reviewer(self, connection, actor, ticket_id):
+        """Release only this actor's interrupted attempt, never its peer's lease."""
+        for lease in connection.execute("SELECT * FROM leases WHERE ticket_id=? AND agent_id=? AND role='qa'",
+                                        (ticket_id, actor.agent_id)).fetchall():
+            self._retire_expired_jobs(connection, dict(lease))
+            connection.execute("UPDATE qa_reviews SET status='EXPIRED', completed_at=? "
+                               "WHERE lease_id=? AND status='IN_PROGRESS'", (_iso(), lease["lease_id"]))
+            connection.execute("DELETE FROM leases WHERE lease_id=?", (lease["lease_id"],))
+        return connection.execute("SELECT 1 FROM leases WHERE ticket_id=? AND role='qa' AND expires_at>?",
+                                   (ticket_id, _iso())).fetchone() is not None
+
+    def _require_qa_reviews_passed(self, connection, candidate):
+        reviews = [r for r in self._candidate_qa_reviews(connection, candidate["candidate_id"])
+                   if r["status"] in {"IN_PROGRESS", "PASSED", "FAILED"}]
+        # Pre-plan single-review candidates may have only their original verdict.
+        if not candidate.get("qa_review_plan") and candidate["required_qa_reviews"] == 1 and not reviews:
+            return
+        required = candidate["required_qa_reviews"]
+        if (len(reviews) != required or any(r["status"] != "PASSED" for r in reviews)
+                or len({r["reviewer_id"] for r in reviews}) != required):
+            raise ReleasePolicyError("Candidate needs all distinct completed QA passes",
+                                     {"reason": "qa_reviews_incomplete", "candidate_id": candidate["candidate_id"]})
 
     @staticmethod
     def _canonical_storage_ref(value: str) -> str:
@@ -326,7 +399,8 @@ class QaMixin:
                 (candidate["candidate_id"],),
             ).fetchone()
             if active_job is not None:
-                raise ConflictError("Candidate already has an active project test run")
+                return {"ticket": ticket, "test_run": self._qa_test_job(connection, active_job["test_run_id"]),
+                        "reused": True}
             test_profile = _row(
                 connection.execute(
                     "SELECT * FROM candidate_test_profiles WHERE candidate_id = ?",
@@ -350,24 +424,13 @@ class QaMixin:
             if not isinstance(timeout_seconds, int) or not 5 <= timeout_seconds <= 1800:
                 raise ValidationError("Candidate test command timeout is invalid")
             if not rerun:
-                passing = connection.execute(
-                    """
-                    SELECT j.test_run_id FROM qa_test_jobs j
-                    JOIN qa_test_runs r ON r.test_run_id = j.test_run_id
-                    WHERE j.candidate_id = ? AND j.status = 'COMPLETED'
-                      AND j.command_digest = ? AND j.timeout_seconds = ?
-                      AND r.exit_code = 0 AND r.timed_out = 0
-                      AND r.termination_reason = 'passed'
-                    ORDER BY j.created_at DESC LIMIT 1
-                    """,
-                    (candidate["candidate_id"],
-                     hashlib.sha256("\0".join(command).encode()).hexdigest(),
-                     timeout_seconds),
-                ).fetchone()
-                if passing is not None:
+                state = self._candidate_suite_state(connection, candidate["candidate_id"], command, timeout_seconds)
+                passing = state["qa_job"]
+                if (self._qa_job_passed(passing) and state["run"] is not None
+                        and self._run_passed(state["run"])):
                     return {
                         "ticket": self._ticket(connection, ticket_id),
-                        "test_run": self._qa_test_job(connection, passing["test_run_id"]),
+                        "test_run": passing,
                         "reused": True,
                     }
             candidate_commit = candidate["commit_sha"]
@@ -422,35 +485,22 @@ class QaMixin:
         test_run_id: str,
         lease_seconds: int = 900,
     ) -> dict[str, Any]:
-        """Poll a persisted QA test job and renew the caller's exclusive QA lease."""
+        """Poll the shared candidate job and renew only this reviewer's own lease."""
         require_role(actor, Role.QA)
         if not 30 <= lease_seconds <= 3600:
             raise ValidationError("Lease duration must be between 30 and 3600 seconds")
         with self.store.connection(immediate=True) as connection:
-            ticket, _project_id = self._authorized_ticket(connection, actor, ticket_id)
             job = self._qa_test_job(connection, test_run_id)
-            if (job["ticket_id"] != ticket_id or job["lease_id"] != lease_id
-                    or job["requested_by"] != actor.agent_id):
-                raise AuthorizationError("Project test run does not belong to this QA lease")
-            if job["status"] in {"COMPLETED", "FAILED", "STALE"} and ticket["status"] != TicketStatus.QA_IN_PROGRESS.value:
-                return {"ticket": ticket, "lease": None, "test_run": job}
-            if ticket["status"] != TicketStatus.QA_IN_PROGRESS.value:
-                raise ConflictError("Ticket is not in QA")
-            self._require_active_lease(connection, actor, ticket_id, lease_id)
-            job = self._qa_test_job(connection, test_run_id)
-            if job["ticket_id"] != ticket_id or job["lease_id"] != lease_id:
-                raise AuthorizationError("Project test run does not belong to this QA lease")
-            timestamp = _now()
-            expires_at = _iso(timestamp + timedelta(seconds=lease_seconds))
-            connection.execute(
-                "UPDATE leases SET heartbeat_at = ?, expires_at = ? WHERE lease_id = ?",
-                (_iso(timestamp), expires_at, lease_id),
-            )
-            return {
-                "ticket": self._ticket(connection, ticket_id),
-                "lease": self._lease(connection, lease_id),
-                "test_run": self._qa_test_job(connection, test_run_id),
-            }
+            if job["ticket_id"] != ticket_id:
+                raise AuthorizationError("Project test run does not belong to this ticket")
+            authority = self._qa_test_authority(connection, job, actor=actor, lease_id=lease_id)
+            lease = authority["lease"]
+            if lease is not None:
+                timestamp = _now()
+                connection.execute("UPDATE leases SET heartbeat_at=?, expires_at=? WHERE lease_id=?",
+                    (_iso(timestamp), _iso(timestamp + timedelta(seconds=lease_seconds)), lease["lease_id"]))
+            return {"ticket": authority["ticket"], "lease": self._lease(connection, lease["lease_id"]) if lease else None,
+                    "test_run": job}
 
     def execute_queued_project_test(self, test_run_id: str) -> dict[str, Any]:
         """Worker-only execution for a previously authorized, immutable QA test job."""
@@ -459,27 +509,13 @@ class QaMixin:
             job = self._qa_test_job(connection, test_run_id)
             if job["status"] != "QUEUED":
                 return job
-            actor = Actor(job["requested_by"], Role.QA, frozenset({job["project_id"]}))
-            ticket = self._ticket(connection, job["ticket_id"])
-            if ticket["status"] != TicketStatus.QA_IN_PROGRESS.value:
-                preflight_error = "Ticket is no longer in QA before the test worker started."
-            else:
-                try:
-                    self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
-                    candidate = self._one(
-                        connection,
-                        "SELECT * FROM candidates WHERE candidate_id = ? AND ticket_id = ?",
-                        (job["candidate_id"], job["ticket_id"]),
-                    )
-                    if candidate["commit_sha"] != job["candidate_commit"]:
-                        preflight_error = "Candidate changed before the test worker started."
-                except DomainError as error:
-                    preflight_error = str(error)
-                if preflight_error is None:
-                    connection.execute(
-                        "UPDATE qa_test_jobs SET status = 'RUNNING', started_at = ? WHERE test_run_id = ?",
-                        (_iso(), test_run_id),
-                    )
+            try:
+                self._qa_test_authority(connection, job)
+            except DomainError as error:
+                preflight_error = str(error)
+            if preflight_error is None:
+                connection.execute("UPDATE qa_test_jobs SET status='RUNNING', started_at=? WHERE test_run_id=?",
+                                   (_iso(), test_run_id))
 
         if preflight_error is not None:
             return self.fail_queued_project_test(test_run_id, preflight_error)
@@ -568,19 +604,75 @@ class QaMixin:
     def _require_project_test_current(
         self, connection: Connection, job: dict[str, Any]
     ) -> tuple[Actor, dict[str, Any]]:
-        actor = Actor(job["requested_by"], Role.QA, frozenset({job["project_id"]}))
+        authority = self._qa_test_authority(connection, job)
+        return authority["actor"], authority["ticket"]
+
+    def _qa_test_authority(self, connection, job, *, actor=None, lease_id=None):
+        active_job = job["status"] in {"QUEUED", "RUNNING"}
         ticket = self._ticket(connection, job["ticket_id"])
-        if ticket["status"] != TicketStatus.QA_IN_PROGRESS.value:
-            raise ConflictError("Ticket changed while project tests were running")
-        self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
-        candidate = self._one(
-            connection,
-            "SELECT * FROM candidates WHERE candidate_id = ? AND ticket_id = ?",
-            (job["candidate_id"], job["ticket_id"]),
-        )
-        if candidate["commit_sha"] != job["candidate_commit"]:
-            raise ConflictError("Candidate changed while project tests were running")
-        return actor, ticket
+        if actor is not None:
+            require_role(actor, Role.QA)
+            ticket, project_id = self._authorized_ticket(connection, actor, job["ticket_id"])
+            if project_id != job["project_id"]:
+                raise AuthorizationError("Project test run belongs to another project")
+        candidate = None
+        if active_job:
+            if connection.execute("SELECT 1 FROM ticket_retirement_requests WHERE ticket_id=? AND status='PENDING'",
+                                   (job["ticket_id"],)).fetchone():
+                raise ConflictError("Candidate has a pending retirement")
+            candidate = self._current_qa_candidate(connection, ticket)
+            if candidate["candidate_id"] != job["candidate_id"] or candidate["commit_sha"] != job["candidate_commit"]:
+                raise ConflictError("Candidate changed while project tests were running")
+            if ticket["status"] == TicketStatus.QA_IN_PROGRESS.value:
+                active = connection.execute("""SELECT 1 FROM qa_reviews r JOIN leases l ON l.lease_id=r.lease_id
+                    WHERE r.candidate_id=? AND r.status='IN_PROGRESS' AND l.role='qa'
+                      AND l.ticket_id=r.ticket_id AND l.agent_id=r.reviewer_id AND l.expires_at>?""",
+                    (candidate["candidate_id"], _iso())).fetchone()
+                if active is None:
+                    raise ConflictError("Candidate no longer has an active QA reviewer")
+            elif ticket["status"] in {TicketStatus.VERIFIED.value, TicketStatus.MERGE_READY.value}:
+                self._require_qa_reviews_passed(connection, candidate)
+                if not _audit_event_has_field(connection, job["ticket_id"], "ticket.verified", "candidate_id", job["candidate_id"]):
+                    raise ConflictError("Candidate has no completed QA verification")
+            else:
+                raise ConflictError("Candidate is no longer awaiting QA suite completion")
+        elif actor is None:
+            raise ConflictError("Project test job is no longer active")
+        lease = None
+        if actor is not None:
+            review = _row(connection.execute(
+                "SELECT * FROM qa_reviews WHERE candidate_id=? AND reviewer_id=? AND lease_id=? "
+                "ORDER BY started_at DESC, review_id DESC LIMIT 1", (job["candidate_id"], actor.agent_id, lease_id),
+            ).fetchone())
+            if review is None:
+                raise AuthorizationError("Project test run does not belong to this candidate review")
+            if active_job and review["status"] not in {"IN_PROGRESS", "PASSED", "FAILED"}:
+                raise ConflictError("This candidate review has been retired")
+            if review["status"] == "IN_PROGRESS" and ticket["status"] == TicketStatus.QA_IN_PROGRESS.value:
+                try:
+                    lease = self._require_active_lease(connection, actor, job["ticket_id"], review["lease_id"])
+                except DomainError:
+                    if active_job:
+                        raise
+        return {"ticket": ticket, "candidate": candidate, "lease": lease,
+                "actor": Actor(job["requested_by"], Role.QA, frozenset({job["project_id"]}))}
+
+    def _candidate_suite_state(self, connection, candidate_id, command, timeout_seconds):
+        """The latest attempt fences older green evidence, even while pending."""
+        digest = hashlib.sha256("\0".join(command).encode()).hexdigest()
+        job = connection.execute("SELECT test_run_id FROM qa_test_jobs WHERE candidate_id=? "
+            "AND command_digest=? AND timeout_seconds=? ORDER BY created_at DESC, test_run_id DESC LIMIT 1",
+            (candidate_id, digest, timeout_seconds)).fetchone()
+        run = _row(connection.execute("SELECT * FROM qa_test_runs WHERE candidate_id=? AND command_digest=? "
+            "ORDER BY created_at DESC, test_run_id DESC LIMIT 1", (candidate_id, digest)).fetchone())
+        return {"qa_job": self._qa_test_job(connection, job["test_run_id"]) if job else None, "run": run}
+
+    @staticmethod
+    def _qa_job_passed(job):
+        run = job["test_run"] if job is not None else None
+        return (job is not None and job["status"] == "COMPLETED" and run is not None
+                and run["candidate_id"] == job["candidate_id"] and run["command_digest"] == job["command_digest"]
+                and run["termination_reason"] == "passed" and run["exit_code"] == 0 and not run["timed_out"])
 
     def _complete_queued_project_test(
         self, test_run_id: str, execution: TestExecution
@@ -710,6 +802,22 @@ class QaMixin:
         grouped = self._group_qa_machine_failure(
             connection, actor, job["project_id"], ticket, "infrastructure", evidence_refs,
         )
+        has_peer = self._retire_qa_reviewer(connection, actor, ticket["ticket_id"])
+        if has_peer and ticket["status"] == TicketStatus.QA_IN_PROGRESS.value:
+            version = _transition_ticket(connection, ticket["ticket_id"], actor=actor,
+                expected_version=ticket["version"], from_statuses=(TicketStatus.QA_IN_PROGRESS,),
+                changes={"status": TicketStatus.QA_IN_PROGRESS, "updated_at": _iso()})
+            updated = self._ticket(connection, ticket["ticket_id"])
+            self._event(connection, actor, job["project_id"], "qa.reviewer_infrastructure_failed", "ticket",
+                        ticket["ticket_id"], version, {"test_run_id": job["test_run_id"], "reason": reason})
+            if grouped is None or grouped["planner_job"] is None:
+                self._open_planner_job(connection, actor, job["project_id"], updated,
+                    job_type=PlannerJobType.QA_FAILURE,
+                    summary="QA infrastructure needs remediation; the independent peer review continues.",
+                    evidence_refs=evidence_refs, candidate_id=job["candidate_id"],
+                    artifact_commit=job["candidate_commit"], severity=InterventionSeverity.NORMAL)
+            self._queue_ticket(connection, actor, job["project_id"], updated)
+            return
         if grouped is not None and grouped["planner_job"] is not None:
             self._return_ticket_to_qa(
                 connection, actor, job["project_id"], ticket, grouped["planner_job"]
@@ -839,7 +947,7 @@ class QaMixin:
             self.require_fresh_context(connection, ticket_id, context_snapshot_id)
             if ticket["status"] != TicketStatus.QA_IN_PROGRESS.value:
                 raise ConflictError("Ticket is not in QA")
-            self._require_active_lease(connection, actor, ticket_id, lease_id)
+            review_lease = self._require_active_lease(connection, actor, ticket_id, lease_id)
             candidate = self._one(
                 connection,
                 "SELECT * FROM candidates WHERE candidate_id = ? AND ticket_id = ?",
@@ -847,12 +955,11 @@ class QaMixin:
             )
             if candidate["commit_sha"] != ticket["candidate_commit"]:
                 raise ConflictError("Candidate does not match the frozen ticket artifact")
+            if review_lease["candidate_id"] != candidate_id:
+                raise ConflictError("QA lease belongs to another candidate review")
+            self._require_review_batch_complete(connection, actor, ticket_id, review_lease)
             self._refuse_self_review(connection, actor, candidate, "judge")
-            # Re-checked at the write: a re-registration under another family
-            # after the claim must not let a same-family verdict through.
-            family_check = self._maker_checker_family_check(
-                connection, actor, project_id, ticket_id
-            )
+            family_check = {"status": "disabled"}  # Historical result field; never authorization.
             if verdict == "passed":
                 # A passed verdict is a claim that nothing observed failed. A
                 # failed or inconclusive finding next to it would park the ticket
@@ -952,8 +1059,8 @@ class QaMixin:
                         INSERT INTO evidence
                             (evidence_id, candidate_id, criterion, evidence_type,
                              observation, storage_ref, scenario_ref, environment_digest,
-                             storage_checksum, checksum_source, created_by, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             storage_checksum, checksum_source, created_by, created_at, review_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             evidence_id,
@@ -968,6 +1075,7 @@ class QaMixin:
                             checksum_source,
                             actor.agent_id,
                             timestamp,
+                            review_lease["review_id"],
                         ),
                     )
                 finding_id = _id(connection, "finding")
@@ -975,8 +1083,8 @@ class QaMixin:
                     """
                     INSERT INTO qa_findings
                         (finding_id, candidate_id, criterion, status, severity,
-                         observation, evidence_refs, created_by, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          observation, evidence_refs, created_by, created_at, review_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         finding_id,
@@ -988,6 +1096,7 @@ class QaMixin:
                         json.dumps(evidence_ids),
                         actor.agent_id,
                         timestamp,
+                        review_lease["review_id"],
                     ),
                 )
                 evidence_records.append({
@@ -1001,214 +1110,136 @@ class QaMixin:
                         else f"criterion:{criterion}"
                     ),
                 })
-            rejections: int | None = None
-            budget_exhausted = False
-            plan_stale = False
             if verdict == "passed":
                 missing = set(ticket["acceptance_criteria"]) - verified_criteria
-                if missing:
-                    raise ValidationError(
-                        "Passed verdict requires verified evidence for every criterion",
-                        {"missing_criteria": sorted(missing)},
-                    )
                 if intent_check_required and INTENT_CHECK_CRITERION not in verified_criteria:
                     raise ValidationError(
                         "planning_base_stale: a passed verdict requires a verified intent_check "
                         "finding from a fresh-context reviewer against the new main",
                         {"missing_criteria": [INTENT_CHECK_CRITERION],
-                         "planning_base_stale": ticket.get("planning_base_stale")},
-                    )
-                next_status = TicketStatus.VERIFIED
-            else:
-                # A stale intent is a planning question, not the maker's miss:
-                # block for Planner without spending the rework budget.
-                plan_stale = intent_check_required and any(
-                    str(f.get("criterion")) == INTENT_CHECK_CRITERION
-                    and f.get("status") != "verified" for f in findings
-                ) and all(
-                    f.get("status") == "verified" for f in findings
-                    if str(f.get("criterion")) != INTENT_CHECK_CRITERION
-                )
-                evidence_gap = not plan_stale and any(f.get("status") == "insufficient_evidence" for f in findings) and all(
-                    f.get("status") in {"verified", "insufficient_evidence"} for f in findings)
-                # Only a rejection of the source counts against the budget; an
-                # evidence gap is an infrastructure question, not a maker's miss.
-                rejections = (
-                    None if evidence_gap or plan_stale
-                    else self._qa_rejections_since_reset(connection, ticket_id) + 1
-                )
-                budget_exhausted = rejections is not None and rejections >= MAX_QA_REJECTIONS
-                next_status = (
-                    TicketStatus.BLOCKED if evidence_gap or plan_stale or budget_exhausted
-                    else TicketStatus.REWORK
-                )
-                known_failure_entry_id = _id(connection, "ctx")
-                connection.execute(
-                    """
-                    INSERT INTO context_entries
-                        (entry_id, project_id, feature_id, ticket_id, entry_type, content,
-                         source_ref, artifact_commit, actor_id, actor_role, created_at)
-                    VALUES (?, ?, ?, ?, 'known_failure', ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        known_failure_entry_id,
-                        project_id,
-                        ticket["feature_id"],
-                        ticket_id,
-                        ("intent_check found the ticket's intent stale against the new main; "
-                         "Planner decides whether to revise, re-scope or retire it. No source rework is requested."
-                         if plan_stale else
-                         "QA evidence is insufficient; infrastructure owner must record readiness before retry. No source rework is requested."
-                         if evidence_gap else
-                         f"QA rejected candidate {MAX_QA_REJECTIONS} times; rework budget exhausted. "
-                         "Planner decides whether to split the ticket, revise its contract or cancel it."
-                         if budget_exhausted else "QA rejected candidate; inspect linked findings and evidence"),
-                        f"candidate:{candidate_id}",
-                        candidate["commit_sha"],
-                        actor.agent_id,
-                        actor.role.value,
-                        timestamp,
-                    ),
-                )
-            changes: dict[str, Any] = {"status": next_status, "updated_at": timestamp}
-            if verdict == "passed" and intent_check_required:
-                changes["planning_base_stale"] = None
-            if next_status == TicketStatus.BLOCKED:
-                changes["blocked_reason"] = (
-                    REWORK_BUDGET_EXHAUSTED if budget_exhausted
-                    else "plan_stale" if plan_stale
-                    else "qa.infrastructure/insufficient_evidence"
-                )
-            next_version = _transition_ticket(
-                connection, ticket_id, actor=actor, expected_version=ticket["version"],
-                from_statuses=(TicketStatus.QA_IN_PROGRESS,), changes=changes,
-            )
-            connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease_id,))
-            if next_status == TicketStatus.BLOCKED:
-                self._close_ticket_dispatch(connection, ticket_id, timestamp)
-            event_payload: dict[str, Any] = {
-                "candidate_id": candidate_id, "verdict": verdict,
-                "family_check": family_check["status"],
-            }
-            if rejections is not None:
-                event_payload.update(qa_rejections=rejections, max_qa_rejections=MAX_QA_REJECTIONS)
-            self._event(
-                connection,
-                actor,
-                project_id,
-                ("ticket.verified" if verdict == "passed" else
-                 "ticket.rework_budget_exhausted" if budget_exhausted else
-                 "ticket.plan_stale" if plan_stale else
-                 "qa.infrastructure_blocked" if next_status == TicketStatus.BLOCKED else "ticket.rework_requested"),
-                "ticket",
-                ticket_id,
-                next_version,
-                event_payload,
-            )
-            verdict_ticket = self._ticket(connection, ticket_id)
-            reconciliation_id = None
-            if verdict == "failed":
-                # A rejection leaves main where it was, so no other ticket's plan
-                # can be wrong because of it: freeze this ticket and the work
-                # built on it, and let every other ticket keep flowing.
-                reconciliation_id = self._open_commit_reconciliation(
-                    connection,
-                    actor,
-                    project_id,
-                    commit=candidate["commit_sha"],
-                    subject=f"QA rejected candidate {candidate_id}",
-                    relation="qa_failed",
-                    observation_ref=f"context:{known_failure_entry_id}",
-                    branch=candidate.get("branch_ref"),
-                    frozen_ticket_ids=self._frozen_ticket_closure(connection, ticket_id),
-                    # The rework budget's last rejection, and a stale intent
-                    # (a planning question, wave 7C), stay with Planner.
-                    rework_ticket_id=None if budget_exhausted or plan_stale else ticket_id,
-                    resolved_by="system:qa-rejection",
-                )
-            if verdict in {"passed", "failed"}:
-                self._queue_ticket(connection, actor, project_id, verdict_ticket)
-            planner_job = None
-            if verdict == "failed":
-                failed_findings = [
-                    row["finding_id"]
-                    for row in connection.execute(
-                        """
-                        SELECT finding_id FROM qa_findings
-                        WHERE candidate_id = ? AND status != 'verified'
-                        ORDER BY created_at ASC
-                        """,
-                        (candidate_id,),
-                    ).fetchall()
-                ]
-                planner_job = self._open_planner_job(
-                    connection,
-                    actor,
-                    project_id,
-                    verdict_ticket,
-                    job_type=PlannerJobType.QA_FAILURE,
-                    summary=(
-                        f"{REWORK_BUDGET_EXHAUSTED}: QA rejected this ticket {rejections} times; "
-                        "split it, revise its contract or cancel it."
-                        if budget_exhausted else
-                        "intent_check: the ticket's intent is stale against the new main; "
-                        "revise, re-scope or retire it."
-                        if plan_stale else
-                        "QA rejected the frozen candidate; inspect the linked findings."
-                    ),
-                    evidence_refs=[
-                        f"candidate:{candidate_id}",
-                        f"context:{known_failure_entry_id}",
-                        *(f"finding:{finding_id}" for finding_id in failed_findings),
-                    ],
-                    candidate_id=candidate_id,
-                    context_entry_id=known_failure_entry_id,
-                    # A contradicted criterion is urgent; missing or inconsistent
-                    # evidence is a slower question about how to test it.
-                    severity=(
-                        InterventionSeverity.HIGH
-                        if budget_exhausted or any(
-                            str(finding.get("status")) == "failed" for finding in findings
-                        )
-                        else InterventionSeverity.NORMAL
-                    ),
-                    artifact_commit=candidate["commit_sha"],
-                )
-            return {
-                "ticket": verdict_ticket,
-                "candidate": candidate,
-                "verdict": verdict,
-                "planner_job": planner_job,
-                "reconciliation_id": reconciliation_id,
-                "qa_rejections": rejections,
-                "rework_budget_exhausted": budget_exhausted,
-                "evidence_bundle": {
-                    "schema_version": "1",
-                    "candidate_id": candidate_id,
-                    "candidate_commit": candidate["commit_sha"],
-                    # distinct | family_unverified | disabled (wave 7C3).
-                    "family_check": family_check["status"],
-                    "verified_records": [
-                        record for record in evidence_records if record["status"] == "verified"
-                    ],
-                    "gap_records": [
-                        record for record in evidence_records if record["status"] != "verified"
-                    ],
-                    "planner_handoff": {
-                        "preservation_constraints": [
-                            record["criterion"] for record in evidence_records
-                            if record["status"] == "verified"
-                        ],
-                        "update_targets": [
-                            record["criterion"] for record in evidence_records
-                            if record["status"] != "verified"
-                        ],
-                        "validation_requirements": [
-                            contract[record["criterion"]]
-                            for record in evidence_records
-                            if record["status"] != "verified"
-                            and record["criterion"] in contract
-                        ],
-                    },
-                },
-            }
+                         "planning_base_stale": ticket.get("planning_base_stale")})
+                if missing:
+                    raise ValidationError("Passed verdict requires verified evidence for every criterion",
+                                          {"missing_criteria": sorted(missing)})
+            connection.execute("UPDATE qa_reviews SET status=?, completed_at=?, context_snapshot_id=? "
+                               "WHERE review_id=? AND status='IN_PROGRESS'",
+                               ("PASSED" if verdict == "passed" else "FAILED", timestamp,
+                                context_snapshot_id, review_lease["review_id"]))
+            connection.execute("DELETE FROM leases WHERE lease_id=?", (lease_id,))
+            self._event(connection, actor, project_id, "qa.review_completed", "ticket", ticket_id,
+                        ticket["version"], {"candidate_id": candidate_id, "review_id": review_lease["review_id"],
+                                            "verdict": verdict})
+            outcome = self._settle_qa_reviews(connection, actor, ticket, project_id, candidate)
+            return {**outcome, "verdict": verdict, "review_id": review_lease["review_id"],
+                    "evidence_bundle": {"schema_version": "1", "candidate_id": candidate_id,
+                                        "candidate_commit": candidate["commit_sha"],
+                                        "family_check": family_check["status"],
+                                        "verified_records": [r for r in evidence_records if r["status"] == "verified"],
+                                        "gap_records": [r for r in evidence_records if r["status"] != "verified"],
+                                        "planner_handoff": {
+                                            "preservation_constraints": [r["criterion"] for r in evidence_records if r["status"] == "verified"],
+                                            "update_targets": [r["criterion"] for r in evidence_records if r["status"] != "verified"],
+                                            "validation_requirements": [contract[r["criterion"]] for r in evidence_records
+                                                                        if r["status"] != "verified" and r["criterion"] in contract]}}}
+
+    def _settle_qa_reviews(self, connection, actor, ticket, project_id, candidate):
+        """Publish one candidate outcome after its frozen owner count returns."""
+        candidate_id, ticket_id = candidate["candidate_id"], ticket["ticket_id"]
+        reviews = self._candidate_qa_reviews(connection, candidate_id)
+        current = {r["slot"]: r for r in reviews if r["status"] != "REPLACED"}
+        completed = [r for r in current.values() if r["status"] in {"PASSED", "FAILED"}]
+        required = candidate["required_qa_reviews"]
+        failed = any(r["status"] == "FAILED" for r in completed)
+        ready = len(completed) == required or (failed and len(current) == required
+                 and all(r["status"] != "IN_PROGRESS" for r in current.values()))
+        result = {"aggregate_verdict": "pending", "qa_reviews": reviews, "planner_job": None,
+                  "reconciliation_id": None, "qa_rejections": None, "rework_budget_exhausted": False}
+        if not ready:
+            self._queue_ticket(connection, actor, project_id, ticket)
+            return {**result, "ticket": self._ticket(connection, ticket_id), "candidate": candidate}
+        if not failed:
+            profile = _row(connection.execute("SELECT * FROM candidate_test_profiles WHERE candidate_id=?",
+                                              (candidate_id,)).fetchone())
+            if profile is not None:
+                suite = self._candidate_suite_state(connection, candidate_id, profile["test_command"],
+                                                     profile["timeout_seconds"])
+                if suite["qa_job"] is not None:
+                    # Keep the final owner's lease until the shared attempt has
+                    # a usable outcome. A late red run must still have a reviewer.
+                    self._require_regression_run(suite)
+        findings = [_row(row) for row in connection.execute(
+            "SELECT f.* FROM qa_findings f JOIN qa_reviews r ON r.review_id=f.review_id "
+            "WHERE f.candidate_id=? AND r.status IN ('PASSED', 'FAILED') ORDER BY f.created_at, f.finding_id",
+            (candidate_id,),
+        ).fetchall()]
+        # Intent and evidence gaps are planning/infrastructure, not source rework.
+        intent_required = bool(ticket.get("planning_base_stale"))
+        plan_stale = failed and intent_required and any(
+            f["criterion"] == INTENT_CHECK_CRITERION and f["status"] != "verified" for f in findings
+        ) and all(f["status"] == "verified" for f in findings if f["criterion"] != INTENT_CHECK_CRITERION)
+        evidence_gap = failed and not plan_stale and any(
+            f["status"] == "insufficient_evidence" for f in findings
+        ) and all(f["status"] in {"verified", "insufficient_evidence"} for f in findings)
+        rejections = (self._qa_rejections_since_reset(connection, ticket_id) + 1
+                      if failed and not evidence_gap and not plan_stale else None)
+        budget_exhausted = rejections is not None and rejections >= MAX_QA_REJECTIONS
+        status = (TicketStatus.VERIFIED if not failed else TicketStatus.BLOCKED
+                  if evidence_gap or plan_stale or budget_exhausted else TicketStatus.REWORK)
+        timestamp = _iso()
+        changes = {"status": status, "updated_at": timestamp}
+        if not failed and intent_required:
+            changes["planning_base_stale"] = None
+        if status == TicketStatus.BLOCKED:
+            changes["blocked_reason"] = (REWORK_BUDGET_EXHAUSTED if budget_exhausted else
+                                         "plan_stale" if plan_stale else "qa.infrastructure/insufficient_evidence")
+        version = _transition_ticket(connection, ticket_id, actor=actor, expected_version=ticket["version"],
+                                     from_statuses=(TicketStatus.QA_IN_PROGRESS,), changes=changes)
+        connection.execute("DELETE FROM leases WHERE ticket_id=? AND role='qa'", (ticket_id,))
+        if status == TicketStatus.BLOCKED:
+            self._close_ticket_dispatch(connection, ticket_id, timestamp)
+        verdict = "failed" if failed else "passed"
+        payload = {"candidate_id": candidate_id, "verdict": verdict, "family_check": "disabled",
+                   "review_ids": [r["review_id"] for r in completed]}
+        if rejections is not None:
+            payload.update(qa_rejections=rejections, max_qa_rejections=MAX_QA_REJECTIONS)
+        self._event(connection, actor, project_id,
+            "ticket.verified" if not failed else "ticket.rework_budget_exhausted" if budget_exhausted else
+            "ticket.plan_stale" if plan_stale else "qa.infrastructure_blocked" if evidence_gap else "ticket.rework_requested",
+            "ticket", ticket_id, version, payload)
+        updated = self._ticket(connection, ticket_id)
+        result.update(aggregate_verdict=verdict, qa_rejections=rejections, rework_budget_exhausted=budget_exhausted)
+        if failed:
+            entry_id = _id(connection, "ctx")
+            content = ("intent_check found the ticket's intent stale against the new main; "
+                       "Planner decides whether to revise, re-scope or retire it. No source rework is requested."
+                       if plan_stale else "QA evidence is insufficient; infrastructure owner must record readiness "
+                       "before retry. No source rework is requested." if evidence_gap else
+                       f"QA rejected candidate {MAX_QA_REJECTIONS} times; rework budget exhausted. "
+                       "Planner decides whether to split the ticket, revise its contract or cancel it."
+                       if budget_exhausted else "QA rejected candidate; inspect linked findings and evidence")
+            connection.execute("""INSERT INTO context_entries
+                (entry_id, project_id, feature_id, ticket_id, entry_type, content, source_ref,
+                 artifact_commit, actor_id, actor_role, created_at)
+                VALUES (?, ?, ?, ?, 'known_failure', ?, ?, ?, ?, ?, ?)""",
+                (entry_id, project_id, ticket["feature_id"], ticket_id, content, f"candidate:{candidate_id}",
+                 candidate["commit_sha"], actor.agent_id, actor.role.value, timestamp))
+            result["reconciliation_id"] = self._open_commit_reconciliation(
+                connection, actor, project_id, commit=candidate["commit_sha"],
+                subject=f"QA rejected candidate {candidate_id}", relation="qa_failed",
+                observation_ref=f"context:{entry_id}", branch=candidate.get("branch_ref"),
+                frozen_ticket_ids=self._frozen_ticket_closure(connection, ticket_id),
+                rework_ticket_id=None if budget_exhausted or plan_stale else ticket_id,
+                resolved_by="system:qa-rejection")
+            result["planner_job"] = self._open_planner_job(
+                connection, actor, project_id, updated, job_type=PlannerJobType.QA_FAILURE,
+                summary=(f"{REWORK_BUDGET_EXHAUSTED}: QA rejected this ticket {rejections} times; "
+                         "split it, revise its contract or cancel it." if budget_exhausted else
+                         "intent_check: the ticket's intent is stale against the new main; revise, re-scope or retire it."
+                         if plan_stale else "QA rejected the frozen candidate; inspect the linked findings."),
+                evidence_refs=[f"candidate:{candidate_id}", f"context:{entry_id}",
+                               *(f"finding:{f['finding_id']}" for f in findings if f["status"] != "verified")],
+                candidate_id=candidate_id, context_entry_id=entry_id,
+                severity=InterventionSeverity.HIGH if budget_exhausted or any(f["status"] == "failed" for f in findings)
+                else InterventionSeverity.NORMAL, artifact_commit=candidate["commit_sha"])
+        self._queue_ticket(connection, actor, project_id, updated)
+        return {**result, "ticket": updated, "candidate": candidate}

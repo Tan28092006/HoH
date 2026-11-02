@@ -353,6 +353,7 @@ class ContextMixin:
                     """
                     SELECT * FROM context_entries
                     WHERE (ticket_id = ? OR (ticket_id IS NULL AND feature_id = ?)) AND superseded_by IS NULL
+                      AND entry_type != 'qa_review_batch'
                     ORDER BY created_at ASC
                     """,
                     (ticket_id, ticket["feature_id"]),
@@ -419,6 +420,8 @@ class ContextMixin:
                 records = [
                     {
                         "finding_id": finding["finding_id"],
+                        "review_id": finding.get("review_id"),
+                        "created_by": finding["created_by"],
                         "criterion": finding["criterion"],
                         "status": finding["status"],
                         "observation": finding["observation"],
@@ -439,6 +442,9 @@ class ContextMixin:
                     "candidate_commit": candidate["commit_sha"],
                     "verified_records": [r for r in records if r["status"] == "verified"],
                     "gap_records": [r for r in records if r["status"] != "verified"],
+                    "required_qa_reviews": candidate["required_qa_reviews"],
+                    "qa_reviews": [{key: r[key] for key in ("review_id", "slot", "reviewer_id", "status")}
+                                   for r in self._candidate_qa_reviews(connection, candidate["candidate_id"])],
                 }
             dependencies = [
                 dict(row)
@@ -447,9 +453,10 @@ class ContextMixin:
                     SELECT dependency.ticket_id, dependency.title, dependency.status
                     FROM ticket_dependencies d
                     JOIN tickets dependency ON dependency.ticket_id = d.depends_on_ticket_id
-                    WHERE d.ticket_id = ?
+                    JOIN features df ON df.feature_id=dependency.feature_id
+                    WHERE d.ticket_id = ? AND df.project_id = ?
                     """,
-                    (ticket_id,),
+                    (ticket_id, project_id),
                 ).fetchall()
             ]
         inherited = self._inherited_constraints(ticket_id, ticket)
@@ -509,6 +516,8 @@ class ContextMixin:
             "ticket_version": ticket["version"],
             "feature_version": feature["version"],
             "candidate_commit": candidate["commit_sha"] if candidate else None,
+            "candidate_id": candidate["candidate_id"] if candidate else None,
+            "qa_evidence_count": sum(len(f["evidence_refs"]) for f in all_findings) if candidate else 0,
             "dependencies": {
                 dependency["ticket_id"]: dependency["status"] for dependency in dependencies
             },
@@ -708,6 +717,8 @@ class ContextMixin:
         if entry is None:
             raise NotFoundError("Context entry not found")
         require_project(actor, entry["project_id"])
+        if entry["entry_type"] == "qa_review_batch":
+            raise AuthorizationError("Private review checkpoints are available only through qa.get_review_batch")
         allowed = _ROLE_CONTEXT_ENTRY_TYPES.get(actor.role)
         if allowed is not None and entry["entry_type"] not in allowed:
             raise AuthorizationError("This entry type is not part of your role's packet")
@@ -780,7 +791,8 @@ class ContextMixin:
             SELECT entry_id, entry_type, content, source_ref, actor_role, created_at,
                    superseded_by
             FROM context_entries
-            WHERE ticket_id = ? OR (ticket_id IS NULL AND feature_id = ?)
+            WHERE (ticket_id = ? OR (ticket_id IS NULL AND feature_id = ?))
+              AND entry_type != 'qa_review_batch'
             ORDER BY created_at DESC LIMIT ?
             """,
             (ticket_id, ticket["feature_id"], _HISTORY_PAGE),
@@ -923,7 +935,7 @@ class ContextMixin:
         candidate = _row(
             connection.execute(
                 """
-                SELECT commit_sha, branch_ref FROM candidates WHERE ticket_id = ?
+                SELECT candidate_id, commit_sha, branch_ref FROM candidates WHERE ticket_id = ?
                 ORDER BY submitted_at DESC LIMIT 1
                 """,
                 (ticket_id,),
@@ -950,14 +962,16 @@ class ContextMixin:
                 SELECT dependency.ticket_id, dependency.status
                 FROM ticket_dependencies d
                 JOIN tickets dependency ON dependency.ticket_id = d.depends_on_ticket_id
-                WHERE d.ticket_id = ?
+                JOIN features df ON df.feature_id=dependency.feature_id
+                WHERE d.ticket_id = ? AND df.project_id = ?
                 """,
-                (ticket_id,),
+                (ticket_id, recorded["project_id"]),
             ).fetchall()
         }
         stale: list[str] = []
         decisions = [dict(row) for row in connection.execute(
-            "SELECT * FROM context_entries WHERE (ticket_id = ? OR (ticket_id IS NULL AND feature_id = ?)) AND superseded_by IS NULL ORDER BY created_at ASC",
+            "SELECT * FROM context_entries WHERE (ticket_id = ? OR (ticket_id IS NULL AND feature_id = ?)) "
+            "AND superseded_by IS NULL AND entry_type != 'qa_review_batch' ORDER BY created_at ASC",
             (ticket_id, ticket["feature_id"])).fetchall()]
         # Old snapshots did not pin planning decisions. Refresh once at upgrade
         # instead of allowing a pre-upgrade view to authorize current work.
@@ -998,6 +1012,12 @@ class ContextMixin:
             stale.append("feature")
         if observed.get("candidate_commit") != (candidate["commit_sha"] if candidate else None):
             stale.append("candidate")
+        if observed.get("candidate_id") != (candidate["candidate_id"] if candidate else None):
+            stale.append("candidate_identity")
+        evidence_count = connection.execute("SELECT COUNT(*) FROM evidence WHERE candidate_id=?",
+                                            (candidate["candidate_id"],)).fetchone()[0] if candidate else 0
+        if observed.get("qa_evidence_count", 0) != evidence_count:
+            stale.append("qa_evidence")
         if observed.get("dependencies") != dependencies:
             stale.append("dependencies")
         if stale:

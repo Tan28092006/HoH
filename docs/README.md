@@ -11,6 +11,7 @@ its tests win.
 | Document | Read when | Status |
 | --- | --- | --- |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Changing any module, finding where an invariant is enforced, or placing new code | current |
+| [QA_RISK_POLICY.md](QA_RISK_POLICY.md) | Changing risk-directed owner counts, frozen review plans, advisory budgets or shared suite evidence | current source policy; installation is separate |
 | [../HOH_MULTI_AGENT_CONTROL_PLANE.md](../HOH_MULTI_AGENT_CONTROL_PLANE.md) | Checking the original product requirements (cited by section in tests and tickets); it is not a description of the code | specification, includes unbuilt requirements |
 | [QUALITY_CONTRACTS.md](QUALITY_CONTRACTS.md) | Changing verification profiles, validation contracts or QA evidence rules | snapshot 2026-09-14; capability approval is now server-side from host preflight, and risk tiers and maker/checker model families came later (see ARCHITECTURE.md) |
 | [PAPER_ALIGNMENT.md](PAPER_ALIGNMENT.md) | Comparing behavior with the Harness-of-Harness paper (`2609.01481v1.pdf` in the root) | snapshot 2026-09-14 |

@@ -174,6 +174,8 @@ class TicketAuthoringMixin:
                 for dependency_id in dependency_ids:
                     if dependency_id == ticket_id:
                         raise ValidationError("Ticket cannot depend on itself")
+                    if self._project_for_ticket(connection, dependency_id) != project_id:
+                        raise ValidationError("Dependency must belong to the same project")
                     connection.execute(
                         """
                         INSERT INTO ticket_dependencies (ticket_id, depends_on_ticket_id)
