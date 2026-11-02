@@ -342,7 +342,7 @@ class ProjectTestRunner:
         selected = cls._python_mode(command)
         if selected is None:
             return False
-        kind, mode = selected
+        kind, mode, _ = selected
         if kind != '-c' or command[mode] != '-c' or any(arg != '-B'
                                for arg in command[1:mode]):
             return False  # Unproved interpreter hooks/options are not reusable.
@@ -464,20 +464,30 @@ class ProjectTestRunner:
 
     @classmethod
     def _python_mode(cls, command):
-        """Select interpreter mode before script/inline/module program argv."""
+        """Return selector, argv index and character offset before program argv."""
         if not command or not cls._looks_like_python_interpreter(command[0]):
             return None
         index = 1
         while index < len(command):
             arg = command[index]
-            if arg.startswith(('-c', '-m')):
-                return arg[:2], index
-            if arg in {'-W', '-X', '--check-hash-based-pycs'}:
-                index += 2  # These interpreter options consume their own value.
-            elif arg.startswith(('-W', '-X', '--check-hash-based-pycs=')) or re.fullmatch(r'-[bBdEiIOPqRsSuvx]+', arg):
+            if arg == '--check-hash-based-pycs':
+                index += 2
+                continue
+            if arg.startswith('--check-hash-based-pycs='):
                 index += 1
-            else:
+                continue
+            if not arg.startswith('-') or arg in {'-', '--'}:
                 return None  # Script, stdin, --, help/version or unsupported flag.
+            for offset, option in enumerate(arg[1:], 1):
+                if option in 'cm':
+                    return '-' + option, index, offset
+                if option in 'WX':
+                    # An attached operand consumes the rest, even if it contains m/c.
+                    index += int(offset == len(arg) - 1)
+                    break
+                if option not in 'bBdEiIOPqRsSuvx':
+                    return None
+            index += 1
         return None
 
     @classmethod
@@ -485,10 +495,11 @@ class ProjectTestRunner:
         selected = cls._python_mode(command)
         if selected is None or selected[0] != '-m':
             return None
-        _, index = selected
-        separate = command[index] == '-m'
-        module = command[index + 1:index + 2] if separate else [command[index][2:]]
-        return (command[1:index], command[index + (2 if separate else 1):]) if module == ['pytest'] else None
+        _, index, offset = selected
+        separate = offset == len(command[index]) - 1
+        module = command[index + 1:index + 2] if separate else [command[index][offset + 1:]]
+        flags = command[1:index] + ([command[index][:offset]] if offset > 1 else [])
+        return (flags, command[index + (2 if separate else 1):]) if module == ['pytest'] else None
 
     @staticmethod
     def _provenance_modules(worktree):

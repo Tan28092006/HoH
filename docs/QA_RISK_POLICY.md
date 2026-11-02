@@ -85,7 +85,12 @@ under short transactions. A no-test-slot merge retains that capability through
 the locked consumer: a late applicability miss removes its owned intent and
 defers to QUEUED for proper re-admission, never a suite outside its slot.
 Python dispatch selects the interpreter's command mode before program argv;
-trailing `-m pytest` after `-c` or a script does not select instrumentation.
+grouped selectors retain their effective prefix flags and pytest observation.
+Trailing `-m pytest` after `-c` or a script does not select instrumentation, and
+option operands are not selectors. The observer restores implicit cwd only for
+ordinary module startup, not safe-path (`-P`) or isolated (`-I`) startup. A fresh
+pytest result still needs completed counts and frozen source provenance; UNKNOWN
+cache applicability never permits an all-skipped run to pass.
 
 The deadline/stop controller performs only fresh DB state/profile/lease/review/
 candidate/retirement checks. It does not call external capture. The existing

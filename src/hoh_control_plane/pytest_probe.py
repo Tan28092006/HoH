@@ -33,8 +33,8 @@ def main():
     report, settings_path, *arguments = sys.argv[1:]
     settings = json.loads(Path(settings_path).read_text(encoding="utf-8"))
     root = Path.cwd().resolve()
-    # Match `python -m pytest`: isolated mode omits cwd, ordinary mode includes it.
-    if not sys.flags.isolated:
+    # Match `python -m pytest`: -P (also implied by -I) omits the implicit cwd.
+    if not sys.flags.safe_path:
         sys.path.insert(0, str(root))
     spec = importlib.util.spec_from_file_location("_hoh_resources", Path(__file__).with_name("resource_probe.py"))
     resources = importlib.util.module_from_spec(spec)
