@@ -615,8 +615,8 @@ class ProjectTestRunner:
                     child = json.loads(report.read_text(encoding="utf-8"))
                 except (ValueError, OSError):
                     pass
-            # Process zero cannot erase the observer's recorded non-success status.
-            pytest_status = completed.returncode or child.get("pytest_exit_status", 0)
+            # Preserve recorded pytest failure attribution across process exit overrides.
+            pytest_status = child.get("pytest_exit_status") or completed.returncode
             reason = "passed"
             if completed.cancelled:
                 reason = "cancelled"
@@ -631,7 +631,7 @@ class ProjectTestRunner:
             elif completed.returncode in _OOM_EXIT_CODES or child.get("resource_failures") or any(
                 marker in (completed.stderr or "")[-20_000:] or marker in (completed.stdout or "")[-20_000:]
                 for marker in _MEMORY_MARKERS
-            ) and completed.returncode != 0:
+            ) and pytest_status != 0:
                 reason = "resource_exhausted"
             elif completed.returncode < 0 or completed.returncode > 255:
                 reason = "native_termination"

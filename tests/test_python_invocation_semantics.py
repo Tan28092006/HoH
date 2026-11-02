@@ -5,8 +5,16 @@ import sys
 
 import pytest
 
-from hoh_control_plane.qa_runner import ProjectTestRunner
+from hoh_control_plane.qa_runner import INFRASTRUCTURE_REASONS, ProjectTestRunner
 from hoh_control_plane.service.integration import IntegrationMixin
+from hoh_control_plane.service.qa import _INFRASTRUCTURE_OUTCOMES
+
+
+_SESSION_COUNTER = (
+    'from pathlib import Path\nimport pytest\n'
+    'def pytest_sessionstart(session):\n'
+    "    with Path(__file__).with_name('attempts.txt').open('a', encoding='utf-8') as stream:\n"
+    "        stream.write('started\\n')\n")
 
 
 @pytest.fixture
@@ -128,25 +136,31 @@ def test_negative_observer_counts_cannot_pass(invocation_tree, tmp_path, selecto
 
 
 @pytest.mark.parametrize('selector', [['-B', '-m', 'pytest'], ['-Bm', 'pytest']])
-def test_recorded_interruption_cannot_pass_after_real_tests(invocation_tree, tmp_path, selector):
+@pytest.mark.parametrize('override', [0, 1], ids=['override-zero', 'override-one'])
+def test_recorded_interruption_cannot_pass_after_real_tests(invocation_tree, tmp_path, selector, override):
     root = invocation_tree
     (root / 'test_sample.py').write_text(
         'import sample\ndef test_pass():\n    assert sample.value == 7\n', encoding='utf-8')
     (root / 'conftest.py').write_text(
-        'import pytest\n@pytest.hookimpl(hookwrapper=True)\n'
+        _SESSION_COUNTER + '@pytest.hookimpl(hookwrapper=True)\n'
         'def pytest_runtestloop(session):\n    yield\n'
         "    pytest.exit('private project interruption after tests', returncode=2)\n"
         '@pytest.hookimpl(trylast=True)\n'
-        'def pytest_sessionfinish(session, exitstatus):\n    session.exitstatus = 0\n', encoding='utf-8')
+        f'def pytest_sessionfinish(session, exitstatus):\n    session.exitstatus = {override}\n', encoding='utf-8')
     execution = ProjectTestRunner(tmp_path / 'reports').execute(
         [sys.executable, *selector, '-q', '-p', 'no:cacheprovider'], str(root), 30,
         provenance_modules=['sample'])
-    assert execution.exit_code == 0, execution.stderr
+    assert execution.exit_code == override, execution.stderr
     _observed(execution, root, passed=1, skipped=0)
     assert execution.environment_manifest['child']['pytest_exit_status'] == 2
     assert not _passed(execution), execution.termination_reason
     assert execution.termination_reason == 'pytest_interrupted'
     assert execution.environment_manifest['classification'] == 'infrastructure_failure'
+    assert execution.termination_reason in INFRASTRUCTURE_REASONS & _INFRASTRUCTURE_OUTCOMES
+    assert execution.environment_manifest['execution_environment_digest'] is None
+    assert execution.environment_manifest['retry_of']['reason'] == 'pytest_interrupted'
+    assert execution.environment_manifest['retry_of']['exit_code'] == override
+    assert (root / 'attempts.txt').read_text(encoding='utf-8').splitlines() == ['started', 'started']
 
 
 @pytest.mark.parametrize('selector,flags', [
@@ -191,3 +205,58 @@ def test_pytest_trailing_x_still_stops_after_failure(invocation_tree, tmp_path, 
     assert execution.environment_manifest['child']['pytest_exit_status'] == 1
     assert not _passed(execution) and execution.termination_reason == 'test_failure'
     assert execution.environment_manifest['instrumentation']['pytest_arguments'][-2:] == ['-x', 'test_sample.py']
+
+
+@pytest.mark.parametrize('error', ['MemoryError', 'ValueError'])
+@pytest.mark.parametrize('override', [False, True], ids=['ordinary-exit', 'exit-zero-hook'])
+def test_collection_resource_attribution_survives_exit_override(invocation_tree, tmp_path, error, override):
+    root = invocation_tree
+    # Raise only the exception: this fixture never allocates or exhausts memory.
+    (root / 'test_bad.py').write_text(f"raise {error}('private collection control')\n", encoding='utf-8')
+    (root / 'test_sample.py').write_text(
+        'import sample\ndef test_pass():\n    assert sample.value == 7\n', encoding='utf-8')
+    hook = _SESSION_COUNTER
+    if override:
+        hook += ('@pytest.hookimpl(trylast=True)\n'
+                 'def pytest_sessionfinish(session, exitstatus):\n    session.exitstatus = 0\n')
+    (root / 'conftest.py').write_text(hook, encoding='utf-8')
+    execution = ProjectTestRunner(tmp_path / 'reports').execute(
+        [sys.executable, '-Bm', 'pytest', '-q', '-p', 'no:cacheprovider', '--continue-on-collection-errors'],
+        str(root), 30, provenance_modules=['sample'])
+    assert execution.exit_code == (0 if override else 1), execution.stderr
+    _observed(execution, root, passed=1, skipped=0, collection_errors=1)
+    manifest = execution.environment_manifest
+    assert manifest['child']['pytest_exit_status'] == 1
+    assert manifest['child']['resource_failures'] == 0
+    assert error in execution.stdout[-20_000:] or error in execution.stderr[-20_000:]
+    assert manifest['execution_environment_digest'] is None
+    assert not _passed(execution)
+    memory = error == 'MemoryError'
+    assert execution.termination_reason == ('resource_exhausted' if memory else 'test_failure')
+    assert manifest['classification'] == ('infrastructure_failure' if memory else 'candidate_failure')
+    assert (execution.termination_reason in INFRASTRUCTURE_REASONS & _INFRASTRUCTURE_OUTCOMES) is memory
+    assert (root / 'attempts.txt').read_text(encoding='utf-8').splitlines() == ['started'] * (2 if memory else 1)
+    if memory:
+        assert manifest['retry_of']['reason'] == 'resource_exhausted'
+        assert manifest['retry_of']['exit_code'] == (0 if override else 1)
+    else:
+        assert 'retry_of' not in manifest
+
+
+def test_successful_memory_marker_is_not_resource_failure(invocation_tree, tmp_path):
+    root = invocation_tree
+    (root / 'test_sample.py').write_text(
+        'import sample\ndef test_pass():\n    assert sample.value == 7\n'
+        "    print('MemoryError diagnostic on success')\n", encoding='utf-8')
+    (root / 'conftest.py').write_text(_SESSION_COUNTER, encoding='utf-8')
+    execution = ProjectTestRunner(tmp_path / 'reports').execute(
+        [sys.executable, '-Bm', 'pytest', '-s', '-q', '-p', 'no:cacheprovider'], str(root), 30,
+        provenance_modules=['sample'])
+    assert execution.exit_code == 0 and execution.termination_reason == 'passed', execution.stderr
+    _observed(execution, root, passed=1, skipped=0)
+    assert execution.environment_manifest['child']['pytest_exit_status'] == 0
+    assert execution.environment_manifest['child']['resource_failures'] == 0
+    assert 'MemoryError' in execution.stdout
+    assert _passed(execution)
+    assert 'retry_of' not in execution.environment_manifest
+    assert (root / 'attempts.txt').read_text(encoding='utf-8').splitlines() == ['started']

@@ -97,6 +97,12 @@ zero and other tests passed. Existing infrastructure/provenance classifications
 remain distinct. The observer's skippable first line preserves accepted
 interpreter `-x` prefixes during module-to-script adaptation; pytest's trailing
 `-x` argument remains unchanged.
+Recorded non-success pytest status takes precedence over a project hook's process
+exit normalization for pytest failure attribution. Existing memory-marker
+recognition also uses that non-success outcome, preserving collection-resource
+infrastructure attribution and its bounded retry. Successful printed markers
+alone do not establish resource failure; ordinary candidate collection errors remain
+candidate failures.
 
 The deadline/stop controller performs only fresh DB state/profile/lease/review/
 candidate/retirement checks. It does not call external capture. The existing
