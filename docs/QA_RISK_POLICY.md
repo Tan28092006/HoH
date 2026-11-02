@@ -52,11 +52,26 @@ Readiness recovery replaces review slots explicitly while retaining old feedback
 
 Owners reuse one active or current passing suite job for the same candidate,
 frozen command digest and timeout. Polling renews only the caller's own lease.
-Reuse additionally requires the trusted runner's stable execution-environment
-digest. It binds interpreter identity, import policy, frozen provenance modules
-and relevant OMP/OpenBLAS inputs, not checkout paths, free memory or reviewer
-identity. It retains no secret environment values. An unknown or changed
-environment cannot reuse a passing run; an active mismatch is refused.
+Reuse additionally requires the trusted runner's versioned execution-environment
+digest at queueing, execution and both reuse consumers. A bounded isolated probe
+in the selected Python hashes its runtime and the actual installed distribution
+file contents, including metadata and bytecode, rather than trusting version
+labels, RECORD checksums or interpreter timestamps. Editable dependencies outside
+the candidate import policy and missing file manifests are unproved.
+
+Execution removes inherited PYTHON controls, then enforces candidate/src imports,
+no user site, no bytecode writes and hash seed 0. Optimization flags explicitly
+present in the frozen command remain part of its identity. Relevant OMP/OpenBLAS
+inputs and frozen provenance modules are also bound. Arbitrary inline commands
+can introduce external dependency paths: only literal pass/assert/print statements
+are attested for inline reuse. Other unsupported or unproved commands may execute
+but do not confer reusable applicability. This probe never executes the candidate
+command to predict its result.
+
+The digest excludes checkout paths, free memory, reviewer identity and secret
+environment values. Old partial or unknown attestations are not backfilled with
+today's fingerprint. Unknown or changed applicability cannot reuse a passing run;
+an active unproved/mismatched join is refused without creating another job.
 The immutable requesting lease remains execution provenance; an active peer or
 the completed required passes can sustain the shared execution after it ends.
 A newer pending or failed attempt fences an older green result. Source,

@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import tempfile
 import shutil
+import ast
 import tomllib
 
 from hoh_control_plane.domain import ValidationError
@@ -31,6 +32,34 @@ _SOURCE_IDENTITY_PROBE = (
 )
 _PYTHON_INTERPRETER_NAMES = frozenset({"python", "python3", "python.exe", "pythonw.exe"})
 _SOURCE_IDENTITY_PROBE_TIMEOUT_SECONDS = 30
+
+# Runs in the selected interpreter, not the control plane's Python. Hash actual
+# distribution bytes rather than trusting version labels or RECORD checksums.
+_SOFTWARE_IDENTITY_PROBE = r"""
+import hashlib, importlib.metadata, json, pathlib, sys
+h = hashlib.sha256()
+def add(value):
+    data = value if isinstance(value, bytes) else value.encode()
+    h.update(len(data).to_bytes(8, 'big')); h.update(data)
+add(sys.version); add(pathlib.Path(sys.executable).read_bytes())
+distributions = sorted(importlib.metadata.distributions(), key=lambda d: (d.metadata['Name'] or '', d.version))
+for dist in distributions:
+    add(dist.metadata['Name'] or ''); add(dist.version)
+    direct = json.loads(dist.read_text('direct_url.json') or '{}')
+    if direct.get('dir_info', {}).get('editable') and dist.metadata['Name'] != 'hoh-control-plane':
+        raise ValueError('Unattested editable dependency')
+    files = dist.files
+    if files is None:
+        raise ValueError('Missing dependency file manifest')
+    for name in sorted(files, key=str):
+        path = pathlib.Path(dist.locate_file(name))
+        add(str(name))
+        if not path.exists() and str(name).endswith(('.pyc', '.pyo')):
+            add('absent-bytecode')
+        else:
+            add(path.read_bytes())
+print(json.dumps({'schema': 1, 'digest': h.hexdigest()}))
+"""
 
 # Wave 7A: a run that failed because of the host, not the candidate. These are
 # recorded as infrastructure_failure, retried once with fewer xdist workers, and
@@ -186,7 +215,6 @@ class ProjectTestRunner:
         command_digest = hashlib.sha256("\0".join(command).encode()).hexdigest()
         started = time.perf_counter()
         environment = self._build_environment(worktree_path)
-        execution_identity = self.execution_environment_digest(command, timeout_seconds, provenance_modules, environment)
         if self._pytest_arguments(command) is not None:
             return self._execute_pytest(command, worktree_path, timeout_seconds, environment,
                                         frozen_modules=provenance_modules)
@@ -210,6 +238,7 @@ class ProjectTestRunner:
                 artifact_mismatch=True,
                 environment_digest=self.environment_digest(command, resolved_source),
             )
+        execution_identity = self.execution_environment_digest(command, timeout_seconds, provenance_modules, environment)
         completed = None
         try:
             completed = run_managed(
@@ -262,29 +291,74 @@ class ProjectTestRunner:
             environment_manifest={"execution_environment_digest": execution_identity},
         )
 
-    @staticmethod
-    def execution_environment_digest(command, timeout_seconds, provenance_modules=None, environment=None):
+    @classmethod
+    def execution_environment_digest(cls, command, timeout_seconds, provenance_modules=None, environment=None):
         """Stable host-controlled execution inputs, not reviewer identity or free memory.
 
         Only a digest is retained. Worktree-local import paths are already bound
         by candidate identity; their temporary directory names are not identity.
         """
-        environment = os.environ if environment is None else environment
+        if not cls._attestable_command(command):
+            return None
+        environment = cls._build_environment("") if environment is None else environment
         executable = shutil.which(command[0], path=environment.get("PATH"))
         identity = None
         if executable:
             path = Path(executable).resolve()
             try:
-                stat = path.stat()
-                identity = [str(path), stat.st_size, stat.st_mtime_ns]
+                identity = str(path) if path.is_file() else None
             except OSError:
                 pass  # Unavailable executables cannot produce a reusable pass.
-        material = {"schema": 1, "command": command, "timeout_seconds": timeout_seconds,
+        if identity is None:
+            return None
+        try:
+            captured = subprocess.run([executable, '-I', '-B', '-c', _SOFTWARE_IDENTITY_PROBE],
+                env=environment, capture_output=True, text=True, timeout=20)
+            software = json.loads(captured.stdout) if captured.returncode == 0 else {}
+            if (not isinstance(software, dict) or software.get('schema') != 1
+                    or not isinstance(software.get('digest'), str)
+                    or not re.fullmatch(r'[0-9a-f]{64}', software['digest'])):
+                return None
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return None
+        material = {"schema": 2, "command": command, "timeout_seconds": timeout_seconds,
                     "provenance_modules": provenance_modules or None, "executable": identity,
-                    "python": sys.version, "platform": platform.platform(),
+                    "software": software['digest'], "platform": platform.platform(),
                     "python_no_user_site": "1", "candidate_imports": "candidate/src",
+                    "python_environment": "normalized-no-inherited-python-controls-v1",
                     "inputs": {key: environment.get(key) for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS")}}
         return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
+
+    @classmethod
+    def _attestable_command(cls, command):
+        if not command or not cls._looks_like_python_interpreter(command[0]):
+            return False
+        mode = next((i for i, arg in enumerate(command[1:], 1) if arg in {'-c', '-m'}), None)
+        if mode is None or any(arg not in {'-B', '-O', '-OO', '-I', '-E', '-s', '-S', '-u', '-q'}
+                               for arg in command[1:mode]):
+            return False  # Unproved interpreter hooks/options are not reusable.
+        if command[mode] == '-m':
+            return len(command) > mode + 1
+        # Inline code can add arbitrary external software paths. Only literal,
+        # dependency-free statements have proved applicability here; other
+        # commands can execute, but cannot reuse an attestation of sys.path alone.
+        try:
+            body = ast.parse(command[mode + 1]).body
+        except (ValueError, IndexError, SyntaxError):
+            return False
+        for node in body:
+            if isinstance(node, ast.Pass):
+                continue
+            if isinstance(node, ast.Assert) and isinstance(node.test, ast.Constant) and (
+                    node.msg is None or isinstance(node.msg, ast.Constant)):
+                continue
+            if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name) and node.value.func.id == 'print'
+                    and all(isinstance(arg, ast.Constant) for arg in node.value.args)
+                    and not node.value.keywords):
+                continue
+            return False
+        return True
 
     @staticmethod
     def environment_digest(command: list[str], resolved_source: str | None) -> str:
@@ -333,13 +407,14 @@ class ProjectTestRunner:
         storage_ref = f"evidence://local/{candidate_id}/{test_run_id}.json"
         return storage_ref, str(report_path), checksum
 
-    def _build_environment(self, worktree_path: str) -> dict[str, str]:
+    @staticmethod
+    def _build_environment(worktree_path: str) -> dict[str, str]:
         environment = os.environ.copy()
         # A candidate test must not inherit the control-plane's bearer token map,
         # database DSN or agent identity. OS-level sandboxing is still required
         # for hostile code: removing env vars is not a filesystem boundary.
         for key in list(environment):
-            if (key.upper().startswith(("HOH_", "COV_CORE", "COVERAGE"))
+            if (key.upper().startswith(("HOH_", "COV_CORE", "COVERAGE", "PYTHON"))
                     or key.upper() in {'PYTHONPATH', 'PYTHONHOME', 'VIRTUAL_ENV',
                                        'PYTEST_ADDOPTS', 'PYTEST_PLUGINS', 'PYTHONSTARTUP'}):
                 environment.pop(key)
@@ -360,6 +435,8 @@ class ProjectTestRunner:
         if source_root.is_dir():
             environment['PYTHONPATH'] = str(source_root.resolve())
         environment['PYTHONNOUSERSITE'] = '1'
+        environment['PYTHONDONTWRITEBYTECODE'] = '1'
+        environment['PYTHONHASHSEED'] = '0'
         return environment
 
     @classmethod

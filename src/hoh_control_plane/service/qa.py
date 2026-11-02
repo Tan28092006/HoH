@@ -424,7 +424,7 @@ class QaMixin:
                 command, timeout_seconds, test_profile.get("provenance_modules") or None)
             if active_job is not None:
                 active = self._qa_test_job(connection, active_job["test_run_id"])
-                if (active.get("execution_environment_digest") != execution_identity
+                if (not execution_identity or active.get("execution_environment_digest") != execution_identity
                         or active["candidate_commit"] != candidate["commit_sha"]
                         or active["test_command"] != command or active["timeout_seconds"] != timeout_seconds):
                     raise ConflictError("Active suite execution environment no longer matches",

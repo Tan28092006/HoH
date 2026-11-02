@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from datetime import UTC, datetime
 import subprocess
 from pathlib import Path
 
@@ -121,22 +123,48 @@ def _claimed_for_integration(service, actors, ticket, verified):
     )
 
 
-def _mark_run_as_qa_job(service, candidate, ticket, timeout_seconds: int = 60) -> None:
+def _mark_run_as_qa_job(service, candidate, ticket, timeout_seconds: int = 60) -> str:
+    """Model trusted QA capture by actually running the tiny frozen fixture command.
+
+    The surrounding helper seeded lifecycle evidence, not applicability. Never
+    backfill a historical pass with today's expected key without actual capture.
+    """
     candidate_id = candidate["candidate"]["candidate_id"]
-    digest = hashlib.sha256("\0".join(REGRESSION_COMMAND).encode()).hexdigest()
+    run_id = f"testrun_capture_{candidate_id}"
+    with service.store.connection() as connection:
+        profile = service._one(connection, "SELECT * FROM candidate_test_profiles WHERE candidate_id=?", (candidate_id,))
+        worktree = service._one(connection, "SELECT * FROM worktrees WHERE ticket_id=?", (ticket["ticket_id"],))
+    path = service.git_worktrees.verify_frozen_candidate(worktree["worktree_path"], candidate["candidate"]["commit_sha"])
+    execution = service.project_tests.execute(profile["test_command"], path, timeout_seconds,
+        provenance_modules=profile.get("provenance_modules") or None)
+    assert execution.exit_code == 0 and execution.termination_reason == "passed"
+    identity = execution.environment_manifest.get("execution_environment_digest")
+    assert identity, "Positive reuse requires actual trusted software applicability"
+    storage, report, checksum = service.project_tests.write_report(candidate_id=candidate_id,
+        test_run_id=run_id, execution=execution, candidate_commit=candidate["candidate"]["commit_sha"])
+    timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     with service.store.connection(immediate=True) as connection:
+        # Keep the old unknown synthetic row. This new row represents the actual
+        # capture above, not a retroactive attestation of that historical pass.
+        connection.execute("INSERT INTO qa_test_runs(test_run_id,candidate_id,ticket_id,command_digest,exit_code,timed_out,"
+            "duration_ms,storage_ref,report_path,storage_checksum,environment_digest,termination_reason,provenance_status,executed_by,created_at) "
+            "VALUES (?,?,?,?,?,0,?,?,?,?,?,?,?,'qa-01',?)",
+            (run_id, candidate_id, ticket["ticket_id"], execution.command_digest, execution.exit_code,
+             execution.duration_ms, storage, report, checksum, execution.environment_digest,
+             execution.termination_reason, execution.provenance_status, timestamp))
         connection.execute(
             """
             INSERT INTO qa_test_jobs
                 (test_run_id, project_id, candidate_id, ticket_id, lease_id, test_command,
                  command_digest, timeout_seconds, worktree_path, candidate_commit,
-                 requested_by, status, created_at)
-            VALUES (?, 'project-1', ?, ?, 'lease_qa', '[]', ?, ?, 'unused', ?, 'qa-01',
-                    'COMPLETED', '2026-01-01T00:00:00Z')
+                  requested_by, status, created_at, execution_environment_digest)
+            VALUES (?, 'project-1', ?, ?, 'lease_qa', ?, ?, ?, ?, ?, 'qa-01',
+                    'COMPLETED', ?, ?)
             """,
-            (f"testrun_{candidate_id[-8:]}_0", candidate_id, ticket["ticket_id"], digest,
-             timeout_seconds, candidate["candidate"]["commit_sha"]),
+            (run_id, candidate_id, ticket["ticket_id"], json.dumps(profile["test_command"]), execution.command_digest,
+             timeout_seconds, str(path), candidate["candidate"]["commit_sha"], timestamp, identity),
         )
+    return run_id
 
 
 def _add_context(service, ticket, entry_type: str, artifact_commit: str | None, created_at: str):

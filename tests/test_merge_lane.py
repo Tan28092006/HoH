@@ -9,8 +9,11 @@ test slot, so one heavy test process at a time still holds.
 from __future__ import annotations
 
 import time
+import json
 from concurrent.futures import Future
 from pathlib import Path
+
+import pytest
 
 from hoh_control_plane.supervisor import MERGE_LANE, TEST_LANE, Supervisor
 
@@ -76,7 +79,7 @@ def _queued_reuse_merge(service, actors, seeded, tmp_path: Path):
     repository, ticket, candidate, verified = _candidate_ready_for_integration(
         service, actors, seeded, tmp_path
     )
-    _mark_run_as_qa_job(service, candidate, ticket)
+    run_id = _mark_run_as_qa_job(service, candidate, ticket)
     integration = _claimed_for_integration(service, actors, ticket, verified)
     queued = service.queue_merge_candidate(
         actors["integrator"], ticket["ticket_id"],
@@ -85,7 +88,7 @@ def _queued_reuse_merge(service, actors, seeded, tmp_path: Path):
             actors["integrator"], ticket["ticket_id"]
         )["context_snapshot_id"],
     )
-    return repository, candidate, queued["merge_job"]["merge_job_id"]
+    return repository, candidate, queued["merge_job"]["merge_job_id"], run_id
 
 
 def test_a_reuse_merge_completes_while_a_long_qa_job_holds_the_slot(
@@ -93,7 +96,7 @@ def test_a_reuse_merge_completes_while_a_long_qa_job_holds_the_slot(
 ) -> None:
     from helpers.integration import _git
 
-    repository, candidate, merge_job_id = _queued_reuse_merge(service, actors, seeded, tmp_path)
+    repository, candidate, merge_job_id, run_id = _queued_reuse_merge(service, actors, seeded, tmp_path)
     assert service.merge_gate_reuses_qa_run(merge_job_id) is True
 
     with Supervisor(service, max_workers=2) as supervisor:
@@ -111,6 +114,7 @@ def test_a_reuse_merge_completes_while_a_long_qa_job_holds_the_slot(
             for key, future in list(supervisor.active.items()):
                 if key[0] == "merge":
                     future.result(timeout=60)
+            assert not long_qa.done(), "The test slot must remain occupied until the actual merge completes"
         finally:
             long_qa.set_result(None)
 
@@ -125,7 +129,10 @@ def test_a_reuse_merge_completes_while_a_long_qa_job_holds_the_slot(
             "SELECT outcome FROM worker_executions WHERE job_kind = 'merge' AND job_id = ?",
             (merge_job_id,),
         ).fetchone()
+        assert connection.execute("SELECT COUNT(*) FROM qa_test_runs WHERE candidate_id=?", (candidate["candidate"]["candidate_id"],)).fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM qa_test_jobs WHERE candidate_id=?", (candidate["candidate"]["candidate_id"],)).fetchone()[0] == 1
     assert '"gate_mode": "reused_qa_run"' in proof["payload"]
+    assert json.loads(proof["payload"])["test_run_id"] == run_id
     assert execution["outcome"] == "exit 0"
 
 
@@ -161,3 +168,20 @@ def test_a_merge_admitted_without_the_slot_never_runs_a_suite(
         assert connection.execute(
             "SELECT 1 FROM merge_intents WHERE merge_job_id = ?", (merge_job_id,)
         ).fetchone() is None
+
+
+@pytest.mark.parametrize("identity", [None, "f" * 64], ids=["unknown", "old-partial-or-mismatch"])
+def test_unknown_or_mismatched_capture_cannot_use_the_merge_only_lane(service, actors, seeded, tmp_path, monkeypatch, identity):
+    from helpers.integration import _git
+    repository, candidate, job_id, run_id = _queued_reuse_merge(service, actors, seeded, tmp_path)
+    before = _git(repository, "rev-parse", "main")
+    with service.store.connection(immediate=True) as db:
+        db.execute("UPDATE qa_test_jobs SET execution_environment_digest=? WHERE test_run_id=?", (identity, run_id))
+    monkeypatch.setattr(service.project_tests, "execute", lambda *a, **k: pytest.fail("No-slot worker must not execute"))
+    assert service.merge_gate_reuses_qa_run(job_id) is False
+    assert service.execute_queued_merge(job_id, run_suite=False)["status"] == "QUEUED"
+    assert _git(repository, "rev-parse", "main") == before
+    assert before != candidate["candidate"]["commit_sha"]
+    with service.store.connection() as db:
+        assert db.execute("SELECT 1 FROM merge_intents WHERE merge_job_id=?", (job_id,)).fetchone() is None
+        assert db.execute("SELECT execution_environment_digest FROM qa_test_jobs WHERE test_run_id=?", (run_id,)).fetchone()[0] == identity
