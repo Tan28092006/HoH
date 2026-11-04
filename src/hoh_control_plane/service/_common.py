@@ -52,6 +52,7 @@ from hoh_control_plane.store import (
 _SAFE_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 JSON_FIELDS = {
+    "qa_review_plan",
     "acceptance_criteria",
     "validation_contract",
     "verification_profile",

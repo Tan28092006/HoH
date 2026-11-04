@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import hashlib
 import json
 import math
@@ -21,21 +20,37 @@ POSTGRES_CASES = {
     "test_a_stale_expected_version_is_rejected", "test_an_idempotency_record_replays_rather_than_duplicating",
     "test_a_constraint_violation_arrives_as_the_control_plane_s_own_error",
     "test_the_monotonic_sequence_column_still_orders_events", "test_foreign_keys_are_enforced_without_being_switched_on",
-    "test_sqlite_remains_the_default_and_needs_no_driver", "test_experience_notes_survive_the_backend",
+    "test_experience_notes_survive_the_backend",
     "test_a_lesson_reaches_an_overlapping_ticket_on_postgres", "test_the_spec_index_runs_on_postgres",
     "test_the_outline_depth_filter_runs_on_postgres", "test_an_older_postgres_database_gains_the_columns_it_is_missing",
     "test_the_upgraded_postgres_database_still_works", "test_migrating_a_postgres_database_twice_changes_nothing",
     "test_postgres_records_and_enforces_the_schema_version", "test_the_experience_index_is_rebuilt_on_postgres_too",
     "test_evidence_records_how_its_checksum_was_obtained_on_postgres",
 }
+# Every browser test, by module, as pytest names it in the JUnit report. Without
+# --run-ui each is skipped; a new browser test needs its own entry here.
 UI_CASES = {
-    *(f"test_operator_can_follow_ticket_and_filter_state[viewport{i}]" for i in range(3)),
-    "test_background_refresh_preserves_ticket_keyboard_focus",
-    "test_old_response_cannot_replace_a_newer_snapshot", "test_empty_project_and_error_are_observable",
+    "tests.ui.test_dashboard": {
+        *(f"test_operator_can_follow_ticket_and_filter_state[viewport{i}]" for i in range(3)),
+        "test_background_refresh_preserves_ticket_keyboard_focus",
+        "test_old_response_cannot_replace_a_newer_snapshot", "test_empty_project_and_error_are_observable",
+        "test_narrow_keyboard_selection_context_journey[375]", "test_narrow_keyboard_selection_context_journey[768]",
+        "test_hostile_quoted_id_is_literal_not_markup", "test_quoted_ticket_id_round_trips_through_selection",
+        "test_context_reference_ignores_absent_or_malformed_timestamp[None]",
+        "test_context_reference_ignores_absent_or_malformed_timestamp[not-a-timestamp]",
+        "test_context_reference_uses_projected_packet_fields",
+    },
+    "tests.ui.test_desktop": {
+        "test_create_project_and_get_four_bound_prompts",
+        "test_agent_wait_monitor_is_visible_without_spawning_agents",
+        "test_shutdown_confirmation_does_not_stop_on_cancel",
+    },
 }
 DEV_SCRIPT_CASES = {
     *(f"test_the_real_database_is_refused[{database}-{script}]"
-      for database in (r"D:\HoH\data\control-plane.db", r"D:\HOH\Data\control-plane.db", r"D:\HoH-service\data\control-plane.db")
+      # pytest escapes each backslash of a parameter id as two.
+      for database in (r"D:\\HoH\\data\\control-plane.db", r"D:\\HOH\\Data\\control-plane.db",
+                       r"D:\\HoH-service\\data\\control-plane.db")
       for script in ("start-dashboard.ps1", "start-scheduler.ps1", "start-supervisor.ps1")),
     "test_this_checkouts_data_directory_is_refused_through_the_environment",
     "test_the_installed_hosts_ports_are_refused[8765]", "test_the_installed_hosts_ports_are_refused[8931]",
@@ -73,12 +88,8 @@ def allowed_skip(case: ET.Element, platform: str, checkout: str) -> bool:
         return False
     module, name = case.get("classname", ""), case.get("name", "")
     reason = skipped.get("message", "")
-    if not module and name in {"tests.test_postgres_store", "tests.test_postgres_concurrency"} and reason == "collection skipped" and skipped.get("type") is None:
-        try:
-            location, line, detail = ast.literal_eval(skipped.text or "")
-            return Path(location).resolve() == ROOT / "tests/helpers/postgres.py" and line == 12 and detail == "Skipped: PostgreSQL driver is not installed"
-        except (ValueError, SyntaxError, TypeError):
-            return False
+    # A whole-module collection skip is never accepted: under xdist only one of
+    # two such entries reached the report, so a module vanished unnoticed.
     if skipped.get("type") != "pytest.skip":
         return False
     # Collection-time importorskip uses the module name as the case name.
@@ -87,14 +98,18 @@ def allowed_skip(case: ET.Element, platform: str, checkout: str) -> bool:
         module = name.removesuffix(".py").replace("/", ".").replace("\\", ".")
     if module in {"tests.test_postgres_store", "tests.test_postgres_concurrency"}:
         if collection_skip:
-            return reason == "PostgreSQL driver is not installed"
+            return False
         allowed = POSTGRES_CASES if module == "tests.test_postgres_store" else {"test_overlapping_scopes_on_different_tickets_cannot_both_be_claimed"}
-        return name in allowed and reason == "set HOH_TEST_POSTGRES_DSN to run the PostgreSQL conformance suite"
+        return name in allowed and reason in {"PostgreSQL driver is not installed",
+                                              "set HOH_TEST_POSTGRES_DSN to run the PostgreSQL conformance suite"}
     if module == "tests.test_store_factory":
         return name in {"test_a_url_chooses_the_server_backend",
                         "test_a_url_wins_over_a_path"} and reason == "PostgreSQL driver is not installed"
-    if module == "tests.ui.test_dashboard":
-        return name in UI_CASES and reason == "Enable browser acceptance with --run-ui"
+    if module in UI_CASES:
+        return name in UI_CASES[module] and reason == "Enable browser acceptance with --run-ui"
+    if module == "tests.test_compiler_dispatch_controller":
+        return (platform != "win32" and name == "test_compiler_dependency_loss_cannot_reuse_old_green"
+                and reason == "Private copied-runtime layout is Windows-specific")
     if module == "tests.test_runtime_environment":
         if name == "test_actual_different_minor_candidate_interpreter_is_isolated":
             return reason == "Set HOH_TEST_CANDIDATE_PYTHON for a cross-version installation check"

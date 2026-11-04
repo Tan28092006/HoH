@@ -1,4 +1,4 @@
-"""Wave 7B edge cases: a drifted queued candidate is rebased by the server.
+"""Historical single-owner rebase and new exact-artifact drift protections.
 
 Lifecycle-driven: a real repository, a real candidate through QA, a real
 teammate commit on main, and the ordinary sync so HoH has observed it.
@@ -40,12 +40,28 @@ def _observed_project(service, actors, tmp_path: Path) -> Path:
     return repo
 
 
-def _queued(service, actors, seeded, tmp_path: Path, **kwargs):
+def _queued(service, actors, seeded, tmp_path: Path, *, historical=True, **kwargs):
     repo = _observed_project(service, actors, tmp_path)
     ready = verified_with_repository(service, actors, seeded, tmp_path, repo=repo, **kwargs)
+    if historical:
+        # These cases exercise recorded pre-plan single-owner behavior, not a
+        # new candidate's permission to carry approval to another SHA.
+        with service.store.connection(immediate=True) as connection:
+            connection.execute("UPDATE candidates SET qa_review_plan=NULL WHERE candidate_id=?",
+                               (ready["candidate"]["candidate_id"],))
     integration = claim_integration(service, actors, "DEV-142")
     queued = queue_merge(service, actors, "DEV-142", integration)
     return repo, ready, integration, queued["merge_job"]["merge_job_id"]
+
+
+def test_new_plan_drift_returns_to_developer_without_inheriting_approval(service, actors, seeded, tmp_path):
+    repo, ready, _, job_id = _queued(service, actors, seeded, tmp_path, historical=False)
+    _teammate(service, actors, repo, "src/other/new.txt")
+    result = service.execute_queued_merge(job_id)
+    assert result["merge_status"] == "base_drift"
+    assert ticket(service, "DEV-142")["status"] == "REWORK"
+    assert len(_candidates(service)) == 1
+    assert _candidates(service)[0]["commit_sha"] == ready["candidate"]["commit_sha"]
 
 
 def _teammate(service, actors, repo: Path, relative: str, text: str = "teammate\n",
@@ -85,7 +101,7 @@ def test_unobserved_drift_keeps_the_old_rework_path(service, actors, seeded, tmp
     assert events(service, "candidate.rebased") == []
 
 
-def test_disjoint_drift_reuses_qa_and_lands_by_compare_and_set(
+def test_disjoint_drift_requires_fresh_qa_then_lands_by_compare_and_set(
     service, actors, seeded, tmp_path
 ) -> None:
     repo, ready, integration, job_id = _queued(service, actors, seeded, tmp_path)
@@ -94,28 +110,34 @@ def test_disjoint_drift_reuses_qa_and_lands_by_compare_and_set(
     requeued = service.execute_queued_merge(job_id)
 
     original, derived = _candidates(service)
-    assert requeued["status"] == "QUEUED"
-    assert requeued["candidate_id"] == derived["candidate_id"]
+    assert requeued["status"] == "COMPLETED"
     assert derived["derived_from"] == original["candidate_id"]
-    assert derived["qa_evidence_from"] == original["candidate_id"]
+    assert derived["qa_evidence_from"] is None
+    assert derived["qa_review_plan"] is not None
     assert derived["base_commit"] == moved
     assert git(repo, "rev-parse", f"{derived['commit_sha']}^") == moved
     assert git(repo, "rev-parse", f"refs/hoh/rebased/DEV-142/{original['candidate_id']}-r1") \
         == derived["commit_sha"]
     current = ticket(service, "DEV-142")
-    assert current["status"] == "MERGE_READY"
+    assert current["status"] == "QA_READY"
     assert current["candidate_commit"] == derived["commit_sha"]
-    assert requeued["expected_version"] == current["version"]
     [rebased] = events(service, "candidate.rebased")
-    assert rebased["payload"]["qa_reused"] is True
+    assert rebased["payload"]["qa_reused"] is False
+    assert rebased["payload"]["scope_disjoint"] is True
     assert rebased["payload"]["auto_rebase"] == 1
-    # The same lease still covers the job.
+    # Old integration authority ends with the old artifact.
     with service.store.connection() as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM leases WHERE lease_id = ?", (integration["lease"]["lease_id"],)
-        ).fetchone()[0] == 1
+        ).fetchone()[0] == 0
 
-    landed = service.execute_queued_merge(job_id)
+    from helpers.w7 import pass_all, record_regression_run
+    pass_all(service, actors, "DEV-142")
+    record_regression_run(service, derived["candidate_id"], "DEV-142")
+    fresh = claim_integration(service, actors, "DEV-142")
+    new_job_id = queue_merge(service, actors, "DEV-142", fresh)["merge_job"]["merge_job_id"]
+    assert new_job_id != job_id
+    landed = service.execute_queued_merge(new_job_id)
 
     assert landed["status"] == "COMPLETED"
     assert landed["merge_status"] == "merged"
@@ -123,14 +145,14 @@ def test_disjoint_drift_reuses_qa_and_lands_by_compare_and_set(
     assert git(repo, "status", "--porcelain") == ""
     assert (repo / "src/checkout/retry.txt").read_text(encoding="utf-8") == "safe retry\n"
     assert ticket(service, "DEV-142")["status"] == "DONE"
-    [gate] = events(service, "integration.gate_passed", job_id)
+    [gate] = events(service, "integration.gate_passed", new_job_id)
     assert gate["payload"]["gate_mode"] == "executed_rebased"
     assert gate["payload"]["candidate_id"] == derived["candidate_id"]
     with service.store.connection() as connection:
         runs = connection.execute(
             "SELECT exit_code FROM qa_test_runs WHERE candidate_id = ?", (derived["candidate_id"],)
         ).fetchall()
-    assert [row["exit_code"] for row in runs] == [0], "the gate ran the suite on the rebased tree"
+    assert [row["exit_code"] for row in runs] == [0, 0], "fresh QA evidence and the gate cover the rebased tree"
 
 
 def test_overlapping_drift_sends_the_derived_candidate_to_qa(service, actors, seeded, tmp_path) -> None:
@@ -191,22 +213,27 @@ def test_a_drift_that_already_contains_the_change_is_not_a_rebase(
     assert len(_candidates(service)) == 1
 
 
+@pytest.mark.parametrize("prior_count", [MAX_AUTO_REBASES - 1, MAX_AUTO_REBASES])
 def test_the_rebase_budget_allows_the_third_and_blocks_the_fourth(
-    service, actors, seeded, tmp_path
+    service, actors, seeded, tmp_path, prior_count
 ) -> None:
     repo, _ready, _integration, job_id = _queued(service, actors, seeded, tmp_path)
-    for attempt in range(1, MAX_AUTO_REBASES + 1):
-        _teammate(service, actors, repo, f"src/other/x{attempt}.txt")
-        job = service.execute_queued_merge(job_id)
-        assert job["status"] == "QUEUED", attempt
-        assert len(_candidates(service)) == attempt + 1
-    assert events(service, "candidate.rebased")[-1]["payload"]["auto_rebase"] == MAX_AUTO_REBASES
-
+    # Retained historical derivations consume the budget. New derivations do
+    # not inherit their approvals or remain in the same integration job.
+    with service.store.connection(immediate=True) as db:
+        for i in range(prior_count):
+            db.execute("INSERT INTO candidates(candidate_id,ticket_id,base_commit,commit_sha,branch_ref,developer_claims,submitted_by,submitted_at,frozen_at,derived_from) "
+                       "VALUES (?,'DEV-142',?,?,?,'[]','historical','2000-01-01T00:00:00Z','2000-01-01T00:00:00Z',?)",
+                       (f"cand_history_{i}", _ready["candidate"]["base_commit"], str(i) * 40, f"history/{i}", _ready["candidate"]["candidate_id"]))
     _teammate(service, actors, repo, "src/other/one-too-many.txt")
     job = service.execute_queued_merge(job_id)
-
     assert job["merge_status"] == "base_drift"
     current = ticket(service, "DEV-142")
+    if prior_count < MAX_AUTO_REBASES:
+        assert current["status"] == "QA_READY"
+        assert events(service, "candidate.rebased")[-1]["payload"]["auto_rebase"] == MAX_AUTO_REBASES
+        assert len(_candidates(service)) == MAX_AUTO_REBASES + 1
+        return
     assert current["status"] == "BLOCKED"
     assert current["blocked_reason"].startswith("drift_budget_exhausted")
     assert len(_candidates(service)) == MAX_AUTO_REBASES + 1
@@ -247,17 +274,24 @@ def test_a_failing_gate_on_the_rebased_tree_lands_nothing(service, actors, seede
     repo = _observed_project(service, actors, tmp_path)
     service.configure_test_command(actors["planner"], "project-1", command, 60)
     ready = verified_with_repository(service, actors, seeded, tmp_path, repo=repo)
+    with service.store.connection(immediate=True) as connection:
+        connection.execute("UPDATE candidates SET qa_review_plan=NULL WHERE candidate_id=?",
+                           (ready["candidate"]["candidate_id"],))
     _seed_run(service, ready["candidate"]["candidate_id"], command)
     integration = claim_integration(service, actors, "DEV-142")
     job_id = queue_merge(service, actors, "DEV-142", integration)["merge_job"]["merge_job_id"]
     main_before = _teammate(service, actors, repo, "src/other/x.txt")
 
-    assert service.execute_queued_merge(job_id)["status"] == "QUEUED"
-    gated = service.execute_queued_merge(job_id)
-
-    assert gated["status"] == "FAILED"
+    assert service.execute_queued_merge(job_id)["merge_status"] == "base_drift"
+    assert ticket(service, "DEV-142")["status"] == "QA_READY"
+    qa = service.claim_qa(actors["qa"], "DEV-142", ticket(service, "DEV-142")["version"], 900)
+    tested = service.run_project_tests(actors["qa"], "DEV-142", qa["lease"]["lease_id"])
+    assert tested["test_run"]["exit_code"] == 1
+    assert tested["test_run"]["termination_reason"] == "test_failure"
     assert git(repo, "rev-parse", "main") == main_before
-    assert ticket(service, "DEV-142")["status"] == "REWORK"
+    from hoh_control_plane.domain import ConflictError
+    with pytest.raises(ConflictError):
+        claim_integration(service, actors, "DEV-142")
 
 
 def _seed_run(service, candidate_id: str, command: list[str]) -> None:
@@ -276,7 +310,7 @@ def _seed_run(service, candidate_id: str, command: list[str]) -> None:
         )
 
 
-def test_the_regression_waiver_is_only_for_a_derived_candidate_before_its_gate(
+def test_derived_candidate_cannot_waive_fresh_qa_or_regression(
     service, actors, seeded, tmp_path
 ) -> None:
     repo, ready, _integration, job_id = _queued(service, actors, seeded, tmp_path)
@@ -286,23 +320,19 @@ def test_the_regression_waiver_is_only_for_a_derived_candidate_before_its_gate(
     derived = snapshot["candidate"]
 
     assert derived["derived_from"] == ready["candidate"]["candidate_id"]
-    # QA evidence is read from the candidate it was rebased from.
-    assert snapshot["qa_verified"] is True
-    assert snapshot["findings"], "findings come from qa_evidence_from"
-    # Before its gate the derived candidate has no run of its own: waived ...
-    service._require_release_evidence(snapshot, require_regression_run=False)
-    # ... but not by default, which is what the post-gate check uses.
+    assert snapshot["qa_verified"] is False
+    assert snapshot["findings"] == []
+    assert derived["qa_evidence_from"] is None
     from hoh_control_plane.domain import ReleasePolicyError
 
-    with pytest.raises(ReleasePolicyError) as refused:
-        service._require_release_evidence(snapshot)
-    assert refused.value.details["reason"] == "regression_run_missing"
+    for require_run in (False, True):
+        with pytest.raises(ReleasePolicyError):
+            service._require_release_evidence(snapshot, require_regression_run=require_run)
 
 
 def test_a_paused_queue_holds_a_requeued_rebase(service, actors, seeded, tmp_path) -> None:
     repo, _ready, _integration, job_id = _queued(service, actors, seeded, tmp_path)
     _teammate(service, actors, repo, "src/other/x.txt")
-    assert service.execute_queued_merge(job_id)["status"] == "QUEUED"
     main_before = git(repo, "rev-parse", "main")
     with service.store.connection(immediate=True) as connection:
         service._pause_merge_queue(
@@ -316,7 +346,9 @@ def test_a_paused_queue_holds_a_requeued_rebase(service, actors, seeded, tmp_pat
     assert held["started_at"] is None
     assert git(repo, "rev-parse", "main") == main_before
     service.resume_merge_queue(actors["planner"], "project-1", "Main is green again")
-    assert service.execute_queued_merge(job_id)["merge_status"] == "merged"
+    assert service.execute_queued_merge(job_id)["merge_status"] == "base_drift"
+    assert ticket(service, "DEV-142")["status"] == "QA_READY"
+    assert git(repo, "rev-parse", "main") == main_before
 
 
 def test_the_derived_candidate_keeps_the_maker_family(service, actors, seeded, tmp_path) -> None:
@@ -330,9 +362,10 @@ def test_the_derived_candidate_keeps_the_maker_family(service, actors, seeded, t
 
     _original, derived = _candidates(service)
     assert derived["maker_model_family"] == "anthropic"
-    # An OpenAI QA may check the derived candidate; an Anthropic one may not.
+    # Family remains provenance; the derived artifact gets an independent identity.
     claim = service.claim_qa(actors["qa"], "DEV-142", ticket(service, "DEV-142")["version"], 900)
-    assert claim["family_check"]["status"] == "distinct"
+    assert "family_check" not in claim
+    assert claim["review"]["candidate_id"] == derived["candidate_id"]
 
 
 def test_a_high_risk_derived_candidate_sent_to_qa_needs_a_fresh_sign_off(
@@ -352,27 +385,15 @@ def test_a_high_risk_derived_candidate_sent_to_qa_needs_a_fresh_sign_off(
     job_id = queue_merge(service, actors, "DEV-142", integration)["merge_job"]["merge_job_id"]
     _teammate(service, actors, repo, "src/checkout/other.txt")
     service.execute_queued_merge(job_id)
-    _original, derived = _candidates(service)
-
-    pass_all(service, actors, "DEV-142", extra=[review])
-    record_regression_run(service, derived["candidate_id"], "DEV-142")
-    again = claim_integration(service, actors, "DEV-142")
-
-    with pytest.raises(ReleasePolicyError) as refused:
-        queue_merge(service, actors, "DEV-142", again)
-    assert refused.value.details["reason"] == "high_risk_signoff_missing"
-    service.approve_high_risk(actors["planner"], "DEV-142", "Approved the rebased tree")
-    assert queue_merge(service, actors, "DEV-142", again)["merge_job"]["status"] == "QUEUED"
+    assert len(_candidates(service)) == 1
+    assert ticket(service, "DEV-142")["status"] == "REWORK"
+    assert events(service, "candidate.rebased") == []
 
 
-def test_a_high_risk_derived_candidate_with_reused_qa_lands_on_the_original_sign_off(
+def test_high_risk_drift_cannot_reuse_original_sign_off_even_when_disjoint(
     service, actors, seeded, tmp_path
 ) -> None:
-    """Pinned behaviour: the carried job is not re-gated by the risk tier.
-
-    The patch is byte-identical and main's change is disjoint, so the sign-off
-    given for the original candidate lands the derived one in the same job.
-    """
+    """The authorized exact-artifact rule replaces the former carry-over policy."""
     service.configure_risk_policy(actors["planner"], "project-1",
                                   high_risk_patterns=["src/checkout/**"])
     review = finding("adversarial review", evidence_type="adversarial_review",
@@ -384,8 +405,9 @@ def test_a_high_risk_derived_candidate_with_reused_qa_lands_on_the_original_sign
     job_id = queue_merge(service, actors, "DEV-142", integration)["merge_job"]["merge_job_id"]
     _teammate(service, actors, repo, "src/other/x.txt")
 
-    assert service.execute_queued_merge(job_id)["status"] == "QUEUED"
-    assert service.execute_queued_merge(job_id)["merge_status"] == "merged"
+    assert service.execute_queued_merge(job_id)["merge_status"] == "base_drift"
+    assert ticket(service, "DEV-142")["status"] == "REWORK"
+    assert len(_candidates(service)) == 1
 
 
 # --------------------------------------------------------------- Git half

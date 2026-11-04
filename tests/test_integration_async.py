@@ -509,7 +509,7 @@ def test_gate_reuses_a_passing_qa_run_of_the_same_commit_and_command(
     repository, ticket, candidate, verified = _candidate_ready_for_integration(
         service, actors, seeded, tmp_path
     )
-    _mark_run_as_qa_job(service, candidate, ticket)
+    run_id = _mark_run_as_qa_job(service, candidate, ticket)
     integration = _claimed_for_integration(service, actors, ticket, verified)
     queued = service.queue_merge_candidate(
         actors["integrator"], ticket["ticket_id"],
@@ -517,7 +517,10 @@ def test_gate_reuses_a_passing_qa_run_of_the_same_commit_and_command(
         context_snapshot_id=service.get_ticket_context(actors["integrator"], ticket["ticket_id"])["context_snapshot_id"],
     )
     executions: list[object] = []
-    monkeypatch.setattr(service.project_tests, "execute", lambda *a, **k: executions.append(a))
+    def no_second_execution(*args, **kwargs):
+        executions.append(args)
+        pytest.fail("A matching trusted QA run must not execute a second suite")
+    monkeypatch.setattr(service.project_tests, "execute", no_second_execution)
 
     completed = service.execute_queued_merge(queued["merge_job"]["merge_job_id"])
 
@@ -529,6 +532,12 @@ def test_gate_reuses_a_passing_qa_run_of_the_same_commit_and_command(
             "SELECT payload FROM audit_events WHERE event_type = 'integration.gate_passed'"
         ).fetchone()
     assert '"gate_mode": "reused_qa_run"' in proof["payload"]
+    assert json.loads(proof["payload"])["test_run_id"] == run_id
+    with service.store.connection() as connection:
+        # One old unknown synthetic row and one fresh actual capture. The gate
+        # must not add another execution or backfill the old row.
+        assert connection.execute("SELECT COUNT(*) FROM qa_test_runs WHERE candidate_id=?", (candidate["candidate"]["candidate_id"],)).fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM qa_test_jobs WHERE candidate_id=?", (candidate["candidate"]["candidate_id"],)).fetchone()[0] == 1
 
 
 def test_gate_still_runs_when_the_qa_run_used_another_timeout(

@@ -38,16 +38,31 @@ class BoardMixin:
                         WHERE c.ticket_id = t.ticket_id) AS evidence_count
                 FROM tickets t
                 JOIN features f ON f.feature_id = t.feature_id
-                LEFT JOIN leases l ON l.ticket_id = t.ticket_id
+                LEFT JOIN leases l ON l.lease_id = (
+                    SELECT first_lease.lease_id FROM leases first_lease
+                    WHERE first_lease.ticket_id = t.ticket_id
+                    ORDER BY first_lease.expires_at DESC, first_lease.lease_id ASC LIMIT 1
+                )
                 WHERE f.project_id = ?
                 ORDER BY t.priority DESC, t.created_at ASC
                 """,
                 (project_id,),
             ).fetchall()
             tickets = [_row(row) for row in rows]
+            owners = defaultdict(list)
+            for lease in connection.execute(
+                "SELECT l.* FROM leases l JOIN tickets t ON t.ticket_id=l.ticket_id "
+                "JOIN features f ON f.feature_id=t.feature_id WHERE f.project_id=? "
+                "ORDER BY l.expires_at DESC, l.lease_id ASC", (project_id,),
+            ).fetchall():
+                owners[lease["ticket_id"]].append(lease)
             for ticket in tickets:
                 assert ticket is not None
                 ticket["owner"] = self._board_ticket_owner(ticket)
+                ticket["owners"] = [self._board_ticket_owner({
+                    **ticket, "lease_agent_id": lease["agent_id"],
+                    "lease_role": lease["role"], "lease_expires_at": lease["expires_at"],
+                }) for lease in owners[ticket["ticket_id"]]]
             features = [
                 _row(row)
                 for row in connection.execute(

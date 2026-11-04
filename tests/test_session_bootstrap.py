@@ -13,6 +13,7 @@ def test_fresh_session_discovers_scope_without_claiming(service, seeded, actors)
     assert bootstrap["assignments"] == []
     assert bootstrap["next_action"] == "register_then_inbox"
     assert not bootstrap["workspace"]["configured"]
+    assert bootstrap["required_skills"] == ["hoh-control-plane", "hoh-developer"]
     assert service.get_ticket_context(actors["developer"], "DEV-142")["ticket"]["status"] == "READY"
 
 
@@ -58,5 +59,15 @@ def test_planner_resumes_its_existing_decision_job(service, seeded, actors):
     job = jobs[0]
     claimed = service.claim_planner_job(actors["planner"], job["planner_job_id"])
     bootstrap = service.session_bootstrap(actors["planner"])
+    assert bootstrap["required_skills"] == ["hoh-control-plane", "hoh-planner", "workflow"]
+    assert bootstrap["review_policy"]["instruction"] == (
+        "Use workflow for technical planning; read the Planner technical-planning reference")
     assert bootstrap["next_action"] == "resume_planner_job"
     assert bootstrap["planner_assignments"][0]["lease_id"] == claimed["lease"]["lease_id"]
+    from hoh_control_plane.skill_plan import practice_skills_for
+    for tier in ("low", "medium", "high"):
+        assert practice_skills_for("planner", tier) == ["workflow"]
+    unselected = service.session_bootstrap(Actor("other-planner", Role.PLANNER, frozenset({"other"})))
+    assert unselected["selected_project_id"] is None
+    assert unselected["next_action"] == "select_project"
+    assert unselected["required_skills"] == ["hoh-control-plane", "hoh-planner", "workflow"]

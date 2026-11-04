@@ -16,7 +16,7 @@ PACKAGE = "hoh_control_plane"
 SOURCE = Path(__file__).resolve().parents[1] / "src" / PACKAGE
 
 # Pure value types and helpers with no internal imports.
-DOMAIN = {"domain", "scopes", "contracts"}
+DOMAIN = {"domain", "scopes", "contracts", "skill_plan"}
 STORAGE = {"store", "store_schema", "store_migrations", "postgres_store", "store_factory"}
 ADAPTERS = {
     "git_worktrees", "qa_runner", "managed_process", "resource_lock",

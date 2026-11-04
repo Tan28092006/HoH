@@ -49,7 +49,9 @@ def _classify(changed, scope=(), **policy):
      "src/hoh_control_plane/store_migrations.py", "src/hoh_control_plane/auth.py",
      "a/b/c/auth.py", "src/hoh_control_plane/local_credentials.py", "config/credentials.json",
      "deploy/desktop/install.ps1", "skills/hoh-qa/SKILL.md", "skills/x/references/y.md",
-     "docs/spec/requirements.md"],
+      "docs/spec/requirements.md", "src/hoh_control_plane/service/_common.py",
+      "src/hoh_control_plane/store.py", "src/hoh_control_plane/postgres_store.py",
+      "src/hoh_control_plane/service/qa.py"],
 )
 def test_every_default_high_pattern_makes_a_candidate_high(path) -> None:
     risk = _classify([path])
@@ -60,9 +62,7 @@ def test_every_default_high_pattern_makes_a_candidate_high(path) -> None:
 
 @pytest.mark.parametrize(
     "path",
-    ["src/hoh_control_plane/service/_common.py", "src/hoh_control_plane/domain.py",
-     "src/hoh_control_plane/contracts.py", "src/hoh_control_plane/store.py",
-     "src/hoh_control_plane/postgres_store.py"],
+    ["src/hoh_control_plane/domain.py", "src/hoh_control_plane/contracts.py"],
 )
 def test_every_default_medium_pattern_makes_a_candidate_medium(path) -> None:
     assert _classify([path])["tier"] == "medium"
@@ -71,8 +71,7 @@ def test_every_default_medium_pattern_makes_a_candidate_medium(path) -> None:
 @pytest.mark.parametrize(
     "path",
     ["docs/specs/requirements.md", "docs/README.md", "src/authz.py", "src/auth.py.bak",
-     "src/hoh_control_plane/store_factory.py", "src/deploy.py", "myskills/x.md",
-     "src/hoh_control_plane/service/qa.py"],
+      "src/hoh_control_plane/store_factory.py", "src/deploy.py", "myskills/x.md"],
 )
 def test_near_misses_stay_low(path) -> None:
     assert _classify([path])["tier"] == "low"
@@ -124,8 +123,9 @@ def test_a_candidate_with_no_changed_paths_falls_back_to_the_scope() -> None:
     assert (risk["tier"], risk["basis"]) == ("high", "write_scope")
 
 
-def test_empty_pattern_lists_leave_only_the_file_count() -> None:
-    assert _classify(["skills/x.md"], high_risk_patterns=[], medium_risk_patterns=[])["tier"] == "low"
+def test_empty_pattern_lists_cannot_lower_sensitive_impact() -> None:
+    assert _classify(["skills/x.md"], high_risk_patterns=[], medium_risk_patterns=[])["tier"] == "high"
+    assert _classify(["src/ordinary.py"], high_risk_patterns=[], medium_risk_patterns=[])["tier"] == "low"
 
 
 # ----------------------------------------------------------------- policy
@@ -134,7 +134,7 @@ def test_empty_pattern_lists_leave_only_the_file_count() -> None:
 def test_the_default_policy_is_reported_unconfigured(service, actors, seeded) -> None:
     policy = service.get_risk_policy(actors["qa"], "project-1")
     assert policy["configured"] is False
-    assert policy["checker_distinct_from_maker"] is True
+    assert "checker_distinct_from_maker" not in policy
     assert policy["medium_max_files"] == DEFAULT_MEDIUM_MAX_FILES
 
 
@@ -179,9 +179,9 @@ def test_only_planner_or_admin_configures_the_policy(service, actors, seeded, ro
 def test_reconfiguring_replaces_the_row_and_records_an_event(service, actors, seeded) -> None:
     service.configure_risk_policy(actors["planner"], "project-1", medium_max_files=4)
     admin = Actor("admin-01", Role.ADMIN, frozenset({"*"}))
-    policy = service.configure_risk_policy(admin, "project-1", checker_distinct_from_maker=False)
+    policy = service.configure_risk_policy(admin, "project-1")
     assert policy["medium_max_files"] == DEFAULT_MEDIUM_MAX_FILES
-    assert policy["checker_distinct_from_maker"] is False
+    assert "checker_distinct_from_maker" not in policy
     assert policy["configured_by"] == "admin-01"
     assert len(events(service, "project.risk_policy_configured")) == 2
 
@@ -304,6 +304,10 @@ def test_a_sign_off_for_an_older_candidate_does_not_count(service, actors, seede
     service.configure_risk_policy(actors["planner"], "project-1",
                                   high_risk_patterns=["src/checkout/**"])
     first = submit_fake(service, actors, "DEV-142", attempt=1)
+    with service.store.connection(immediate=True) as connection:
+        # A historical single-owner candidate still binds its sign-off to its own ID.
+        connection.execute("UPDATE candidates SET qa_review_plan=NULL, required_qa_reviews=1 WHERE candidate_id=?",
+                           (first["candidate"]["candidate_id"],))
     service.approve_high_risk(actors["planner"], "DEV-142", "Approved the first attempt")
     criterion = ticket(service, "DEV-142")["acceptance_criteria"][0]
     from helpers.w7 import verdict
@@ -315,17 +319,14 @@ def test_a_sign_off_for_an_older_candidate_does_not_count(service, actors, seede
         )
     second = submit_fake(service, actors, "DEV-142", attempt=2)
     assert second["candidate"]["candidate_id"] != first["candidate"]["candidate_id"]
-
+    with service.store.connection(immediate=True) as connection:
+        connection.execute("INSERT INTO candidate_changed_paths VALUES (?,?)",
+                           (second["candidate"]["candidate_id"], "src/checkout/retry.py"))
+    from helpers.w7 import pass_all
+    pass_all(service, actors, "DEV-142", extra=[finding("Review", evidence_type="adversarial_review")])
     with service.store.connection() as connection:
         risk = service._ticket_risk(connection, "project-1", service._ticket(connection, "DEV-142"))
         with pytest.raises(ReleasePolicyError) as refused:
-            connection.execute(
-                "INSERT INTO evidence (evidence_id, candidate_id, criterion, evidence_type, "
-                "observation, storage_ref, storage_checksum, checksum_source, created_by, created_at) "
-                "VALUES ('ev-review', ?, 'review', 'adversarial_review', 'ok', 'evidence://qa/r', "
-                "'x', 'claimed', 'qa-01', '2026-01-01T00:00:00Z')",
-                (second["candidate"]["candidate_id"],),
-            )
             service._require_risk_tier_cleared(
                 connection, "project-1", service._ticket(connection, "DEV-142"),
                 {"candidate_id": second["candidate"]["candidate_id"]},

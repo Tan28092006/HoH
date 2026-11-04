@@ -209,19 +209,15 @@ def _claim_qa(service, actors):
     return service.claim_qa(actors["qa"], "DEV-142", ticket(service, "DEV-142")["version"], 900)
 
 
-def test_a_same_family_checker_is_refused_at_claim(service, actors, seeded) -> None:
+def test_a_same_family_checker_is_allowed_at_claim(service, actors, seeded) -> None:
     _submitted(service, actors, "anthropic")
     _register(service, actors, "qa", "Anthropic")
 
-    with pytest.raises(AuthorizationError) as refused:
-        _claim_qa(service, actors)
-
-    details = refused.value.details
-    assert details["reason"] == "checker_same_family_as_maker"
-    assert details["maker_model_family"] == details["checker_model_family"] == "anthropic"
-    assert ticket(service, "DEV-142")["status"] == "QA_READY"
+    claim = _claim_qa(service, actors)
+    assert claim["ticket"]["status"] == "QA_IN_PROGRESS"
+    assert "family_check" not in claim
     with service.store.connection() as connection:
-        assert connection.execute("SELECT COUNT(*) FROM leases WHERE ticket_id = 'DEV-142'").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM leases WHERE ticket_id = 'DEV-142'").fetchone()[0] == 1
 
 
 def test_a_distinct_family_is_recorded_on_the_claim(service, actors, seeded) -> None:
@@ -230,10 +226,9 @@ def test_a_distinct_family_is_recorded_on_the_claim(service, actors, seeded) -> 
 
     claim = _claim_qa(service, actors)
 
-    assert claim["family_check"]["status"] == "distinct"
-    claimed = [e for e in events(service, "qa.started", "DEV-142")
-               if "family_check" in e["payload"]]
-    assert claimed[-1]["payload"]["family_check"]["status"] == "distinct"
+    assert "family_check" not in claim
+    [claimed] = events(service, "qa.started", "DEV-142")
+    assert claimed["payload"]["review"]["review_id"] == claim["review"]["review_id"]
 
 
 @pytest.mark.parametrize(
@@ -250,17 +245,18 @@ def test_an_unknown_or_other_family_is_allowed_but_unverified(
 
     claim = _claim_qa(service, actors)
 
-    assert claim["family_check"]["status"] == "family_unverified"
+    assert claim["review"]["slot"] == 1
+    assert "family_check" not in claim
 
 
-def test_with_the_policy_off_a_same_family_checker_may_claim(service, actors, seeded) -> None:
-    service.configure_risk_policy(actors["planner"], "project-1", checker_distinct_from_maker=False)
+def test_family_is_not_an_available_risk_policy_toggle(service, actors, seeded) -> None:
+    assert "checker_distinct_from_maker" not in service.get_risk_policy(actors["planner"], "project-1")
     _submitted(service, actors, "openai")
     _register(service, actors, "qa", "openai")
 
     claim = _claim_qa(service, actors)
 
-    assert claim["family_check"] == {"status": "disabled"}
+    assert claim["review"]["required_qa_reviews"] == 1
 
 
 def test_the_maker_family_is_frozen_with_the_candidate(service, actors, seeded) -> None:
@@ -270,8 +266,7 @@ def test_the_maker_family_is_frozen_with_the_candidate(service, actors, seeded) 
     _register(service, actors, "developer", "openai")
     _register(service, actors, "qa", "anthropic")
 
-    with pytest.raises(AuthorizationError):
-        _claim_qa(service, actors)
+    assert _claim_qa(service, actors)["ticket"]["status"] == "QA_IN_PROGRESS"
     with service.store.connection() as connection:
         stamped = connection.execute(
             "SELECT maker_model_family FROM candidates WHERE candidate_id = ?",
@@ -290,27 +285,25 @@ def test_a_candidate_without_a_stamp_falls_back_to_its_submitter(service, actors
     _register(service, actors, "developer", "google")
     _register(service, actors, "qa", "google")
 
-    with pytest.raises(AuthorizationError):
-        _claim_qa(service, actors)
+    assert _claim_qa(service, actors)["ticket"]["status"] == "QA_IN_PROGRESS"
 
 
-def test_the_family_is_re_checked_at_the_verdict(service, actors, seeded) -> None:
+def test_reregistration_does_not_change_verdict_authority(service, actors, seeded) -> None:
     _submitted(service, actors, "anthropic")
     _register(service, actors, "qa", "openai")
     claim = _claim_qa(service, actors)
-    # A re-registration after the claim must not carry a same-family verdict.
+    # Model provenance is not authorization, including after a claim.
     _register(service, actors, "qa", "anthropic")
     criterion = ticket(service, "DEV-142")["acceptance_criteria"][0]
 
-    with pytest.raises(AuthorizationError) as refused:
-        service.submit_qa_verdict(
+    result = service.submit_qa_verdict(
             actors["qa"], "DEV-142", claim["lease"]["lease_id"],
             _candidate_id(service), claim["ticket"]["version"], "failed",
             [finding(criterion, "failed")],
             context_snapshot_id=claim["current_context_snapshot_id"],
         )
-    assert refused.value.details["reason"] == "checker_same_family_as_maker"
-    assert ticket(service, "DEV-142")["status"] == "QA_IN_PROGRESS"
+    assert result["aggregate_verdict"] == "failed"
+    assert ticket(service, "DEV-142")["status"] == "REWORK"
 
 
 def _candidate_id(service) -> str:
@@ -329,16 +322,14 @@ def test_the_verdict_records_the_family_check_status(service, actors, seeded) ->
     verdict(service, actors, "DEV-142", "passed", [finding(c) for c in criteria])
 
     [verified] = events(service, "ticket.verified", "DEV-142")
-    assert verified["payload"]["family_check"] == "distinct"
+    assert verified["payload"]["family_check"] == "disabled"
 
 
-def test_turning_the_policy_back_on_refuses_again(service, actors, seeded) -> None:
-    service.configure_risk_policy(actors["planner"], "project-1", checker_distinct_from_maker=False)
-    service.configure_risk_policy(actors["planner"], "project-1", checker_distinct_from_maker=True)
+def test_policy_reconfiguration_does_not_restore_family_restrictions(service, actors, seeded) -> None:
+    service.configure_risk_policy(actors["planner"], "project-1", medium_max_files=2)
     _submitted(service, actors, "openai")
     _register(service, actors, "qa", "openai")
-    with pytest.raises(AuthorizationError):
-        _claim_qa(service, actors)
+    assert _claim_qa(service, actors)["ticket"]["status"] == "QA_IN_PROGRESS"
 
 
 def test_developer_and_integrator_claims_are_not_family_checked(service, actors, seeded) -> None:

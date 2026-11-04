@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 import re
 import tempfile
+import shutil
+import ast
 import tomllib
 
 from hoh_control_plane.domain import ValidationError
@@ -30,6 +32,42 @@ _SOURCE_IDENTITY_PROBE = (
 )
 _PYTHON_INTERPRETER_NAMES = frozenset({"python", "python3", "python.exe", "pythonw.exe"})
 _SOURCE_IDENTITY_PROBE_TIMEOUT_SECONDS = 30
+
+# Only certifies literal inline commands run with this identical isolated,
+# no-site startup. General module/dependency consumption remains UNKNOWN.
+_SOFTWARE_IDENTITY_PROBE = r"""
+import hashlib, json, pathlib, sys, sysconfig
+assert sys.implementation.name == 'cpython'
+assert sys.flags.isolated and sys.flags.no_site and 'site' not in sys.modules
+h = hashlib.sha256()
+def add(value):
+    data = value if isinstance(value, bytes) else value.encode()
+    h.update(len(data).to_bytes(8, 'big')); h.update(data)
+add(sys.version); add(pathlib.Path(sys.executable).read_bytes())
+add(repr((sys.flags.optimize, sys.flags.utf8_mode,
+          sys.stdout.encoding, sys.stderr.encoding,
+          sys.stdout.errors, sys.stderr.errors)))
+if sys.platform == 'win32':
+    import ctypes
+    buffer = ctypes.create_unicode_buffer(32768)
+    locate = ctypes.windll.kernel32.GetModuleFileNameW
+    locate.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint]
+    length = locate(sys.dllhandle, buffer, len(buffer))
+    if not length or length >= len(buffer):
+        raise ValueError('Unproved loaded runtime')
+    add(pathlib.Path(buffer.value).read_bytes())
+elif sysconfig.get_config_var('Py_ENABLE_SHARED'):
+    runtime = pathlib.Path(sysconfig.get_config_var('LIBDIR')) / sysconfig.get_config_var('LDLIBRARY')
+    add(runtime.read_bytes())
+for name, module in sorted(tuple(sys.modules.items())):
+    source = getattr(module, '__file__', None)
+    if source:
+        add(name); add(pathlib.Path(source).read_bytes())
+        cache = getattr(module, '__cached__', None)
+        if cache and pathlib.Path(cache).is_file():
+            add(pathlib.Path(cache).read_bytes())
+print(json.dumps({'schema': 2, 'digest': h.hexdigest()}))
+"""
 
 # Wave 7A: a run that failed because of the host, not the candidate. These are
 # recorded as infrastructure_failure, retried once with fewer xdist workers, and
@@ -208,10 +246,11 @@ class ProjectTestRunner:
                 artifact_mismatch=True,
                 environment_digest=self.environment_digest(command, resolved_source),
             )
+        execution_identity = self.execution_environment_digest(command, timeout_seconds, provenance_modules, environment)
         completed = None
         try:
             completed = run_managed(
-                command,
+                self._execution_command(command) if execution_identity else command,
                 cwd=worktree_path,
                 env=environment,
                 timeout=timeout_seconds,
@@ -257,7 +296,92 @@ class ProjectTestRunner:
             environment_digest=self.environment_digest(command, resolved_source),
             termination_reason=reason, capture_errors=capture_errors,
             stdout_truncated=stdout_truncated, stderr_truncated=stderr_truncated,
+            environment_manifest={"execution_environment_digest": execution_identity},
         )
+
+    @classmethod
+    def execution_environment_digest(cls, command, timeout_seconds, provenance_modules=None, environment=None):
+        """Stable host-controlled execution inputs, not reviewer identity or free memory.
+
+        Only a digest is retained. Worktree-local import paths are already bound
+        by candidate identity; their temporary directory names are not identity.
+        """
+        if not cls._attestable_command(command):
+            return None
+        environment = cls._build_environment("") if environment is None else environment
+        executable = shutil.which(command[0], path=environment.get("PATH"))
+        identity = None
+        if executable:
+            path = Path(executable).resolve()
+            try:
+                identity = str(path) if path.is_file() else None
+            except OSError:
+                pass  # Unavailable executables cannot produce a reusable pass.
+        if identity is None:
+            return None
+        try:
+            captured = subprocess.run([executable, '-I', '-S', '-B', '-c', _SOFTWARE_IDENTITY_PROBE],
+                env=environment, capture_output=True, text=True, timeout=20)
+            software = json.loads(captured.stdout) if captured.returncode == 0 else {}
+            if (not isinstance(software, dict) or software.get('schema') != 2
+                    or not isinstance(software.get('digest'), str)
+                    or not re.fullmatch(r'[0-9a-f]{64}', software['digest'])):
+                return None
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return None
+        material = {"schema": 3, "command": command, "timeout_seconds": timeout_seconds,
+                    "provenance_modules": provenance_modules or None, "executable": identity,
+                    "software": software['digest'], "platform": platform.platform(),
+                    "startup": "isolated-no-site-literal-v1",
+                    "python_environment": "normalized-no-inherited-python-controls-v1",
+                    "inputs": {key: environment.get(key) for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS")}}
+        return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
+
+    @classmethod
+    def _attestable_command(cls, command):
+        selected = cls._python_mode(command)
+        if selected is None:
+            return False
+        kind, mode, _ = selected
+        if kind != '-c' or command[mode] != '-c' or any(arg != '-B'
+                               for arg in command[1:mode]):
+            return False  # Unproved interpreter hooks/options are not reusable.
+        # Inline code can add arbitrary external software paths. Only literal,
+        # dependency-free statements have proved applicability here; other
+        # commands can execute, but cannot reuse an attestation of sys.path alone.
+        try:
+            source = command[mode + 1]
+            # Host AST constants can hide selected-compiler imports (e.g. \N).
+            # Restrict proof to plain ASCII source, not escapes or directives.
+            if (not isinstance(source, str) or len(source) > 1024 or not source.isascii()
+                    or "\\" in source or "#" in source):
+                return False
+            tree = ast.parse(source)
+            if any(isinstance(node, ast.Constant) and isinstance(node.value, int)
+                   and node.value.bit_length() > 64 for node in ast.walk(tree)):
+                return False  # Large integer compilation/formatting is outside this core-only fragment.
+            body = tree.body
+        except (ValueError, IndexError, SyntaxError):
+            return False
+        for node in body:
+            if isinstance(node, ast.Pass):
+                continue
+            if isinstance(node, ast.Assert) and isinstance(node.test, ast.Constant) and (
+                    node.msg is None or isinstance(node.msg, ast.Constant)):
+                continue
+            if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name) and node.value.func.id == 'print'
+                    and all(isinstance(arg, ast.Constant) for arg in node.value.args)
+                    and not node.value.keywords):
+                continue
+            return False
+        return True
+
+    @classmethod
+    def _execution_command(cls, command):
+        if cls._attestable_command(command):
+            return [command[0], '-I', '-S', '-B', *command[cls._python_mode(command)[1]:]]
+        return command
 
     @staticmethod
     def environment_digest(command: list[str], resolved_source: str | None) -> str:
@@ -306,13 +430,14 @@ class ProjectTestRunner:
         storage_ref = f"evidence://local/{candidate_id}/{test_run_id}.json"
         return storage_ref, str(report_path), checksum
 
-    def _build_environment(self, worktree_path: str) -> dict[str, str]:
+    @staticmethod
+    def _build_environment(worktree_path: str) -> dict[str, str]:
         environment = os.environ.copy()
         # A candidate test must not inherit the control-plane's bearer token map,
         # database DSN or agent identity. OS-level sandboxing is still required
         # for hostile code: removing env vars is not a filesystem boundary.
         for key in list(environment):
-            if (key.upper().startswith(("HOH_", "COV_CORE", "COVERAGE"))
+            if (key.upper().startswith(("HOH_", "COV_CORE", "COVERAGE", "PYTHON"))
                     or key.upper() in {'PYTHONPATH', 'PYTHONHOME', 'VIRTUAL_ENV',
                                        'PYTEST_ADDOPTS', 'PYTEST_PLUGINS', 'PYTHONSTARTUP'}):
                 environment.pop(key)
@@ -333,17 +458,48 @@ class ProjectTestRunner:
         if source_root.is_dir():
             environment['PYTHONPATH'] = str(source_root.resolve())
         environment['PYTHONNOUSERSITE'] = '1'
+        environment['PYTHONDONTWRITEBYTECODE'] = '1'
+        environment['PYTHONHASHSEED'] = '0'
         return environment
 
     @classmethod
-    def _pytest_arguments(cls, command):
+    def _python_mode(cls, command):
+        """Return selector, argv index and character offset before program argv."""
         if not command or not cls._looks_like_python_interpreter(command[0]):
             return None
-        try:
-            index = command.index("-m")
-        except ValueError:
+        index = 1
+        while index < len(command):
+            arg = command[index]
+            if arg == '--check-hash-based-pycs':
+                index += 2
+                continue
+            if arg.startswith('--check-hash-based-pycs='):
+                index += 1
+                continue
+            if not arg.startswith('-') or arg in {'-', '--'}:
+                return None  # Script, stdin, --, help/version or unsupported flag.
+            for offset, option in enumerate(arg[1:], 1):
+                if option in 'cm':
+                    return '-' + option, index, offset
+                if option in 'WX':
+                    # An attached operand consumes the rest, even if it contains m/c.
+                    index += int(offset == len(arg) - 1)
+                    break
+                if option not in 'bBdEiIOPqRsSuvx':
+                    return None
+            index += 1
+        return None
+
+    @classmethod
+    def _pytest_arguments(cls, command):
+        selected = cls._python_mode(command)
+        if selected is None or selected[0] != '-m':
             return None
-        return (command[1:index], command[index + 2:]) if command[index + 1:index + 2] == ["pytest"] else None
+        _, index, offset = selected
+        separate = offset == len(command[index]) - 1
+        module = command[index + 1:index + 2] if separate else [command[index][offset + 1:]]
+        flags = command[1:index] + ([command[index][:offset]] if offset > 1 else [])
+        return (flags, command[index + (2 if separate else 1):]) if module == ['pytest'] else None
 
     @staticmethod
     def _provenance_modules(worktree):
@@ -383,6 +539,7 @@ class ProjectTestRunner:
                     f"{error.__cause__ or error}")
         resources = resource_snapshot()
         manifest = {"schema_version": 1, "command": command, "command_digest": digest,
+                     "execution_environment_digest": self.execution_environment_digest(command, timeout, frozen_modules, environment),
                     "provenance_modules": modules, "provenance_modules_source": modules_source,
                     "host_resources": resources,
                     "environment_inputs": {k: environment[k] for k in
@@ -458,6 +615,8 @@ class ProjectTestRunner:
                     child = json.loads(report.read_text(encoding="utf-8"))
                 except (ValueError, OSError):
                     pass
+            # Preserve recorded pytest failure attribution across process exit overrides.
+            pytest_status = child.get("pytest_exit_status") or completed.returncode
             reason = "passed"
             if completed.cancelled:
                 reason = "cancelled"
@@ -472,7 +631,7 @@ class ProjectTestRunner:
             elif completed.returncode in _OOM_EXIT_CODES or child.get("resource_failures") or any(
                 marker in (completed.stderr or "")[-20_000:] or marker in (completed.stdout or "")[-20_000:]
                 for marker in _MEMORY_MARKERS
-            ) and completed.returncode != 0:
+            ) and pytest_status != 0:
                 reason = "resource_exhausted"
             elif completed.returncode < 0 or completed.returncode > 255:
                 reason = "native_termination"
@@ -480,19 +639,21 @@ class ProjectTestRunner:
                 reason = "artifact_mismatch"
             elif child.get("foreign_import_errors"):
                 reason = "foreign_import"
-            elif completed.returncode == 2 and not (child.get("test_counts") or {}).get("collection_errors"):
+            elif pytest_status == 2 and not (child.get("test_counts") or {}).get("collection_errors"):
                 reason = "pytest_interrupted"
-            elif completed.returncode == 3:
+            elif pytest_status == 3:
                 reason = "pytest_internal_error"
-            elif completed.returncode == 4:
+            elif pytest_status == 4:
                 reason = "pytest_usage_error"
             elif child.get("phase") != "session_finished":
                 reason = "incomplete_evidence"
-            elif completed.returncode != 0:
+            elif pytest_status != 0:
                 # 1: tests failed; 2 here: the candidate's own collection errors.
-                reason = "test_failure" if completed.returncode in (1, 2) else "test_configuration_error"
+                reason = "test_failure" if pytest_status in (1, 2) else "test_configuration_error"
             elif child.get("provenance_status") not in {"verified", "not_applicable"}:
                 reason = "incomplete_evidence"
+            elif any((child.get("test_counts") or {}).get(name) for name in ("failed", "collection_errors")):
+                reason = "test_failure"
             elif not (child.get("test_counts") or {}).get("passed"):
                 # Exit 0 with nothing passed (every test skipped or deselected)
                 # proves nothing; the candidate answers for it (wave 8A, R8).

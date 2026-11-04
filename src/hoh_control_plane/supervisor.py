@@ -16,7 +16,7 @@ import threading
 import time
 from uuid import uuid4
 
-from hoh_control_plane.domain import Actor, Role, ConflictError
+from hoh_control_plane.domain import Actor, Role, ConflictError, DomainError
 from hoh_control_plane.managed_process import run_managed
 from hoh_control_plane.resource_lock import exclusive_file_lock
 from hoh_control_plane.uncancellable import clear as clear_uncancellable, is_uncancellable
@@ -143,13 +143,28 @@ class Supervisor:
             return True  # The worker asks again before it touches Git.
 
     def _pending(self):
-        # Constants define all SQL identifiers. Limit each source before sorting.
-        pending = []
-        with self.service.store.connection() as db:
-            for kind, (table, key, _, _) in JOBS.items():
-                for row in db.execute(f"SELECT {key}, created_at FROM {table} WHERE status = 'QUEUED' ORDER BY created_at LIMIT ?", (self.max_workers * 2,)).fetchall():
-                    pending.append((row['created_at'], kind, row[key]))
-        return [(kind, identifier) for _, kind, identifier in sorted(pending)]
+        # Page past ineligible prefixes without retaining the whole queue. SQL
+        # identifiers and kind literals come only from JOBS, never job inputs.
+        sources = ' UNION ALL '.join(
+            f"SELECT created_at, '{kind}' AS kind, {key} AS identifier "
+            f"FROM {table} WHERE status = 'QUEUED'"
+            for kind, (table, key, _, _) in JOBS.items()
+        )
+        cursor = None
+        while True:
+            after = 'WHERE (created_at, kind, identifier) > (?, ?, ?)' if cursor else ''
+            parameters = (*cursor, self.max_workers * 2) if cursor else (self.max_workers * 2,)
+            with self.service.store.connection() as db:
+                rows = db.execute(
+                    f'SELECT created_at, kind, identifier FROM ({sources}) AS jobs {after} '
+                    'ORDER BY created_at, kind, identifier LIMIT ?', parameters,
+                ).fetchall()
+            if not rows:
+                return
+            for row in rows:
+                yield row['kind'], row['identifier']
+            last = rows[-1]
+            cursor = (last['created_at'], last['kind'], last['identifier'])
 
     def recover(self):
         with self.service.store.connection() as db:
@@ -230,8 +245,29 @@ class Supervisor:
                 return time.monotonic() - terminal_since >= TERMINAL_EXIT_GRACE_SECONDS
             with self.service.store.connection(immediate=True) as db:
                 db.execute('UPDATE worker_executions SET heartbeat_at = ? WHERE execution_id = ?', (now(), execution_id))
+                # Judge the job and its lease from this one transaction. The
+                # worker's final commit ends the job and deletes its lease
+                # together; read across it, the earlier RUNNING job and the
+                # missing lease looked like lost authority and killed a worker
+                # that had already finished.
+                table, key, _, _ = JOBS[kind]
+                job = db.execute(f'SELECT * FROM {table} WHERE {key} = ?', (identifier,)).fetchone()
+                if job is None:
+                    return True
+                if job['status'] not in {'QUEUED', 'RUNNING'}:
+                    return False  # The next guard applies terminal-exit grace.
+                job = dict(job)
                 if 'lease_id' not in job:
                     return False  # A main check belongs to no lease.
+                if kind == 'qa':
+                    try:
+                        current = self.service._qa_test_job(db, identifier)
+                        if current['status'] not in {'QUEUED', 'RUNNING'}:
+                            return False  # The next guard applies terminal-exit grace.
+                        self.service._qa_test_state_authority(db, current)
+                    except DomainError:
+                        return True
+                    return False
                 lease = db.execute('SELECT expires_at FROM leases WHERE lease_id = ?', (job['lease_id'],)).fetchone()
             return lease is None or datetime.fromisoformat(lease['expires_at'].replace('Z', '+00:00')) <= datetime.now(UTC)
         def holding():
@@ -309,7 +345,7 @@ class Supervisor:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             result = self.tick()
-            if not result['active'] and not self._pending():
+            if not result['active'] and not any(self._pending()):
                 return
             time.sleep(0.1)
         raise TimeoutError('Worker queue did not drain before the deadline')

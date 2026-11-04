@@ -311,12 +311,11 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
         @server.tool(name="planner.configure_risk_policy", structured_output=True)
         def planner_configure_risk_policy(
             project_id: str,
-            checker_distinct_from_maker: bool = True,
             high_risk_patterns: list[str] | None = None,
             medium_risk_patterns: list[str] | None = None,
             medium_max_files: int = 10,
         ) -> dict[str, Any]:
-            """Set maker/checker distinctness and the path patterns that make a candidate medium or high risk.
+            """Set risk patterns for future candidates, without lowering sensitive impact floors.
 
             Omitted pattern lists keep the built-in defaults. Medium needs an
             adversarial_review evidence item before merge; high also waits for
@@ -324,7 +323,6 @@ def register(server: FastMCP, service: ControlPlaneService, actor: Actor, invoke
             """
             arguments = {
                 "project_id": project_id,
-                "checker_distinct_from_maker": checker_distinct_from_maker,
                 "high_risk_patterns": high_risk_patterns,
                 "medium_risk_patterns": medium_risk_patterns,
                 "medium_max_files": medium_max_files,

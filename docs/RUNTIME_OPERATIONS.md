@@ -138,7 +138,10 @@ RAM, disk and network quotas remain future work.
 - Normal completion removes only its own snapshot after path checks. Crash
   leftovers remain for operator recovery. Safe orphan inventory/GC is not yet
   automated; never delete a whole worktree root or prune other agents' worktrees.
-- A managed worker losing lease/job authority or DB access is cancelled. Native
+- A managed worker losing lease/job authority or DB access is cancelled. The
+  supervisor judges the job and its lease from one write transaction: a job the
+  worker itself just ended (status and lease change in one commit) gets the
+  terminal-exit grace instead of a kill. Native
   process ownership cannot revoke filesystem rights from an arbitrary external
   chat running as the same OS account.
 

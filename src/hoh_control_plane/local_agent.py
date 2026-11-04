@@ -60,6 +60,11 @@ def worker_agent_text(server, role, model, model_family=None):
         f"brief names, use only MCP server `{server}`, and start with the brief's "
         f"`next_calls`. Work only that ticket and lease. Finish by returning only the "
         f"brief's `returns` fields plus any blockers, nothing from your transcript.\n"
+        "Read the frozen risk review plan and load only the brief's practice_skills. "
+        "Low/medium have one independent owner without mandatory leaf fanout. "
+        "High has two owners with exactly three read-only, non-recursive advisory leaves each; "
+        "resume recorded batches and wait for all reports. Share exact-candidate suite execution, "
+        "never reviewer conclusions or approval from another SHA.\n"
         + (f"Your model family is `{model_family}`; the dispatcher registers it with "
            f"`agent.register(model_family=\"{model_family}\", model=\"{model}\")`.\n"
            if model_family else "")
@@ -245,6 +250,8 @@ def make_prompts(root, project, instance='primary'):
     python = (root_path / '.venv' / 'Scripts' / 'python.exe').as_posix()
     focus = {
         'planner': (
+            'Use `$workflow` (Codex) or `/workflow` (Claude Code) for technical planning. '
+            'Follow the Planner technical-planning reference before technical release or revision. '
             'Run the Planner card after bootstrap and every event: sync repository, '
             'resolve reconciliation before any release/wait, handle Planner jobs and '
             'capability reviews, persist current priorities, then wait. Read the linked '

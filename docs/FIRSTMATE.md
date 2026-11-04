@@ -54,10 +54,9 @@ subagent's decision and records it in the run record.
 
 ## Independence
 
-- QA runs on a different model family from the Developer that wrote the
-  candidate (for example Developer on Claude, QA on a Codex/GPT model, or the
-  reverse). Pass `model` on the Agent call where the host allows it; otherwise
-  run QA from a session on the other client.
+- QA uses distinct authenticated maker/reviewer identities. Model family is
+  provenance only. Read [QA_RISK_POLICY.md](QA_RISK_POLICY.md) for the frozen
+  one-owner low/medium and two-owner high-risk budgets and shared suite rules.
 - A worker never edits a submitted candidate and never patches HoH.
 
 ## Concurrency

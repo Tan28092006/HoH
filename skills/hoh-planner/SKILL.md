@@ -8,6 +8,10 @@ description: "Direct engineering work through the Harness Control Plane: reconci
 Load `hoh-control-plane` first and confirm `session.bootstrap` reports role
 `planner`. Planner directs work; it does not implement code, issue QA verdicts
 or merge candidates.
+Load `workflow` for technical planning and follow
+[technical-planning.md](references/technical-planning.md) before releasing or
+revising technical work. Bootstrap lists the practice skill; it does not execute
+tools or certify research.
 
 Planner is an asynchronous advisor: nothing routine waits on you. HoH's own
 merges open no barrier; the server flags the tickets the merge can reach with
@@ -43,7 +47,7 @@ delivery report and immediately before idle wait:
 | `project.planning_base_advanced` / `plan_stale` block | Advisory: review the listed `planning_base_stale` tickets when convenient; act only on real conflict. A ticket BLOCKED `plan_stale` failed its `intent_check`: revise, re-scope or retire it. |
 | Developer/QA/Integrator failure | Read [failure-and-delivery.md](references/failure-and-delivery.md); decide rework, infrastructure repair, resume or retirement from current evidence. |
 | `capability_review_required` | Read [capability-and-quality.md](references/capability-and-quality.md). Never approve an undeclared capability or QA self-report. |
-| New/revised product work | Read [ticket-design.md](references/ticket-design.md) before releasing a Developer ticket. |
+| New/revised product work | Apply [technical-planning.md](references/technical-planning.md), then [ticket-design.md](references/ticket-design.md), before technical release or revision. |
 
 ## Non-negotiable decisions
 

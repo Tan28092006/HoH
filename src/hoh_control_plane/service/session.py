@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from hoh_control_plane import __version__
 from hoh_control_plane.domain import Actor, Role
+from hoh_control_plane.skill_plan import practice_skills_for
 from hoh_control_plane.service._common import _iso, _row, require_project
 
 
@@ -37,7 +38,15 @@ class SessionMixin:
                             "quality_contract": "claim-evidence-v1",
                             "planning_boundary": "every_observed_commit"},
                 "capabilities": self.capabilities(actor),
-                "required_skills": ["hoh-control-plane"] + ([] if actor.role == Role.ADMIN else [f"hoh-{actor.role.value}"]),
+                "required_skills": ["hoh-control-plane"] + ([] if actor.role == Role.ADMIN else [f"hoh-{actor.role.value}"])
+                                   + (practice_skills_for("planner") if actor.role == Role.PLANNER else []),
+                "review_policy": {"new_candidates": "risk-directed-v1", "low": "one owner, focused regressions",
+                                  "medium": "one owner, shared exact-candidate full suite",
+                                  "high": "two owners, three bounded advisory reviewers each",
+                                  "historical": "retain recorded candidate requirements",
+                                   "instruction": ("Use workflow for technical planning; read the Planner technical-planning reference"
+                                                   if actor.role == Role.PLANNER else
+                                                   "Read the frozen plan in worker_brief before loading practice skills")},
                 "projects": [{"project_id": p["project_id"], "name": p["name"]} for p in projects[:100]],
                 "projects_truncated": len(projects) > 100,
                 "selected_project_id": selected["project_id"] if selected else None,

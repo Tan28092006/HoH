@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -294,8 +296,9 @@ def test_a_hung_phase_is_still_stopped_after_the_hold_limit(tmp_path):
 def test_a_supervisor_stop_during_a_slow_branch_move_leaves_ref_and_tree_consistent(
     service, actors, seeded, tmp_path, monkeypatch
 ):
-    """The R6 acceptance check: fake Git sleeps 20 s while ``stopping`` is set."""
+    """Stop a real worker between its ref move and tree sync, without a fixed sleep."""
     from helpers.integration import _candidate_ready_for_integration, _claimed_for_integration
+    from hoh_control_plane import supervisor as supervisor_module
     from hoh_control_plane.supervisor import Supervisor
     from hoh_control_plane.uncancellable import is_uncancellable, marker_path
 
@@ -309,7 +312,21 @@ def test_a_supervisor_stop_during_a_slow_branch_move_leaves_ref_and_tree_consist
         context_snapshot_id=service.get_ticket_context(
             actors["integrator"], ticket["ticket_id"])["context_snapshot_id"])
     merge_job_id = queued["merge_job"]["merge_job_id"]
-    fake_git = _fake_git(tmp_path, 20)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(300)
+    fake_git = tmp_path / "gated_git.py"
+    fake_git.write_text(
+        "import socket, subprocess, sys\n"
+        "arguments = sys.argv[1:]\n"
+        "if 'read-tree' in arguments:\n"
+        f"    with socket.create_connection({listener.getsockname()!r}, timeout=300) as gate:\n"
+        "        gate.sendall(b'read-tree')\n"
+        "        assert gate.recv(1) == b'1'\n"
+        "sys.exit(subprocess.call(['git', *arguments]))\n",
+        encoding="utf-8",
+    )
     wrapper = tmp_path / "slow_git_worker.py"
     wrapper.write_text(
         "import runpy, sys\n"
@@ -320,22 +337,39 @@ def test_a_supervisor_stop_during_a_slow_branch_move_leaves_ref_and_tree_consist
         encoding="utf-8",
     )
 
-    with Supervisor(service, max_workers=1, worker_timeout=600) as supervisor:
+    with listener, Supervisor(service, max_workers=1, worker_timeout=600) as supervisor:
+        held_after_stop = threading.Event()
+        real_holding = supervisor_module.is_uncancellable
+
+        def observed_holding(*args):
+            holding = real_holding(*args)
+            if holding and supervisor.stopping.is_set():
+                held_after_stop.set()
+            return holding
+
+        monkeypatch.setattr(supervisor_module, "is_uncancellable", observed_holding)
         real_command = supervisor._worker_command
         monkeypatch.setattr(supervisor, "_worker_command", lambda *a: [
             sys.executable, str(wrapper), *real_command(*a)[3:]])
         supervisor.tick()
         assert ("merge", merge_job_id) in supervisor.active
-        deadline = time.monotonic() + 300
-        while not is_uncancellable(service.store.artifact_root, "merge", merge_job_id):
-            assert time.monotonic() < deadline, "the worker never reached the branch move"
+        gate, _ = listener.accept()
+        with gate:
+            gate.settimeout(300)
+            with gate.makefile("rb") as ready:
+                assert ready.read(9) == b"read-tree"
+            assert is_uncancellable(service.store.artifact_root, "merge", merge_job_id)
+            assert _git(repository, "rev-parse", "refs/heads/main") == candidate["candidate"]["commit_sha"]
+            assert not (repository / "src" / "checkout" / "retry.txt").exists()
+            # Both authority losses precede the real watchdog's hold observation.
+            with service.store.connection(immediate=True) as connection:
+                connection.execute("UPDATE leases SET expires_at = '2000-01-01T00:00:00+00:00' "
+                                   "WHERE lease_id = ?", (integration["lease"]["lease_id"],))
+            supervisor.stopping.set()
+            assert held_after_stop.wait(10), "watchdog did not observe the held phase after stop"
             assert not supervisor.active[("merge", merge_job_id)].done()
-            time.sleep(0.1)
-        # Shutdown arrives mid-move; the lease lapsing too must not cut it short.
-        supervisor.stopping.set()
-        with service.store.connection(immediate=True) as connection:
-            connection.execute("UPDATE leases SET expires_at = '2000-01-01T00:00:00+00:00' "
-                               "WHERE lease_id = ?", (integration["lease"]["lease_id"],))
+            # On failure, closing the socket instead unblocks and fails the child.
+            gate.sendall(b"1")
         supervisor.active[("merge", merge_job_id)].result(timeout=600)
 
     commit = candidate["candidate"]["commit_sha"]

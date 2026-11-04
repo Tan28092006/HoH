@@ -261,6 +261,7 @@ class CandidateMixin:
             self._stamp_candidate_maker(connection, candidate_id, actor.agent_id)
             for path in changed_paths:
                 connection.execute("INSERT INTO candidate_changed_paths (candidate_id, path) VALUES (?, ?)", (candidate_id, path))
+            self._freeze_review_plan(connection, candidate_id, job["project_id"], ticket, changed_paths)
             self._freeze_candidate_test_profile(connection, candidate_id, job["project_id"], base_modules, timestamp)
             next_version = _transition_ticket(
                 connection, job["ticket_id"], actor=actor, expected_version=ticket["version"],
@@ -453,6 +454,7 @@ class CandidateMixin:
                     "INSERT INTO candidate_changed_paths (candidate_id, path) VALUES (?, ?)",
                     (candidate_id, path),
                 )
+            self._freeze_review_plan(connection, candidate_id, project_id, ticket, changed_paths)
             self._freeze_candidate_test_profile(connection, candidate_id, project_id, base_modules, timestamp)
             next_version = _transition_ticket(
                 connection, ticket_id, actor=actor, expected_version=ticket["version"],

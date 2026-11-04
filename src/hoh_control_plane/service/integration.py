@@ -364,7 +364,11 @@ class IntegrationMixin:
             # One verdict writes its complete finding batch with one timestamp.
             # A fresh full QA pass after infra recovery supersedes the earlier
             # evidence gap for gate decisions; keep every historical row intact.
-            if findings:
+            reviews = self._candidate_qa_reviews(connection, evidence_candidate_id)
+            current_reviews = {r["review_id"] for r in reviews if r["status"] == "PASSED"}
+            if current_reviews:
+                findings = [finding for finding in findings if finding.get("review_id") in current_reviews]
+            elif findings:
                 latest_verdict = max(finding["created_at"] for finding in findings)
                 findings = [finding for finding in findings if finding["created_at"] == latest_verdict]
             current_evidence_ids = {ref for finding in findings for ref in finding["evidence_refs"]}
@@ -388,6 +392,8 @@ class IntegrationMixin:
                     (candidate_id,),
                 ).fetchone()
             )
+            suite_state = (self._candidate_suite_state(connection, candidate_id, profile["test_command"],
+                                                       profile["timeout_seconds"]) if profile else None)
             gates = [
                 _row(row)
                 for row in connection.execute(
@@ -403,6 +409,8 @@ class IntegrationMixin:
             qa_verified = _audit_event_has_field(
                 connection, ticket_id, "ticket.verified", "candidate_id", evidence_candidate_id
             )
+            if qa_verified:
+                self._require_qa_reviews_passed(connection, candidate)
         return {
             "ticket": ticket,
             "project": project,
@@ -413,6 +421,7 @@ class IntegrationMixin:
             "evidence": evidence,
             "test_runs": test_runs,
             "profile": profile,
+            "suite_state": suite_state,
             "gates": gates,
             "qa_verified": qa_verified,
         }
@@ -467,20 +476,7 @@ class IntegrationMixin:
                 "The candidate has no registered regression command to satisfy",
                 {"reason": "regression_run_missing"},
             )
-        # A rebased candidate has no run of its own until its gate executes the
-        # suite; the check after the gate (``_finish_gate_and_merge``) requires it.
-        digest = hashlib.sha256("\0".join(profile["test_command"]).encode()).hexdigest()
-        matching = [run for run in snapshot["test_runs"] if run["command_digest"] == digest]
-        if not matching and require_regression_run:
-            raise ReleasePolicyError(
-                "No registered regression run was recorded against this candidate",
-                {"reason": "regression_run_missing"},
-            )
-        if matching and not any(self._run_passed(run) for run in matching):
-            raise ReleasePolicyError(
-                "The registered regression run did not complete successfully",
-                {"reason": "regression_run_failed"},
-            )
+        self._require_regression_run(snapshot["suite_state"], required=require_regression_run)
 
         holds = [
             entry
@@ -503,6 +499,33 @@ class IntegrationMixin:
                     "A current integration hold blocks this candidate",
                     {"reason": "integration_hold", "entry_id": holds[-1]["entry_id"]},
                 )
+
+    def _require_regression_run(self, state, *, required=True):
+        job = state["qa_job"]
+        if job is not None:
+            if job["status"] in {"QUEUED", "RUNNING"}:
+                raise ReleasePolicyError("The newest registered regression attempt is still pending",
+                                         {"reason": "regression_run_pending"})
+            if (job["status"] != "COMPLETED" or job["test_run"] is None
+                    or job["test_run"]["command_digest"] != job["command_digest"]
+                    or not self._run_passed(job["test_run"])):
+                raise ReleasePolicyError("The newest registered regression attempt did not pass",
+                                         {"reason": "regression_run_failed"})
+        run = state["run"]
+        if run is None and required:
+            raise ReleasePolicyError("No registered regression run was recorded against this candidate",
+                                     {"reason": "regression_run_missing"})
+        if run is not None and not self._run_passed(run):
+            raise ReleasePolicyError("The registered regression run did not complete successfully",
+                                     {"reason": "regression_run_failed"})
+
+    def _require_current_regression(self, connection, snapshot):
+        profile = snapshot["profile"]
+        current = self._candidate_suite_state(connection, snapshot["candidate"]["candidate_id"],
+                                             profile["test_command"], profile["timeout_seconds"])
+        if current != snapshot["suite_state"]:
+            raise ReleasePolicyError("Regression evidence changed after policy validation",
+                                     {"reason": "regression_run_changed"})
 
     @staticmethod
     def _run_passed(run: dict[str, Any]) -> bool:
@@ -618,6 +641,8 @@ class IntegrationMixin:
             if candidate["candidate_id"] != snapshot["candidate"]["candidate_id"]:
                 raise ConflictError("Candidate changed after integration policy validation")
             self._refuse_self_review(connection, actor, candidate, "merge")
+            self._require_qa_reviews_passed(connection, candidate)
+            self._require_current_regression(connection, snapshot)
             # Risk tier gate (wave 7C3): medium needs adversarial review evidence,
             # high also needs policy.approve_high_risk on this candidate.
             self._require_risk_tier_cleared(connection, project_id, ticket, candidate)
@@ -722,12 +747,12 @@ class IntegrationMixin:
             return self.fail_queued_merge(merge_job_id, 'Project repository is required')
         try:
             with self.git_worktrees.repository_lock(repository['repository_path']):
-                return self._execute_queued_merge_locked(merge_job_id)
+                return self._execute_queued_merge_locked(merge_job_id, run_suite=run_suite)
         except ConflictError:
             with self.store.connection() as connection:
                 return self._merge_job(connection, merge_job_id)
 
-    def _execute_queued_merge_locked(self, merge_job_id: str) -> dict[str, Any]:
+    def _execute_queued_merge_locked(self, merge_job_id: str, *, run_suite: bool = True) -> dict[str, Any]:
         preflight_error: str | None = None
         outcome = "barrier_pending"
         with self.store.connection(immediate=True) as connection:
@@ -800,6 +825,25 @@ class IntegrationMixin:
         if reused is not None:
             return self._finish_gate_and_merge(
                 merge_job_id, job, actor, candidate, repository, project, reused, gate_mode="reused_qa_run")
+        if not run_suite:
+            try:
+                with self.store.connection(immediate=True) as connection:
+                    current = self._merge_job(connection, merge_job_id)
+                    current_ticket = self._ticket(connection, job["ticket_id"])
+                    if (current["status"] != "RUNNING" or current["candidate_id"] != job["candidate_id"]
+                            or current["expected_version"] != job["expected_version"] or current["lease_id"] != job["lease_id"]):
+                        raise ConflictError("Merge job changed while checking applicability")
+                    self._expect_version(current_ticket, job["expected_version"])
+                    self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
+                    self._require_repository_reconciled(connection, job["project_id"], job["ticket_id"])
+                    if (current_ticket["status"] != TicketStatus.MERGE_READY.value
+                            or current_ticket["candidate_commit"] != candidate["commit_sha"]):
+                        raise ConflictError("Merge artifact changed while checking applicability")
+                    connection.execute("DELETE FROM merge_intents WHERE merge_job_id=?", (merge_job_id,))
+                    connection.execute("UPDATE merge_jobs SET status='QUEUED',started_at=NULL WHERE merge_job_id=?", (merge_job_id,))
+                    return self._merge_job(connection, merge_job_id)
+            except DomainError as error:
+                return self.fail_queued_merge(merge_job_id, str(error))
         try:
             with self.git_worktrees.integration_checkout(
                 repository_path=repository["repository_path"], project_id=job["project_id"],
@@ -841,17 +885,19 @@ class IntegrationMixin:
 
         The candidate's one commit is cherry-picked onto current main in a
         private integration checkout. A clean result becomes a new derived
-        candidate (``derived_from``; parent = current main; same patch). When
-        the paths main changed since the old base are disjoint, by scope root,
-        from the candidate's paths, the QA verdict carries over
-        (``qa_evidence_from``) and this same merge job is re-queued, so the
-        normal gate executes the frozen suite on the rebased tree and the
-        landing is a compare-and-set ref update. Otherwise the derived
-        candidate goes to QA_READY. A conflict keeps today's rework path; the
+        candidate (``derived_from``; parent = current main; same patch), with
+        its own frozen review plan and QA_READY flow. Disjoint paths are
+        recorded for provenance, never permission to carry an old verdict.
+        Fresh QA and the normal frozen-suite/CAS gate precede any landing.
+        A conflict keeps today's rework path; the
         ``MAX_AUTO_REBASES``th + 1 drift blocks the ticket for Planner.
         Only drift onto a main HoH already observed is rebased: unobserved
         outside work still closes the project through the drift path.
         """
+        if candidate.get("qa_review_plan") or candidate.get("required_qa_reviews", 1) > 1:
+            # A new SHA cannot inherit this candidate's frozen owner approvals.
+            return self._complete_queued_merge(merge_job_id, False, current_main,
+                drift_reason="Mainline advanced; Developer must submit a new exact-artifact QA candidate.")
         repository_path = repository["repository_path"]
         with self.store.connection() as connection:
             ticket_scope = list(self._ticket(connection, job["ticket_id"]).get("file_scope") or [])
@@ -940,8 +986,7 @@ class IntegrationMixin:
                  f"refs/hoh/rebased/{job['ticket_id']}/{derived_id_hint}",
                  candidate["developer_claims"] if isinstance(candidate["developer_claims"], str)
                  else json.dumps(candidate["developer_claims"]),
-                 actor.agent_id, timestamp, timestamp, candidate["candidate_id"],
-                 (candidate.get("qa_evidence_from") or candidate["candidate_id"]) if carry_qa else None),
+                 actor.agent_id, timestamp, timestamp, candidate["candidate_id"], None),
             )
             # The patch is still the Developer's: the derived candidate keeps the
             # original maker's family, never the Integrator's (wave 7C3).
@@ -957,6 +1002,7 @@ class IntegrationMixin:
                 connection.execute(
                     "INSERT INTO candidate_changed_paths (candidate_id, path) VALUES (?, ?)",
                     (derived_id, path))
+            self._freeze_review_plan(connection, derived_id, job["project_id"], current_ticket, rebased_paths)
             connection.execute(
                 """INSERT INTO candidate_test_profiles
                        (candidate_id, test_command, timeout_seconds, configured_at, provenance_modules)
@@ -965,25 +1011,8 @@ class IntegrationMixin:
                 (derived_id, candidate["candidate_id"]))
             payload = {"candidate_id": derived_id, "derived_from": candidate["candidate_id"],
                        "commit_sha": rebased, "base_commit": current_main,
-                       "qa_reused": carry_qa, "main_changed_paths": main_paths[:50],
+                       "qa_reused": False, "scope_disjoint": carry_qa, "main_changed_paths": main_paths[:50],
                        "auto_rebase": rebases + 1, "merge_job_id": merge_job_id}
-            if carry_qa:
-                next_version = _transition_ticket(
-                    connection, job["ticket_id"], actor=actor, expected_version=current_ticket["version"],
-                    from_statuses=(TicketStatus.MERGE_READY,),
-                    changes={"candidate_commit": rebased, "base_commit": current_main,
-                             "updated_at": timestamp})
-                self._event(connection, actor, job["project_id"], "candidate.rebased", "ticket",
-                            job["ticket_id"], next_version, payload)
-                # Same job, same lease: the Integrator keeps polling it. The
-                # supervisor re-admits it through the test slot, since the
-                # derived candidate has no QA run of its own to reuse.
-                connection.execute("DELETE FROM merge_intents WHERE merge_job_id = ?", (merge_job_id,))
-                connection.execute(
-                    """UPDATE merge_jobs SET status = 'QUEUED', started_at = NULL, candidate_id = ?,
-                       expected_version = ? WHERE merge_job_id = ?""",
-                    (derived_id, next_version, merge_job_id))
-                return self._merge_job(connection, merge_job_id)
             next_version = _transition_ticket(
                 connection, job["ticket_id"], actor=actor, expected_version=current_ticket["version"],
                 from_statuses=(TicketStatus.MERGE_READY,),
@@ -1033,20 +1062,23 @@ class IntegrationMixin:
         same command on the same commit costs a full suite and proves nothing new.
         Only a QA job (not an earlier gate) with the same digest and timeout counts.
         """
-        digest = hashlib.sha256("\0".join(command).encode()).hexdigest()
         with self.store.connection() as connection:
-            row = connection.execute(
-                """
-                SELECT r.test_run_id FROM qa_test_runs r
-                JOIN qa_test_jobs j ON j.test_run_id = r.test_run_id
-                WHERE r.candidate_id = ? AND r.command_digest = ? AND j.timeout_seconds = ?
-                  AND r.exit_code = 0 AND r.timed_out = 0 AND j.status = 'COMPLETED'
-                  AND r.termination_reason = 'passed'
-                ORDER BY r.created_at DESC LIMIT 1
-                """,
-                (candidate_id, digest, timeout_seconds),
-            ).fetchone()
-        return None if row is None else row["test_run_id"]
+            observed = self._candidate_suite_state(connection, candidate_id, command, timeout_seconds)
+        if not self._qa_job_passed(observed["qa_job"]):
+            return None
+        captured = self._capture_qa_environment(candidate_id)
+        with self.store.connection() as connection:
+            state = self._candidate_suite_state(connection, candidate_id, command, timeout_seconds)
+            if state != observed:
+                return None
+            job = state["qa_job"]
+            candidate = _row(connection.execute("SELECT commit_sha FROM candidates WHERE candidate_id=?",
+                                                (candidate_id,)).fetchone())
+            environment_matches = self._qa_job_environment_matches(connection, job, captured=captured)
+        return (job["test_run_id"] if self._qa_job_passed(job) and candidate is not None
+                and environment_matches
+                and job["candidate_commit"] == candidate["commit_sha"]
+                and state["run"] is not None and self._run_passed(state["run"]) else None)
 
     def _finish_gate_and_merge(self, merge_job_id, job, actor, candidate, repository, project,
                                test_run_id: str, *, gate_mode: str) -> dict[str, Any]:
@@ -1067,6 +1099,8 @@ class IntegrationMixin:
                 self._expect_version(current_ticket, job["expected_version"])
                 outcome = "lease_expired"
                 self._require_active_lease(connection, actor, job["ticket_id"], job["lease_id"])
+                self._require_risk_tier_cleared(connection, job["project_id"], current_ticket, candidate)
+                self._require_current_regression(connection, current)
                 self._event(connection, actor, job["project_id"], "integration.gate_passed", "merge_job",
                     merge_job_id, job["expected_version"], {"candidate_id": job["candidate_id"],
                         "candidate_commit": candidate["commit_sha"], "test_run_id": test_run_id,

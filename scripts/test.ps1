@@ -28,7 +28,40 @@ if (-not $python) {
 }
 
 $PytestArgs = @($args)
-$fast = $PytestArgs -contains "--fast"
+# PowerShell 7 binds a -File argument that starts with '-' and contains ':' as
+# -name:value and hands the script two strings (--deselect=a::b arrives as
+# --deselect=a and :b; -x: as -x), which changed both the selection and the
+# coverage decision below. Windows PowerShell 5.1 keeps such an argument whole.
+# When this script is the process's -File target, its argv is the caller's
+# exact list; it must account for every bound value or the run is refused.
+if ($PSVersionTable.PSEdition -eq 'Core') {
+    $processArgs = [Environment]::GetCommandLineArgs()
+    $comparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    for ($index = 2; $index -lt $processArgs.Count; $index++) {
+        if ($processArgs[$index - 1] -notmatch '^-(f|fi|fil|file)$') { continue }
+        $target = [System.IO.Path]::GetFullPath($processArgs[$index])
+        if (-not [string]::Equals($target, $PSCommandPath, $comparison)) { continue }
+        $raw = @($processArgs | Select-Object -Skip ($index + 1))
+        $bound = 0
+        foreach ($argument in $raw) {
+            if ($bound -lt $PytestArgs.Count -and $argument -ceq $PytestArgs[$bound]) {
+                $bound += 1
+            } elseif ($bound + 1 -lt $PytestArgs.Count -and $argument -ceq "$($PytestArgs[$bound]):$($PytestArgs[$bound + 1])") {
+                $bound += 2
+            } elseif ($bound -lt $PytestArgs.Count -and $argument -ceq "$($PytestArgs[$bound]):") {
+                $bound += 1
+            } else {
+                throw "The process arguments do not match the arguments PowerShell bound."
+            }
+        }
+        if ($bound -ne $PytestArgs.Count) {
+            throw "The process arguments do not match the arguments PowerShell bound."
+        }
+        $PytestArgs = $raw
+        break
+    }
+}
+$fast =$PytestArgs -contains "--fast"
 $PytestArgs = @($PytestArgs | Where-Object { $_ -ne "--fast" })
 # A run that names tests or filters them is targeted; anything else is the full
 # suite and must clear the coverage gate (it is not in pyproject addopts, so a

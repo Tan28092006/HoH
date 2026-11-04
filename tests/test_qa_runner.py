@@ -118,12 +118,12 @@ def test_qa_cannot_queue_two_active_runs_for_one_frozen_candidate(
     ticket, _candidate, qa_claim = _candidate_waiting_for_qa(
         service, actors, seeded, tmp_path, [sys.executable, "-c", "print('passed')"]
     )
-    service.queue_project_tests(actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"])
-
-    with pytest.raises(ConflictError, match="active"):
-        service.queue_project_tests(
-            actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"]
-        )
+    first = service.queue_project_tests(actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"])
+    shared = service.queue_project_tests(actors["qa"], ticket["ticket_id"], qa_claim["lease"]["lease_id"])
+    assert shared["reused"] is True
+    assert shared["test_run"] == first["test_run"]
+    with service.store.connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM qa_test_jobs WHERE status IN ('QUEUED','RUNNING')").fetchone()[0] == 1
 
 
 def test_expiring_a_qa_lease_keeps_its_durable_test_job_but_requeues_the_ticket(
@@ -467,11 +467,7 @@ def test_artifact_mismatch_fails_the_job_without_a_candidate_verdict_and_allows_
 def test_concurrent_queue_project_tests_calls_never_create_duplicate_active_jobs(
     service, actors, seeded, tmp_path: Path
 ) -> None:
-    """Two threads racing to queue the same candidate's project tests must never
-    both succeed: SQLite's serialized writers plus the active-job guard leave
-    exactly one QUEUED job, and the loser sees the existing ConflictError -- not
-    a raw database error and not a second active job.
-    """
+    """Racing callers share one execution without swallowing storage errors."""
     ticket, _candidate, qa_claim = _candidate_waiting_for_qa(
         service, actors, seeded, tmp_path, [sys.executable, "-c", "print('passed')"]
     )
@@ -498,10 +494,11 @@ def test_concurrent_queue_project_tests_calls_never_create_duplicate_active_jobs
 
     successes = [result for result in results if isinstance(result, dict)]
     failures = [result for result in results if isinstance(result, Exception)]
-    assert len(successes) == 1, f"exactly one attempt should win the race: {results}"
-    assert len(failures) == 1
-    assert isinstance(failures[0], ConflictError)
-    assert "active project test run" in str(failures[0])
+    assert all(not thread.is_alive() for thread in threads)
+    assert failures == []
+    assert len(successes) == 2
+    assert sorted(bool(result.get("reused")) for result in successes) == [False, True]
+    assert successes[0]["test_run"] == successes[1]["test_run"]
     with service.store.connection() as connection:
         active_jobs = connection.execute(
             """

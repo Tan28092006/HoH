@@ -22,6 +22,7 @@ def test_risk_tiers_from_changed_paths():
     assert _classify(["src/hoh_control_plane/store_schema.py"]) == "high"
     assert _classify(["skills/hoh-qa/SKILL.md"]) == "high"
     assert _classify(["src/hoh_control_plane/domain.py"]) == "medium"
+    assert _classify(["src/hoh_control_plane/service/qa.py"]) == "high"
     assert _classify(["src/a.py", "src/b.py", "src/c.py", "src/d.py"]) == "medium"
     assert _classify(["src/a.py"]) == "low"
 

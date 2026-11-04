@@ -32,6 +32,18 @@ STORAGE_REF_CHARS = 1_000
 EVIDENCE_SCENARIO_REF_CHARS = 1_000
 DIGEST_CHARS = 128
 
+REVIEW_TASK_COUNT = 3
+REVIEW_MAX_PATHS = 8
+REVIEW_MAX_RELATED_PATHS = 3
+REVIEW_PATH_CHARS = 240
+REVIEW_QUESTION_CHARS = 600
+REVIEW_BRIEF_CHARS = 6_000
+NATIVE_TASK_ID_CHARS = 200
+ReviewTaskKey = Literal["A", "B", "C"]
+ReviewTaskState = Literal["running", "completed", "failed"]
+REVIEW_TASK_KEYS = frozenset(get_args(ReviewTaskKey))
+REVIEW_TASK_STATES = frozenset(get_args(ReviewTaskState))
+
 # --- Candidate submission (service.candidates.submit_candidate)
 MAX_DEVELOPER_CLAIMS = 50
 DEVELOPER_CLAIM_CHARS = 2_000
@@ -135,6 +147,18 @@ class ContractModel(BaseModel):
     """Unknown fields are refused, so a misspelt key fails instead of vanishing."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+class ReviewScopeInput(ContractModel):
+    task_key: ReviewTaskKey
+    paths: list[_text(REVIEW_PATH_CHARS, 1)] = Field(min_length=1, max_length=REVIEW_MAX_PATHS)
+    related_paths: list[_text(REVIEW_PATH_CHARS, 1)] = Field(default_factory=list, max_length=REVIEW_MAX_RELATED_PATHS)
+    question: _text(REVIEW_QUESTION_CHARS, 1)
+
+
+ReviewScopes = Annotated[list[ReviewScopeInput], Field(min_length=REVIEW_TASK_COUNT, max_length=REVIEW_TASK_COUNT)]
+NativeTaskId = _text(NATIVE_TASK_ID_CHARS, 1)
+ReviewRevision = Annotated[int, Field(ge=0, strict=True)]
 
 
 class ValidationScenarioInput(ContractModel):

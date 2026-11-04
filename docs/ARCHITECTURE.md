@@ -46,7 +46,7 @@ never above.
 | Service | `service/` (`ControlPlaneService`) | All workflow rules, role checks and state transitions |
 | Adapters | `git_worktrees`, `qa_runner`, `managed_process`, `resource_lock`, `resource_probe`, `capability_probe`, `pytest_probe`, `observability`, `uncancellable` | Git, subprocesses, file locks, host probes, invocation logging, the merge phase the supervisor must not cancel |
 | Storage | `store` (connection seam), `store_schema` (DDL), `store_migrations` (additive columns, indexes, SQLite rebuilds), `postgres_store`, `store_factory` | Schema, additive migrations, connections and transactions |
-| Domain | `domain`, `scopes`, `contracts` | Enums, `Actor`, error types, pure helpers; `contracts` holds the pydantic types and limits for structured agent writes (verdict, findings, evidence, developer claims, validation contracts) that MCP signatures, REST models and service checks all use |
+| Domain | `domain`, `scopes`, `contracts`, `skill_plan` | Enums, `Actor`, error types, pure helpers and risk-directed practice-skill routing; `contracts` holds the pydantic types and limits for structured agent writes (verdict, findings, evidence, developer claims, validation contracts) that MCP signatures, REST models and service checks all use |
 
 Known exceptions, listed in the boundary test: `store` sends the post-commit
 wake-up hint through `event_wait`; `service.repository_reconciliation` reads `barrier_age_seconds`
@@ -79,6 +79,7 @@ helper you are about to change across `service/`.
 | `leases.py` | Claim, heartbeat, expiry sweep, write-scope matching |
 | `candidates.py` | Candidate submission (sync and queued) and one-commit verification |
 | `qa.py` | QA test runs, evidence, verdicts |
+| `qa_review.py` | Owner-private bounded advisory briefs and resumable native task checkpoints |
 | `integration.py` | Queued merge, isolated gate, merge reconciliation, external landings |
 | `planner_jobs.py` | Planner jobs, interventions, failure reports and their fingerprints |
 | `worktrees.py` | Developer worktree provisioning |
@@ -89,7 +90,7 @@ helper you are about to change across `service/`.
 | `developer.py` | Progress and blockers |
 | `board.py` | Board, event lists and digests for the UI; `cycle_metrics` |
 | `usage.py` | `work.report_usage` and the dispatcher session soft cap |
-| `risk_policy.py` | Model families, checker distinct from maker, per-candidate risk tiers and `policy.approve_high_risk` |
+| `risk_policy.py` | Model provenance, maker identity, frozen risk-directed review plans and `policy.approve_high_risk` |
 | `idempotency.py` | Idempotency key reservation and replay |
 | `validation.py` | Version checks, audit `_event`, bounded-text validators |
 
@@ -189,13 +190,13 @@ helper you are about to change across `service/`.
 | Invariant | Enforced in | Tests |
 | --- | --- | --- |
 | Role sees only its tools | Per-credential FastMCP in `mcp/server.py` and `mcp/http_app.py`; `require_role` in the service | `test_mcp.py`, `test_mcp_transport_auth.py` |
-| One live lease per ticket; lease is the fencing token | Partial unique index in `store_schema.py`; `_claim`, `_require_active_lease` in `leases.py` | `test_postgres_concurrency.py`, `test_git_worktrees.py` |
+| One exclusive lease per ticket, or the frozen number of distinct QA owners; each lease fences its own candidate review | Partial unique indexes in `store_schema.py`; `_claim`, `_require_active_lease` in `leases.py`; `_qa_review_slot` and aggregate settlement in `qa.py` | `test_postgres_concurrency.py`, `test_git_worktrees.py`, `test_risk_review_plan.py` |
 | Overlapping write scopes never run at once: a scope stays reserved under a live Developer lease and while the ticket's candidate awaits QA or merge (QA_READY through MERGE_READY) | `_active_write_scope_conflict` and `_SCOPE_RESERVING_STATUSES` in `leases.py` | `test_workflow.py`, `test_write_scope_after_submit.py` |
 | No new claim, offer, submission or merge while a project-wide reconciliation is pending, or for a ticket a pending ticket-scoped one froze | `ExecutionGate` in `service/_common.py`: `require_open(connection, project_id, ticket_id)` (via `_require_repository_reconciled`) from leases, candidates, integration, worktrees, policy and authoring; `is_closed(..., ticket_id)` for offers in `discovery.py`. The frozen set (`_frozen_ticket_closure` in `repository_reconciliation.py`) is stored on the reconciliation row. `set_ticket_ready` does not call it | `test_team_quality_gates.py`, `test_repository_sync.py`, `test_scoped_barrier.py` |
 | Consequential writes name a fresh packet | `require_fresh_context` in `context.py`; `require_snapshot_id` in `service/_common.py`, called by `submit_candidate`, `queue_candidate_submission`, `submit_qa_verdict` and `queue_merge_candidate`, so REST and MCP both require it | `test_context_snapshots.py`, `test_team_quality_gates.py` |
 | Candidate is one ordinary commit on the frozen base | Candidate verification in `candidates.py` / `git_worktrees.py` | `test_candidate_submission.py` |
 | Every frozen candidate is pinned at `refs/hoh/candidates/<id>`; the pin never moves and is removed only once its ticket has been DONE for `CANDIDATE_PIN_RETENTION_SECONDS` | `pin_candidate` (create-only `update-ref`), `unpin_candidate` (compare-and-set) in `git_worktrees.py`; `_pin_frozen_candidate` in `candidates.py`, after each freeze; `sync_candidate_pins` in `repository_sweep.py` repairs missed pins and applies retention | `test_candidate_pins.py` |
-| A drifted queued candidate is rebased server-side into a derived candidate (`derived_from`) that lands only after the frozen suite passes on it, by compare-and-set; QA carries over only when main's changed paths miss the candidate's scope roots; at most `MAX_AUTO_REBASES` per ticket | `_auto_rebase_drifted` in `integration.py`; `rebase_candidate`, `cas_fast_forward` in `git_worktrees.py` | `test_auto_rebase.py` |
+| New-plan or dual-owner base drift returns to Developer. The historical single-owner Git rebase path publishes a new frozen plan and fresh QA-ready identity, never inherited approval; frozen-suite/CAS protections remain | `_auto_rebase_drifted`, `_record_rebased_candidate` in `integration.py`; `rebase_candidate`, `cas_fast_forward` in `git_worktrees.py` | `test_auto_rebase.py`, `test_w7_auto_rebase.py`, `test_audit_repairs.py` |
 | Merge only the current candidate after a fresh QA pass and isolated gate | `integration.py` queued merge and `merge_intents` reconciliation | `test_integration_async_gate.py`, `test_integration_release_policy.py` |
 | Git is observed without a waiting Planner; a candidate already on main (ancestry or patch-id) is recorded ungated by `system:sweep`, never as QA approval; a merge job recovery cannot settle reaches Planner once | `sweep_repositories` and `_flag_candidates_already_on_main` in `repository_sweep.py`, called by `scheduler.sweep_once`; `equivalent_landing` in `git_worktrees.py`; throttle `REPOSITORY_OBSERVE_SECONDS` on `project_repositories.observed_at`, shared with `event_wait`; `close_stuck_merge_job` in `integration.py` | `test_repository_sweep.py` |
 | No merge starts while the project's merge queue is paused (red main, failure budget, hourly budget) | `MergeQueueGuard` in `service/run_guardrails.py`: `require_open` in `queue_merge_candidate`; `merge_queue_admits` in `execute_queued_merge` and `Supervisor.tick` | — |
@@ -209,7 +210,7 @@ helper you are about to change across `service/`.
 | Agents read 12-character SHAs; the store keeps full ones; a commit input is resolved before comparison | `agent_facing` in `_common.py` (packets in `context.py`, results in `mcp/invoke.py`); `_full_commit` in `validation.py` | `test_short_shas.py` |
 | A claim hands the dispatcher only ticket identity, lease and a self-contained brief naming the project, under a size ceiling; QA sees Developer claims only by reference; packets name each author | `_worker_brief`, `_claimed_ticket_identity` and `MAX_CLAIM_RESULT_CHARS` in `leases.py`; `_compact_artifacts` and `_SECTION_SOURCES` in `context.py` | `test_worker_brief.py`, `test_claim_result.py`, `test_context_provenance.py` |
 | Skill text names real tools and stays small | `tests/test_skill_assets.py` | — |
-| QA's model family differs from the maker's while `checker_distinct_from_maker` is on; unknown is allowed and marked `family_unverified` | `_maker_checker_family_check` in `service/risk_policy.py`, called by `_claim` (QA) in `leases.py` and `submit_qa_verdict` in `qa.py`; the maker's family is stamped on `candidates` at freeze | `test_risk_policy.py` |
+| New candidates freeze their risk-directed owner/advisory budget; historical counts stay intact; maker identity is never a reviewer, regardless of model provenance | `_freeze_review_plan`, `_refuse_self_review` in `service/risk_policy.py`; owner slots/settlement in `qa.py`, advisory checkpoints in `qa_review.py`; [QA_RISK_POLICY.md](QA_RISK_POLICY.md) owns the policy | `test_risk_review_plan.py`, `test_w7_model_family.py` |
 | A medium-risk candidate merges only with `adversarial_review` evidence, a high-risk one also only after `policy.approve_high_risk` on that candidate | `_require_risk_tier_cleared` in `service/risk_policy.py`, called by `queue_merge_candidate` in `integration.py` | `test_risk_policy.py` |
 
 ## Design decisions
@@ -455,33 +456,37 @@ with the ordinary tools.
   `min(CPUs, min(free commit, free physical) / 600 MB)` workers, at least one,
   from `resource_probe`; the frozen command and digest are unchanged and the
   manifest records `xdist_workers` requested and effective.
-### Maker/checker families and risk tiers (wave 7C3)
+### Risk-directed review plans
 
 - **Families.** `agent.register(model_family, model?)` stores the family on
   `agent_presence`; `local_agent setup --model` derives it (`--model-family`
   overrides) and a stdio server registers it when the agent omits it. The
   maker's family is copied onto `candidates.maker_model_family` at freeze, so a
-  later re-registration cannot change who made it; a candidate without one falls
-  back to its submitter's presence.
-- **Checker distinct from maker** is a project policy
-  (`project_risk_policies.checker_distinct_from_maker`, default on, set with
-  `planner.configure_risk_policy`). A QA claim, and the verdict write, are
-  refused when the families are equal. An unknown family, or `other` on either
-  side, is allowed and recorded as `family_unverified` on the claim event, the
-  verdict event and the evidence bundle: refusing it would lock out every agent
-  that predates the field. The intent-check reviewer is a QA claim, so it is
-  bound by the same rule.
+  later re-registration cannot change that provenance. A missing stamp stays
+  unknown; it does not affect reviewer authorization.
+- **Independence** is authenticated maker/reviewer identity, not model family.
+  This follows installed 0.3.35. A maker cannot claim, judge or merge its candidate.
+  New low/medium candidates require one owner without mandatory fanout. High
+  requires two owners with three bounded advisory reviewers each. Counts are
+  frozen at submission and enforced by owner slots and checkpoint guards.
 - **Risk tier** is computed, never declared: from the candidate's changed paths
   once one exists, else from the write scope. `high` matches the project's high
   patterns (default: store schema and migrations, auth, credentials, `deploy/`,
   `skills/`, `docs/spec/`); `medium` matches the medium patterns (shared core
   modules) or changes more than `medium_max_files` (10) files; the rest is
-  `low`. The tier is in every packet as `ticket.risk` and in `worker_brief`.
+  `low`. Sensitive authorization/data/concurrency/policy paths have a mandatory
+  high floor for new candidates. The tier is frozen in `qa_review_plan`, then
+  appears in every packet as `ticket.risk` and in `worker_brief`.
 - **Gate.** Low needs the suite and scenarios. Medium also needs an evidence
   item of type `adversarial_review` on the candidate. High needs that and a
   `policy.approve_high_risk(ticket_id, reason)` record (Planner or Admin) bound
   to the current candidate, so a rework needs a fresh sign-off. The merge queue
   refuses with `adversarial_review_missing` or `high_risk_signoff_missing`.
+  The registered regression command still applies. Owners share one active or
+  current passing exact-candidate suite; a newer attempt fences old green evidence.
+  Historical candidates keep their recorded counts and null plans. New-plan or
+  dual-owner drift returns to Developer, not a server rebase carrying old approvals.
+  [QA_RISK_POLICY.md](QA_RISK_POLICY.md) owns the complete current contract.
 
 ### Liveness: nothing waits silently (wave 8B)
 

@@ -1128,8 +1128,8 @@ class GitWorktreeManager:
         """The default-branch commit whose own diff equals the candidate's, or None.
 
         Work applied as a diff or cherry-picked lands under a different commit, so
-        ancestry misses it. ``git diff base candidate`` is compared, by stable
-        patch-id, with each recent non-merge commit's diff against its parent.
+        ancestry misses it. Stable patch-id selects possible matches; exact blob,
+        mode and path changes confirm them because patch-id ignores whitespace.
         Any Git failure answers None: not proven is not landed.
         """
         try:
@@ -1143,6 +1143,8 @@ class GitWorktreeManager:
             if not wanted:
                 return None
             target = wanted[0][0]
+            exact = self._git(repository, "diff", "--raw", "--no-abbrev", "--no-renames",
+                              "--no-ext-diff", base, candidate).stdout
             history = self._git(
                 repository, "log", "-p", "--no-color", "--no-ext-diff", "--no-merges",
                 f"-n{int(limit)}", "--format=commit %H",
@@ -1153,7 +1155,10 @@ class GitWorktreeManager:
                 return None
             for patch_id, commit in self._patch_ids(repository, history.stdout):
                 if patch_id == target and commit != candidate:
-                    return commit
+                    landed = self._git(repository, "diff", "--raw", "--no-abbrev", "--no-renames",
+                                       "--no-ext-diff", f"{commit}^", commit).stdout
+                    if landed == exact:
+                        return commit
         except (ValidationError, OSError, subprocess.SubprocessError):
             return None
         return None

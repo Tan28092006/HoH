@@ -32,6 +32,13 @@ Start with: “Use $hoh-control-plane and $hoh-developer. Call session.bootstrap
 continue my authorized project work; resume an existing lease/job first.”
 Choose the role matching your credential. A client without filesystem/Git/shell
 capabilities can plan/observe but cannot locally implement code merely by authenticating.
+Planner bootstrap additionally routes `workflow`; generated Planner prompts
+explicitly request it for technical planning. The Planner reference requires
+source/contracts/tests and fresh graph-backed dependency/scope/validation research,
+with missing tools or coverage recorded as unresolved. Only applicable planning
+stages apply, not implementation, QA or merge/deploy. The kit ships the Planner
+reference, not the external workflow skill or graph tools; routing is instruction,
+not attestation that tools ran. No global activation policy or permissions change.
 
 For colocated development, the agent must access the service's assigned worktree.
 For agent_workspace, the operator must supply Git access and a delivery/fetch path

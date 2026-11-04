@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from hoh_control_plane import scopes
+from hoh_control_plane.skill_plan import practice_skills_for, review_delegation_for
 from hoh_control_plane.service._common import (
     Actor,
     Any,
@@ -83,6 +84,8 @@ def _bounded_claim_result(result: dict[str, Any]) -> dict[str, Any]:
     }
     if "family_check" in result:
         bounded["family_check"] = result["family_check"]
+    if "review" in result:
+        bounded["review"] = result["review"]
     return bounded
 
 
@@ -96,6 +99,9 @@ class LeaseMixin:
             lease = self._lease(connection, lease_id)
             if lease["agent_id"] != actor.agent_id or lease["role"] != actor.role.value:
                 raise AuthorizationError("Lease belongs to another actor")
+            require_project(actor, self._project_for_ticket(connection, lease["ticket_id"]))
+            if actor.role is Role.QA:
+                self._require_active_lease(connection, actor, lease["ticket_id"], lease_id)
             timestamp = _now()
             if datetime.fromisoformat(lease["expires_at"].replace("Z", "+00:00")) <= timestamp:
                 raise ConflictError("Lease has expired", {"reason": "lease_expired"})
@@ -134,8 +140,16 @@ class LeaseMixin:
                 if not self._lease_owns_ticket_state(lease, ticket):
                     self._retire_expired_jobs(connection, lease)
                     connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease["lease_id"],))
+                    connection.execute("UPDATE qa_reviews SET status='EXPIRED', completed_at=? "
+                                       "WHERE lease_id=? AND status='IN_PROGRESS'", (_iso(), lease["lease_id"]))
                     self._event(connection, actor, project_id, "lease.orphan_retired", "ticket",
                                 ticket["ticket_id"], ticket["version"], {"state_preserved": ticket["status"]})
+                    continue
+                if lease["role"] == Role.QA.value:
+                    self._expire_qa_lease(connection, actor, lease, ticket, project_id)
+                    recovered = self._ticket(connection, ticket["ticket_id"])
+                    requeued.append({"ticket_id": ticket["ticket_id"], "project_id": project_id,
+                                     "status": recovered["status"], "version": recovered["version"]})
                     continue
                 fallback = (
                     TicketStatus.MERGE_READY
@@ -192,12 +206,18 @@ class LeaseMixin:
         # These workers reauthorize before publishing. Fence their old DB jobs
         # as the lease is retired, otherwise the partial unique indexes prevent
         # every replacement from queueing work indefinitely after a crash.
-        for table in ("worktree_provision_jobs", "candidate_submission_jobs", "qa_test_jobs"):
+        for table in ("worktree_provision_jobs", "candidate_submission_jobs"):
             connection.execute(
                 f"UPDATE {table} SET status = 'FAILED', completed_at = ?, error_message = ? "
                 "WHERE lease_id = ? AND status IN ('QUEUED', 'RUNNING')",
                 (_iso(), "Owning lease expired; replacement work requires a new authorized job.", lease["lease_id"]),
             )
+        connection.execute("""UPDATE qa_test_jobs SET status='FAILED', completed_at=?, error_message=?
+            WHERE lease_id=? AND status IN ('QUEUED', 'RUNNING') AND NOT EXISTS (
+                SELECT 1 FROM qa_reviews r JOIN leases l ON l.lease_id=r.lease_id
+                WHERE r.candidate_id=qa_test_jobs.candidate_id AND r.status='IN_PROGRESS'
+                  AND l.lease_id != ? AND l.expires_at > ?)""",
+            (_iso(), "Owning lease expired; no active reviewer remains.", lease["lease_id"], lease["lease_id"], _iso()))
         # A running merge may already have changed Git. Keep that record for
         # reconciliation; blindly retrying it could duplicate an external effect.
         connection.execute(
@@ -324,8 +344,15 @@ class LeaseMixin:
     ) -> dict[str, Any]:
         if not 30 <= lease_seconds <= 3600:
             raise ValidationError("Lease duration must be between 30 and 3600 seconds")
+        if actor.role is Role.QA:
+            allowed_statuses = allowed_statuses | {TicketStatus.QA_IN_PROGRESS}
+            # Expiry recovery must commit even when it makes this claim stale.
+            with self.store.connection(immediate=True) as connection:
+                self._authorized_ticket(connection, actor, ticket_id)
+                self._expire_lease(connection, ticket_id)
         with self.store.connection(immediate=True) as connection:
-            self._expire_lease(connection, ticket_id)
+            if actor.role is not Role.QA:
+                self._expire_lease(connection, ticket_id)
             ticket, project_id = self._authorized_ticket(connection, actor, ticket_id)
             self._require_repository_reconciled(connection, project_id, ticket_id)
             self._expect_version(ticket, expected_version)
@@ -344,10 +371,17 @@ class LeaseMixin:
                         "QA work until Planner resolves that job",
                         {"reason": "qa_machine_quarantined"},
                     )
-            family_check = (
-                self._maker_checker_family_check(connection, actor, project_id, ticket_id)
-                if actor.role is Role.QA else None
-            )
+            review_candidate = None
+            review_slot = None
+            if actor.role is Role.QA:
+                review_candidate = self._current_qa_candidate(connection, ticket)
+                review_slot = self._qa_review_slot(connection, review_candidate, actor.agent_id)
+                presence = connection.execute("SELECT capacity FROM agent_presence WHERE agent_id=?",
+                                              (actor.agent_id,)).fetchone()
+                active_count = connection.execute("SELECT COUNT(*) FROM leases WHERE agent_id=? AND expires_at>?",
+                                                  (actor.agent_id, _iso())).fetchone()[0]
+                if presence is not None and active_count >= presence["capacity"]:
+                    raise ConflictError("Agent has no free review capacity", {"reason": "agent_capacity_exhausted"})
             if actor.role in {Role.QA, Role.INTEGRATOR} and ticket.get("candidate_commit"):
                 self._refuse_self_review(connection, actor, _row(connection.execute(
                     "SELECT * FROM candidates WHERE ticket_id = ? AND commit_sha = ? "
@@ -356,8 +390,10 @@ class LeaseMixin:
                 ).fetchone()), "claim")
             existing = connection.execute(
                 "SELECT * FROM leases WHERE ticket_id = ?", (ticket_id,)
-            ).fetchone()
-            if existing:
+            ).fetchall()
+            if existing and (actor.role is not Role.QA or any(
+                lease["role"] != Role.QA.value or lease["agent_id"] == actor.agent_id for lease in existing
+            )):
                 raise ConflictError("Ticket is already leased")
             if TicketStatus(ticket["status"]) not in allowed_statuses:
                 raise ConflictError(f"Ticket cannot be claimed from {ticket['status']}")
@@ -398,6 +434,16 @@ class LeaseMixin:
                     _iso(timestamp + timedelta(seconds=lease_seconds)),
                 ),
             )
+            review = None
+            if review_candidate is not None:
+                review_id = _id(connection, "review")
+                connection.execute("""INSERT INTO qa_reviews
+                    (review_id, candidate_id, ticket_id, slot, reviewer_id, lease_id, status, started_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 'IN_PROGRESS', ?)""",
+                    (review_id, review_candidate["candidate_id"], ticket_id, review_slot,
+                     actor.agent_id, lease_id, _iso(timestamp)))
+                review = {"review_id": review_id, "candidate_id": review_candidate["candidate_id"],
+                          "slot": review_slot, "required_qa_reviews": review_candidate["required_qa_reviews"]}
             next_version = _transition_ticket(
                 connection, ticket_id, actor=actor, expected_version=ticket["version"],
                 from_statuses=allowed_statuses,
@@ -411,9 +457,7 @@ class LeaseMixin:
                 "ticket",
                 ticket_id,
                 next_version,
-                {"lease_id": lease_id, **(
-                    {"family_check": family_check} if family_check is not None else {}
-                )},
+                {"lease_id": lease_id, **({"review": review} if review else {})},
             )
             self._mark_queue_claimed(connection, ticket_id, actor.agent_id, timestamp)
             claimed = self._ticket(connection, ticket_id)
@@ -426,8 +470,8 @@ class LeaseMixin:
                 # inventing one here would name a packet nobody ever read.
                 "context_snapshot_id": context_snapshot_id,
             }
-            if family_check is not None:
-                result["family_check"] = family_check
+            if review is not None:
+                result["review"] = review
         # The packet ticket.get_context returns right now, compiled and recorded
         # after the claim committed: an agent can write from it without spending
         # a round trip and a full packet on re-reading.
@@ -479,6 +523,8 @@ class LeaseMixin:
                 (project_id,),
             ).fetchone())
             risk = self._ticket_risk(connection, project_id, ticket)
+            review = _row(connection.execute("SELECT review_id, slot FROM qa_reviews WHERE lease_id=?",
+                                             (lease_id,)).fetchone())
         ids = f'ticket_id="{ticket_id}", lease_id="{lease_id}"'
         # The claimed status names the work, whoever holds the lease (an Admin may).
         role = {
@@ -502,14 +548,18 @@ class LeaseMixin:
             returns = ["submission_id", "commit_sha", "status", "blockers"]
         elif role is Role.QA:
             candidate_id = candidate["candidate_id"] if candidate else "<candidate_id>"
+            if (risk.get("review_plan") or {}).get("advisory_reviewers_per_owner"):
+                calls += [f"qa.get_review_batch({ids})",
+                          f"qa.prepare_review_batch({ids}, scopes=<A/B/C, only if absent>)"]
             calls += [
                 f"qa.run_project_tests({ids})",
                 f"qa.get_project_test_run({ids}, test_run_id=<test_run_id>) until terminal",
+                f'ticket.get_context(ticket_ref="{ticket_id}") immediately before verdict',
                 f'qa.submit_verdict({ids}, candidate_id="{candidate_id}", '
-                f'expected_version={version}, verdict=<passed|failed>, findings=[...], '
-                f'context_snapshot_id="{snapshot_id}")',
+                'expected_version=<packet version>, verdict=<passed|failed>, findings=[...], '
+                'context_snapshot_id=<fresh packet>)',
             ]
-            returns = ["verdict", "evidence_bundle.candidate_id", "planner_job_id", "blockers"]
+            returns = ["review_id", "verdict", "aggregate_verdict", "evidence_bundle.candidate_id", "planner_job_id", "blockers"]
         else:
             calls += [
                 f"integrator.merge_candidate({ids}, expected_version={version}, "
@@ -524,6 +574,7 @@ class LeaseMixin:
             "lease_id": lease_id,
             "context_snapshot_id": snapshot_id,
             "skills": ["hoh-control-plane", f"hoh-{role.value}"],
+            "practice_skills": practice_skills_for(role.value, risk["tier"]),
             "next_calls": calls,
             "returns": returns,
             # What this ticket's risk tier requires before merge (wave 7C3).
@@ -533,6 +584,12 @@ class LeaseMixin:
         if worktree is not None:
             brief["worktree_path"] = worktree["worktree_path"]
             brief["branch_ref"] = worktree["branch_ref"]
+        if role is Role.QA:
+            brief["review_plan"] = risk.get("review_plan")
+            brief["review_delegation"] = review_delegation_for(risk.get("review_plan"))
+            if review:
+                brief["review_id"] = review["review_id"]
+            brief["worktree_access"] = "read_only"
         return brief
 
     def _authorized_ticket(
@@ -543,14 +600,19 @@ class LeaseMixin:
         return self._ticket(connection, ticket_id), project_id
 
     def _expire_lease(self, connection: Connection, ticket_id: str) -> None:
-        lease = connection.execute(
-            "SELECT * FROM leases WHERE ticket_id = ?", (ticket_id,)
-        ).fetchone()
-        if lease and datetime.fromisoformat(lease["expires_at"].replace("Z", "+00:00")) <= _now():
+        expired = connection.execute(
+            "SELECT * FROM leases WHERE ticket_id = ? AND expires_at <= ?", (ticket_id, _iso())
+        ).fetchall()
+        for lease in expired:
+            if lease["role"] == Role.QA.value:
+                recovery = Actor("lease-recovery", Role.ADMIN, frozenset({"*"}))
+                self._expire_qa_lease(connection, recovery, dict(lease), self._ticket(connection, ticket_id),
+                                      self._project_for_ticket(connection, ticket_id))
+                continue
             if connection.execute("SELECT 1 FROM merge_jobs WHERE lease_id = ? AND status = 'RUNNING'", (lease['lease_id'],)).fetchone():
                 raise ConflictError('Interrupted merge requires reconciliation before lease takeover')
             self._retire_expired_jobs(connection, dict(lease))
-            connection.execute("DELETE FROM leases WHERE ticket_id = ?", (ticket_id,))
+            connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease["lease_id"],))
             current = self._ticket(connection, ticket_id)
             if not self._lease_owns_ticket_state(dict(lease), current):
                 return
@@ -575,6 +637,26 @@ class LeaseMixin:
                 self._ticket(connection, ticket_id),
             )
 
+    def _expire_qa_lease(self, connection, actor, lease, ticket, project_id):
+        self._retire_expired_jobs(connection, lease)
+        connection.execute("DELETE FROM leases WHERE lease_id = ?", (lease["lease_id"],))
+        connection.execute("UPDATE qa_reviews SET status='EXPIRED', completed_at=? "
+                           "WHERE lease_id=? AND status='IN_PROGRESS'", (_iso(), lease["lease_id"]))
+        if ticket["status"] != TicketStatus.QA_IN_PROGRESS.value:
+            return
+        candidate = self._current_qa_candidate(connection, ticket)
+        outcome = self._settle_qa_reviews(connection, actor, ticket, project_id, candidate)
+        if outcome["aggregate_verdict"] == "pending":
+            active = connection.execute("SELECT 1 FROM leases WHERE ticket_id=? AND role='qa'",
+                                        (ticket["ticket_id"],)).fetchone()
+            status = TicketStatus.QA_IN_PROGRESS if active else TicketStatus.QA_READY
+            version = _transition_ticket(connection, ticket["ticket_id"], actor=actor,
+                expected_version=ticket["version"], from_statuses=(TicketStatus.QA_IN_PROGRESS,),
+                changes={"status": status, "updated_at": _iso()})
+            self._event(connection, actor, project_id, "lease.expired_requeued", "ticket", ticket["ticket_id"],
+                        version, {"requeued_to": status.value, "previous_role": lease["role"]})
+            self._queue_ticket(connection, actor, project_id, self._ticket(connection, ticket["ticket_id"]))
+
     def _require_active_lease(
         self, connection: Connection, actor: Actor, ticket_id: str, lease_id: str
     ) -> dict[str, Any]:
@@ -586,6 +668,16 @@ class LeaseMixin:
         expires_at = datetime.fromisoformat(lease["expires_at"].replace("Z", "+00:00"))
         if expires_at <= _now():
             raise ConflictError("Lease has expired", {"reason": "lease_expired"})
+        if actor.role is Role.QA:
+            ticket = self._ticket(connection, ticket_id)
+            candidate = self._current_qa_candidate(connection, ticket)
+            review = _row(connection.execute(
+                "SELECT * FROM qa_reviews WHERE lease_id=? AND reviewer_id=? AND candidate_id=? AND status='IN_PROGRESS'",
+                (lease_id, actor.agent_id, candidate["candidate_id"]),
+            ).fetchone())
+            if review is None or ticket["status"] != TicketStatus.QA_IN_PROGRESS.value:
+                raise ConflictError("QA lease no longer owns this candidate review", {"reason": "qa_review_not_active"})
+            lease.update(review_id=review["review_id"], candidate_id=review["candidate_id"], review_slot=review["slot"])
         return lease
 
     def _lease(self, connection: Connection, lease_id: str) -> dict[str, Any]:
@@ -600,7 +692,11 @@ class LeaseMixin:
         ticket["dependency_ids"] = [
             row["depends_on_ticket_id"]
             for row in connection.execute(
-                "SELECT depends_on_ticket_id FROM ticket_dependencies WHERE ticket_id = ?",
+                "SELECT d.depends_on_ticket_id FROM ticket_dependencies d "
+                "JOIN tickets dependency ON dependency.ticket_id=d.depends_on_ticket_id "
+                "JOIN features df ON df.feature_id=dependency.feature_id "
+                "JOIN tickets own ON own.ticket_id=d.ticket_id JOIN features f ON f.feature_id=own.feature_id "
+                "WHERE d.ticket_id=? AND df.project_id=f.project_id",
                 (ticket_id,),
             ).fetchall()
         ]
@@ -645,6 +741,15 @@ class LeaseMixin:
 
     @staticmethod
     def _unfinished_dependency_ids(connection: Connection, ticket_id: str) -> list[str]:
+        foreign = connection.execute("""SELECT 1 FROM ticket_dependencies d
+            JOIN tickets own ON own.ticket_id=d.ticket_id JOIN features f ON f.feature_id=own.feature_id
+            JOIN tickets dependency ON dependency.ticket_id=d.depends_on_ticket_id
+            JOIN features df ON df.feature_id=dependency.feature_id
+            WHERE d.ticket_id=? AND df.project_id != f.project_id LIMIT 1""", (ticket_id,)).fetchone()
+        if foreign is not None:
+            # Legacy invalid edges remain blocked regardless of private endpoint state.
+            raise ConflictError("Ticket has an invalid cross-project dependency; Planner repair is required",
+                                {"reason": "dependency_project_mismatch"})
         return [
             row["ticket_id"]
             for row in connection.execute(

@@ -11,6 +11,7 @@ a measurement and nothing else.
 from __future__ import annotations
 
 import contextvars
+import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -157,12 +158,42 @@ class WorkflowMetrics:
             (project_id,),
         ).fetchall()
         counts = {row["event_type"]: row["total"] for row in rows}
-        verdicts = counts.get("qa.verdict_passed", 0) + counts.get("qa.verdict_failed", 0)
+        # Count settled candidate outcomes, not individual owner reviews. Keep
+        # legacy verdict events readable without counting an alias twice.
+        outcomes = connection.execute(
+            "SELECT event_type, aggregate_id, payload FROM audit_events WHERE project_id = ? "
+            "AND event_type IN ('ticket.verified', 'ticket.rework_requested', "
+            "'ticket.rework_budget_exhausted', 'ticket.plan_stale', 'qa.infrastructure_blocked', "
+            "'qa.verdict_passed', 'qa.verdict_failed') ORDER BY sequence",
+            (project_id,),
+        ).fetchall()
+        canonical = {
+            (event["aggregate_id"], payload.get("candidate_id"), payload.get("verdict"))
+            for event in outcomes if not event["event_type"].startswith("qa.verdict_")
+            for payload in [json.loads(event["payload"])] if payload.get("candidate_id")
+        }
+        settled = []
+        for event in outcomes:
+            payload = json.loads(event["payload"])
+            verdict = payload.get("verdict")
+            if event["event_type"] == "qa.verdict_passed":
+                verdict = "passed"
+            elif event["event_type"] == "qa.verdict_failed":
+                verdict = "failed"
+            if verdict not in {"passed", "failed"}:
+                continue  # An infrastructure interruption is not a QA verdict.
+            identity = (event["aggregate_id"], payload.get("candidate_id"), verdict)
+            if event["event_type"].startswith("qa.verdict_") and identity in canonical:
+                continue
+            settled.append(verdict)
+        passes = settled.count("passed")
+        failures = settled.count("failed")
+        verdicts = passes + failures
         return {
-            "qa_failures": counts.get("qa.verdict_failed", 0),
-            "qa_passes": counts.get("qa.verdict_passed", 0),
+            "qa_failures": failures,
+            "qa_passes": passes,
             "candidate_pass_rate": (
-                round(counts.get("qa.verdict_passed", 0) / verdicts, 3) if verdicts else None
+                round(passes / verdicts, 3) if verdicts else None
             ),
             "base_drift": counts.get("integration.base_drift", 0),
             "blocked": counts.get("ticket.blocked", 0),

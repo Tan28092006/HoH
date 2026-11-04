@@ -11,6 +11,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from hoh_control_plane.service._common import _estimate_tokens
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -117,12 +119,25 @@ def test_qa_and_integrator_briefs_name_the_frozen_candidate(
     verdict_call = brief["next_calls"][-1]
     assert verdict_call.startswith("qa.submit_verdict(")
     assert f'candidate_id="{candidate_id}"' in verdict_call
-    assert f'context_snapshot_id="{brief["context_snapshot_id"]}"' in verdict_call
+    assert 'context_snapshot_id=' in verdict_call
+    assert brief["next_calls"][-2].startswith("ticket.get_context(")
+    assert ticket["ticket_id"] in brief["next_calls"][-2]
+    assert brief["lease_id"] == qa_claim["lease"]["lease_id"]
+    assert f'ticket_id="{ticket["ticket_id"]}"' in verdict_call
+    assert f'lease_id="{brief["lease_id"]}"' in verdict_call
     _assert_resolvable(service, qa, brief)
-
+    service.append_planner_context(actors["planner"], ticket_id=ticket["ticket_id"],
+        entry_type="planner_decision", content="Refresh before consequential write", source_ref="evidence://fixture/refresh")
+    from hoh_control_plane.domain import ContextStaleError
+    with pytest.raises(ContextStaleError):
+        service.submit_qa_verdict(qa, ticket["ticket_id"], brief["lease_id"], candidate_id,
+            qa_claim["ticket"]["version"], "passed", [dict(criterion=c, status="verified", observation="observed",
+                evidence=[dict(type="test_result", observation="ok", storage_ref="evidence://qa/ok.json")])
+                for c in ticket["acceptance_criteria"]], context_snapshot_id=brief["context_snapshot_id"])
+    packet = service.get_ticket_context(qa, ticket["ticket_id"])
     _passed = service.submit_qa_verdict(
         qa, ticket["ticket_id"], brief["lease_id"], candidate_id,
-        qa_claim["ticket"]["version"], "passed",
+        packet["ticket"]["version"], "passed",
         [
             {
                 "criterion": criterion,
@@ -133,7 +148,7 @@ def test_qa_and_integrator_briefs_name_the_frozen_candidate(
             }
             for criterion in ticket["acceptance_criteria"]
         ],
-        context_snapshot_id=brief["context_snapshot_id"],
+        context_snapshot_id=packet["context_snapshot_id"],
     )
     integrator = actors["integrator"]
     merge_claim = service.claim_integration(

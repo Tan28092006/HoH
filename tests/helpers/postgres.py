@@ -1,4 +1,11 @@
-"""A service on a throwaway PostgreSQL schema; skipped without HOH_TEST_POSTGRES_DSN."""
+"""A service on a throwaway PostgreSQL schema.
+
+Only a test that asks for ``pg_service`` needs PostgreSQL, so the fixture is
+where a missing prerequisite skips, each test on its own: a missing driver and
+a missing HOH_TEST_POSTGRES_DSN are reported with different reasons. Skipping
+a whole module at import hid its tests from the JUnit report (under xdist one
+module's collection skip was lost) and skipped tests that need neither.
+"""
 from __future__ import annotations
 
 import os
@@ -9,17 +16,23 @@ import pytest
 from hoh_control_plane.domain import Actor, Role
 from hoh_control_plane.service import ControlPlaneService
 
-psycopg = pytest.importorskip("psycopg", reason="PostgreSQL driver is not installed")
+try:
+    import psycopg
+except ImportError:
+    psycopg = None
 
 DSN = os.getenv("HOH_TEST_POSTGRES_DSN")
-pytestmark = pytest.mark.skipif(
-    not DSN, reason="set HOH_TEST_POSTGRES_DSN to run the PostgreSQL conformance suite"
-)
+DRIVER_MISSING = "PostgreSQL driver is not installed"
+DSN_MISSING = "set HOH_TEST_POSTGRES_DSN to run the PostgreSQL conformance suite"
 
 
 @pytest.fixture
 def pg_service():
     """A service on its own PostgreSQL schema, dropped afterwards."""
+    if psycopg is None:
+        pytest.skip(DRIVER_MISSING)
+    if not DSN:
+        pytest.skip(DSN_MISSING)
     from hoh_control_plane.postgres_store import PostgresStore, translate_schema
 
     schema = f"hoh_test_{uuid.uuid4().hex[:12]}"

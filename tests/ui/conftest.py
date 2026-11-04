@@ -35,6 +35,12 @@ def qa_app(tmp_path_factory):
     service.create_feature(planner, "demo", "ui-backlog-feature", "UI backlog", "Filter fixture")
     service.create_ticket(planner, "ui-backlog-feature", "UI-BACKLOG", "Đơn hàng — pending review", "Visible backlog",
                           Role.DEVELOPER, ["Visible to operators"], [], ["ui/**"], ready=False)
+    service.create_ticket(planner, "ui-backlog-feature", 'UI-"QUOTED', "Quoted ticket", "Quoted detail",
+                           Role.DEVELOPER, ["Visible to operators"], [], ["quoted/**"], ready=False)
+    service.create_ticket(planner, "ui-backlog-feature", 'UI-"><img src=x onerror=alert(1)>', "Hostile quoted ID", "Literal hostile detail",
+                          Role.DEVELOPER, ["Visible to operators"], [], ["quoted/**"], ready=False)
+    service.append_planner_context(planner, ticket_id="UI-BACKLOG", entry_type="known_failure",
+                                   content="A retained context checkpoint", source_ref="evidence://ui/checkpoint")
     dirty = bool(subprocess.check_output(["git", "-C", str(source), "status", "--porcelain"], text=True).strip())
     identity = {"candidate_commit": sha, "source_tree_dirty": dirty,
                 "source_root": str(source), "fixture_database": str(fixture_dir / "fixture.db")}
@@ -87,6 +93,10 @@ def browser_case(request, qa_app, ui_browser, tmp_path):
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.on("request", lambda req: requests.append({"method": req.method, "url": req.url}))
     page.on("response", lambda response: errors.append(f"HTTP {response.status}: {response.url}") if response.status >= 400 else None)
+    def capture_script(response):
+        if response.url.split("?", 1)[0].endswith("/static/app.js") and response.status == 200:
+            (target / "served-app.js").write_bytes(response.body())
+    page.on("response", capture_script)
     try:
         yield page, errors, requests
     finally:

@@ -3,6 +3,104 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
+@pytest.mark.parametrize("width", [375, 768])
+def test_narrow_keyboard_selection_context_journey(qa_app, browser_case, width):
+    import re
+    from playwright.sync_api import expect
+    page, errors, requests = browser_case
+    page.set_viewport_size({"width": width, "height": 812})
+    page.goto(qa_app["url"] + "/?project=demo&status=BACKLOG")
+    backlog = page.locator('[data-ticket-id="UI-BACKLOG"]')
+    backlog.focus()
+    expect(backlog).to_be_focused()
+    page.keyboard.press("Enter")
+    expect(page.locator("#detail")).to_contain_text("Visible backlog")
+    reference = page.locator("#detail li").filter(has_text="known_failure")
+    expect(reference).to_contain_text("Planner")
+    expect(reference).not_to_contain_text("Invalid Date")
+    quoted = page.get_by_role("button", name=re.compile('UI-"QUOTED'))
+    quoted.focus()
+    page.keyboard.press("Space")
+    expect(page.locator("#detail")).to_contain_text("Quoted detail")
+    backlog.focus()
+    page.keyboard.press("Enter")
+    expect(page.locator("#detail")).to_contain_text("Visible backlog")
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    assert not errors and all(r["method"] == "GET" for r in requests)
+
+
+def test_hostile_quoted_id_is_literal_not_markup(qa_app, browser_case):
+    import re
+    from playwright.sync_api import expect
+    page, errors, _ = browser_case
+    dialogs = []
+    page.on("dialog", lambda dialog: (dialogs.append(dialog.message), dialog.dismiss()))
+    page.goto(qa_app["url"] + "/?project=demo&status=BACKLOG")
+    hostile = page.get_by_role("button", name=re.compile("Hostile quoted ID"))
+    expect(hostile).to_have_attribute("data-ticket-id", 'UI-"><img src=x onerror=alert(1)>')
+    hostile.focus()
+    page.keyboard.press("Enter")
+    expect(page.locator("#detail")).to_contain_text("Literal hostile detail")
+    expect(page.locator('#board img, #detail img, #board [onerror], #detail [onerror]')).to_have_count(0)
+    page.locator('[data-ticket-id="UI-BACKLOG"]').click()
+    expect(page.locator("#detail")).to_contain_text("Visible backlog")
+    assert dialogs == [] and errors == []
+
+
+@pytest.mark.parametrize("timestamp", [None, "not-a-timestamp"])
+def test_context_reference_ignores_absent_or_malformed_timestamp(qa_app, browser_case, timestamp):
+    from playwright.sync_api import expect
+    page, errors, _ = browser_case
+    def projected(route):
+        response = route.fetch()
+        payload = response.json()
+        entries = payload["data"]["context_entries"]
+        assert entries
+        for entry in entries:
+            entry.pop("created_at", None)
+            if timestamp is not None:
+                entry["created_at"] = timestamp
+        route.fulfill(response=response, json=payload)
+    page.route("**/api/v1/tickets/UI-BACKLOG/context", projected)
+    page.goto(qa_app["url"] + "/?project=demo&status=BACKLOG")
+    page.locator('[data-ticket-id="UI-BACKLOG"]').click()
+    reference = page.locator("#detail li").filter(has_text="known_failure")
+    expect(reference).to_contain_text("Planner")
+    expect(reference).to_contain_text("ctx:entry:")
+    expect(reference).not_to_contain_text("Invalid Date")
+    expect(reference).not_to_contain_text("Unassigned")
+    assert not errors
+
+
+def test_quoted_ticket_id_round_trips_through_selection(qa_app, browser_case):
+    import re
+    from playwright.sync_api import expect
+    page, errors, _ = browser_case
+    page.goto(qa_app["url"] + "/?project=demo&status=BACKLOG")
+    quoted = page.get_by_role("button", name=re.compile('UI-"QUOTED'))
+    expect(quoted).to_have_attribute("data-ticket-id", 'UI-"QUOTED')
+    quoted.click()
+    expect(page.locator("#detail")).to_contain_text("Quoted detail")
+    page.locator('[data-ticket-id="UI-BACKLOG"]').click()
+    expect(page.locator("#detail")).to_contain_text("Visible backlog")
+    quoted.click()
+    expect(page.locator("#detail")).to_contain_text("Quoted detail")
+    assert not errors
+
+
+def test_context_reference_uses_projected_packet_fields(qa_app, browser_case):
+    from playwright.sync_api import expect
+    page, errors, _ = browser_case
+    page.goto(qa_app["url"] + "/?project=demo&status=BACKLOG")
+    page.locator('[data-ticket-id="UI-BACKLOG"]').click()
+    expect(page.locator("#detail")).to_contain_text("known_failure")
+    reference = page.locator("#detail li").filter(has_text="known_failure")
+    expect(reference).to_contain_text("Planner")
+    expect(reference).not_to_contain_text("Invalid Date")
+    expect(reference).not_to_contain_text("Unassigned")
+    assert not errors
+
+
 @pytest.mark.parametrize("viewport", [{"width": 1440, "height": 900}, {"width": 768, "height": 900}, {"width": 375, "height": 812}])
 def test_operator_can_follow_ticket_and_filter_state(qa_app, browser_case, viewport):
     from playwright.sync_api import expect

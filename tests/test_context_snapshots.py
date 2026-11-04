@@ -253,7 +253,7 @@ def test_a_snapshot_holds_no_narrative_only_versions(service, actors, seeded) ->
         "planning_revision",
         "ticket_version",
         "feature_version",
-        "candidate_commit",
+        "candidate_commit", "candidate_id", "qa_evidence_count",
         "dependencies",
         "repository_revision",
         # Barrier and retirement identity, never their narrative reasons.

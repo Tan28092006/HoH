@@ -31,6 +31,10 @@ Markers (`tests/conftest.py` assigns `slow` and `git` per module at collection):
 ## What `test.ps1` does
 
 - Pins `.venv-hoh` (or `HOH_TEST_PYTHON`) and puts this checkout's `src/` first.
+- Under PowerShell 7 (`pwsh -File`), reads the caller's exact arguments from the
+  process: pwsh splits a dash argument at its first colon
+  (`--deselect=a::b`), which changed selection and the coverage decision. A
+  process argv that does not account for every bound argument is refused.
 - Sets `PYTHONUTF8=1`.
 - Runs with `-n 6` unless you pass `-n`.
 - Gives each run its own basetemp, `<HOH_TEST_TEMP_ROOT or D:\.hoh-pytest>\<checkout-hash>-<pid>`.
@@ -53,7 +57,10 @@ Markers (`tests/conftest.py` assigns `slow` and `git` per module at collection):
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs Windows and
 Ubuntu with Python 3.12 and 3.13 (`requires-python = ">=3.12"`). It uses no
 secrets: the PostgreSQL suite skips without `HOH_TEST_POSTGRES_DSN` and the
-browser tests skip without `--run-ui`.
+browser tests skip without `--run-ui`. A PostgreSQL test skips in the
+`pg_service` fixture, node by node, with the missing prerequisite as its reason
+(driver or DSN); a module is never skipped whole at import, because under xdist
+such a collection skip could drop a module from the JUnit report unseen.
 
 Each matrix job invokes [`scripts/verify-ci-evidence.py`](../scripts/verify-ci-evidence.py)
 with the same lane, worker setting and private basetemp. It owns the child tree
@@ -63,12 +70,25 @@ identities, counters and revision must agree; only the explicitly listed
 existing node/reason/platform exclusions are accepted. Full runs retain XML
 coverage with valid line/branch counts and the 80% gate. Adding an optional skip
 requires an explicit policy review; a familiar reason on a new node is refused.
+Names are pytest's JUnit ids (a backslash in a parameter id appears doubled).
+`tests/test_ci_evidence.py` checks the browser-test list against every collected
+`tests/ui` node, so a new browser test fails locally until it is listed.
 
 Each job uploads its manifest, log, XML and pass/skip inventory even on failure.
 Failure, cancellation, missing artifacts, malformed reports, all-skipped runs
 and source changes cannot become successful evidence. Coverage and report hashes
 bind the retained files to that run; previous results are never cached as proof.
 All four Windows/Ubuntu and Python 3.12/3.13 combinations remain.
+
+[`pwsh-windows.yml`](../.github/workflows/pwsh-windows.yml) checks
+`tests/test_test_runner.py` under PowerShell 7 on Windows, which `ci.yml` does
+not reach because Windows PowerShell 5.1 is found first. It runs only on
+request: when the `pwsh-windows-check` label is added to a pull request (it
+tests the PR head commit), or by manual dispatch once the file is on the default
+branch. It pins the host with `HOH_TEST_POWERSHELL`, asserts the wrapper really
+ran under that `pwsh`, fails if pytest or the log capture fails, and uploads the
+JUnit report, log and a manifest with the revision, `pwsh` path and version,
+command and both exit codes.
 
 For a read-only artifact recheck, pass the exact recorded revision and lane:
 

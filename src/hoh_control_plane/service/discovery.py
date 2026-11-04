@@ -110,7 +110,7 @@ class DiscoveryMixin:
     # implicit per-role discovery filter and the explicit awaiting_role filter.
     _ROLE_ACTIONABLE_STATUSES: dict[Role, tuple[TicketStatus, ...]] = {
         Role.DEVELOPER: (TicketStatus.READY, TicketStatus.REWORK),
-        Role.QA: (TicketStatus.QA_READY,),
+        Role.QA: (TicketStatus.QA_READY, TicketStatus.QA_IN_PROGRESS),
         Role.INTEGRATOR: (TicketStatus.VERIFIED, TicketStatus.MERGE_READY),
     }
 
@@ -264,8 +264,16 @@ class DiscoveryMixin:
                 where.append("t.status IN (?, ?)")
                 parameters.extend([TicketStatus.READY.value, TicketStatus.REWORK.value])
             elif actor.role is Role.QA:
-                where.append("t.status = ?")
-                parameters.append(TicketStatus.QA_READY.value)
+                where.append("t.status IN ('QA_READY', 'QA_IN_PROGRESS')")
+                where.append("""EXISTS (SELECT 1 FROM candidates c
+                    WHERE c.ticket_id=t.ticket_id AND c.commit_sha=t.candidate_commit AND c.submitted_by != ?
+                      AND NOT EXISTS (SELECT 1 FROM candidates newer WHERE newer.ticket_id=c.ticket_id
+                                      AND newer.submitted_at > c.submitted_at)
+                      AND c.required_qa_reviews > (SELECT COUNT(*) FROM qa_reviews r
+                          WHERE r.candidate_id=c.candidate_id AND r.status IN ('IN_PROGRESS', 'PASSED', 'FAILED'))
+                      AND NOT EXISTS (SELECT 1 FROM qa_reviews own WHERE own.candidate_id=c.candidate_id
+                          AND own.reviewer_id=? AND own.status IN ('IN_PROGRESS', 'PASSED', 'FAILED')))""")
+                parameters.extend([actor.agent_id, actor.agent_id])
             elif actor.role is Role.INTEGRATOR:
                 where.append("t.status IN (?, ?)")
                 parameters.extend(
@@ -280,7 +288,7 @@ class DiscoveryMixin:
             if priority_min is not None:
                 where.append("t.priority >= ?")
                 parameters.append(priority_min)
-            if unassigned_only:
+            if unassigned_only and actor.role is not Role.QA:
                 where.append(
                     "NOT EXISTS (SELECT 1 FROM leases l WHERE l.ticket_id = t.ticket_id"
                     " AND l.expires_at > ?)"
@@ -624,9 +632,7 @@ class DiscoveryMixin:
     ) -> dict[str, Any]:
         """Publish a short-lived, authenticated availability record for dispatch.
 
-        model_family (anthropic, openai, google, other) and model name the model
-        this session runs. They feed the checker-distinct-from-maker policy:
-        a QA claim on a candidate whose maker has the same family is refused.
+        model_family and model record optional session provenance, never permission.
 
         An endpoint is optional. Registering none is not a degraded mode: the
         agent polls, which remains a complete path. Registering one that is not
@@ -1021,7 +1027,7 @@ class DiscoveryMixin:
             SELECT DISTINCT t.* FROM tickets t
             JOIN work_queue q ON q.ticket_id = t.ticket_id
             WHERE q.project_id = ? AND q.target_role = 'qa'
-              AND q.status IN ('pending', 'offered') AND t.status = 'QA_READY'
+              AND q.status IN ('pending', 'offered') AND t.status IN ('QA_READY', 'QA_IN_PROGRESS')
             ORDER BY t.priority DESC, t.ticket_id
             """,
             (project_id,),
@@ -1029,6 +1035,8 @@ class DiscoveryMixin:
         for raw in rows:
             ticket = _row(raw)
             assert ticket is not None
+            if not self._qa_review_available(connection, ticket, presence["agent_id"]):
+                continue
             state = self._qa_ticket_capability_state(presence, ticket)
             if state["claimable"]:
                 continue
@@ -1195,6 +1203,8 @@ class DiscoveryMixin:
         target_role = self._dispatch_target_role(ticket)
         if target_role is None:
             return None
+        if target_role is Role.QA and not self._qa_review_available(connection, ticket):
+            return None
         existing = _row(
             connection.execute(
                 """
@@ -1205,6 +1215,8 @@ class DiscoveryMixin:
             ).fetchone()
         )
         if existing is not None:
+            connection.execute("UPDATE work_queue SET context_version=?, updated_at=? WHERE queue_id=?",
+                               (ticket["version"], _iso(), existing["queue_id"]))
             return existing
         timestamp = _iso()
         queue_id = _id(connection, "queue")
@@ -1266,9 +1278,9 @@ class DiscoveryMixin:
             SELECT t.ticket_id
             FROM tickets t
             JOIN features f ON f.feature_id = t.feature_id
-            LEFT JOIN leases l ON l.ticket_id = t.ticket_id
-            WHERE t.status IN ('READY', 'REWORK', 'QA_READY', 'VERIFIED', 'MERGE_READY')
-              AND l.lease_id IS NULL
+            WHERE (t.status IN ('QA_READY', 'QA_IN_PROGRESS') OR
+                   (t.status IN ('READY', 'REWORK', 'VERIFIED', 'MERGE_READY') AND
+                    NOT EXISTS (SELECT 1 FROM leases l WHERE l.ticket_id=t.ticket_id)))
             ORDER BY t.priority DESC, t.created_at ASC
             """
         ).fetchall()
@@ -1280,7 +1292,7 @@ class DiscoveryMixin:
     @staticmethod
     def _dispatch_target_role(ticket: dict[str, Any]) -> Role | None:
         status = TicketStatus(ticket["status"])
-        if status is TicketStatus.QA_READY:
+        if status in {TicketStatus.QA_READY, TicketStatus.QA_IN_PROGRESS}:
             return Role.QA
         if status in {TicketStatus.VERIFIED, TicketStatus.MERGE_READY}:
             return Role.INTEGRATOR
@@ -1339,6 +1351,8 @@ class DiscoveryMixin:
                 ):
                     continue
                 ticket = self._ticket(connection, queue["ticket_id"])
+                if not self._qa_review_available(connection, ticket, presence["agent_id"]):
+                    continue
                 required = _required_execution_capabilities(ticket)
                 available = set(presence.get("execution_capabilities") or []) & set(
                     presence.get("approved_execution_capabilities") or []
@@ -1432,6 +1446,15 @@ class DiscoveryMixin:
         timestamp = _iso(now)
         for row in queue_rows:
             queue_id = str(row["queue_id"])
+            ticket = self._ticket(connection, ticket_id)
+            if (ticket["status"] == TicketStatus.QA_IN_PROGRESS.value
+                    and self._qa_review_available(connection, ticket)):
+                connection.execute("UPDATE work_offers SET status='claimed', closed_at=? "
+                                   "WHERE queue_id=? AND agent_id=? AND status='offered'",
+                                   (timestamp, queue_id, agent_id))
+                connection.execute("UPDATE work_queue SET context_version=?, updated_at=? WHERE queue_id=?",
+                                   (ticket["version"], timestamp, queue_id))
+                continue
             connection.execute(
                 """
                 UPDATE work_queue
