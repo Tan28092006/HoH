@@ -4,9 +4,10 @@ Section 20 only lets the store move once the lease and queue guarantees hold on
 the new backend. These are those guarantees, exercised through the ordinary
 service layer — not a second set of assertions written to suit the backend.
 
-Skipped when no server is configured, so a SQLite-only checkout stays green
-without PostgreSQL installed. Point HOH_TEST_POSTGRES_DSN at a throwaway database
-to run them.
+Each test that needs the server is skipped on its own, with the missing
+prerequisite (driver or HOH_TEST_POSTGRES_DSN) as its reason, so a SQLite-only
+checkout stays green and still reports every node. Point HOH_TEST_POSTGRES_DSN
+at a throwaway database to run them.
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ import pytest
 from hoh_control_plane.domain import Actor, ConflictError, Role
 from hoh_control_plane.service import ControlPlaneService
 
-from helpers.postgres import DSN, _developer, pg_seeded, pg_service, psycopg, pytestmark  # noqa: F401
+from helpers.postgres import _developer, pg_seeded, pg_service  # noqa: F401
 
 
 def test_the_schema_lands_whole_on_postgres(pg_service) -> None:

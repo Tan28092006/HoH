@@ -188,13 +188,65 @@ def test_source_fingerprint_changes_when_actual_owned_source_bytes_change(tmp_pa
 
 
 @pytest.mark.parametrize("module", ["tests.test_postgres_store", "tests.test_postgres_concurrency"])
-def test_missing_postgres_driver_collection_skip_has_an_exact_location_and_reason(module):
+def test_a_postgres_module_skipped_whole_at_collection_is_refused(module):
+    # Under xdist only one of two collection skips reached the report, so a
+    # module-level skip let the other module vanish from the evidence.
     case = ET.Element("testcase", classname="", name=module)
     skipped = ET.SubElement(case, "skipped", message="collection skipped")
     skipped.text = repr((str(ROOT / "tests/helpers/postgres.py"), 12, "Skipped: PostgreSQL driver is not installed"))
-    assert evidence.allowed_skip(case, "linux", str(ROOT)) is True
-    skipped.text = repr((str(ROOT / "tests/test_auth.py"), 12, "Skipped: PostgreSQL driver is not installed"))
     assert evidence.allowed_skip(case, "linux", str(ROOT)) is False
+
+
+DRIVER = "PostgreSQL driver is not installed"
+NO_DSN = "set HOH_TEST_POSTGRES_DSN to run the PostgreSQL conformance suite"
+
+
+@pytest.mark.parametrize("module,name,reason,accepted", [
+    ("tests.test_postgres_store", "test_a_claim_is_exclusive", DRIVER, True),
+    ("tests.test_postgres_store", "test_a_claim_is_exclusive", NO_DSN, True),
+    ("tests.test_postgres_concurrency", "test_overlapping_scopes_on_different_tickets_cannot_both_be_claimed", DRIVER, True),
+    ("tests.test_postgres_concurrency", "test_overlapping_scopes_on_different_tickets_cannot_both_be_claimed", NO_DSN, True),
+    # The SQLite-default contract needs neither the driver nor a server.
+    ("tests.test_postgres_store", "test_sqlite_remains_the_default_and_needs_no_driver", DRIVER, False),
+    ("tests.test_postgres_store", "test_sqlite_remains_the_default_and_needs_no_driver", NO_DSN, False),
+    # A PostgreSQL node under the other module, or another reason, is refused.
+    ("tests.test_postgres_concurrency", "test_a_claim_is_exclusive", NO_DSN, False),
+    ("tests.test_postgres_store", "test_a_claim_is_exclusive", "PostgreSQL unavailable", False),
+])
+def test_postgres_skips_are_bound_to_their_node_and_missing_prerequisite(module, name, reason, accepted):
+    for platform in ("linux", "win32"):
+        assert evidence.allowed_skip(skipped_case(module, name, reason), platform, str(ROOT)) is accepted
+
+
+def test_every_postgres_node_reaches_junit_serially_and_under_xdist(tmp_path):
+    import os
+    import subprocess
+    import sys
+    environment = {k: v for k, v in os.environ.items() if k != "HOH_TEST_POSTGRES_DSN"}
+    try:
+        import psycopg  # noqa: F401
+        reason = NO_DSN
+    except ImportError:
+        reason = DRIVER
+    modules = ["tests/test_postgres_store.py", "tests/test_postgres_concurrency.py"]
+    expected = {("tests.test_postgres_store", name) for name in evidence.POSTGRES_CASES}
+    expected.add(("tests.test_postgres_concurrency", "test_overlapping_scopes_on_different_tickets_cannot_both_be_claimed"))
+    for workers in ("0", "2"):
+        report = tmp_path / f"pg-{workers}.xml"
+        subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-n", workers, "-p", "no:cacheprovider",
+             "-c", str(ROOT / "pyproject.toml"), f"--basetemp={tmp_path / ('bt' + workers)}",
+             f"--junitxml={report}", *modules],
+            cwd=ROOT, env=environment, capture_output=True, text=True, timeout=300, check=True,
+        )
+        cases = list(ET.parse(report).getroot().iter("testcase"))
+        identities = [(case.get("classname"), case.get("name")) for case in cases]
+        assert len(identities) == len(set(identities)), workers
+        skipped = {identity for identity, case in zip(identities, cases) if case.find("skipped") is not None}
+        passed = set(identities) - skipped
+        assert skipped == expected, workers
+        assert passed == {("tests.test_postgres_store", "test_sqlite_remains_the_default_and_needs_no_driver")}, workers
+        assert {case.find("skipped").get("message") for case in cases if case.find("skipped") is not None} == {reason}
 
 
 def test_collection_skip_text_cannot_authorize_a_different_module():
@@ -240,7 +292,8 @@ def test_policy_names_are_the_nodes_pytest_reports_and_cover_every_browser_test(
     import sys
     output = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider", "-c", str(ROOT / "pyproject.toml"),
-         "tests/ui", "tests/test_dev_scripts.py", "tests/test_compiler_dispatch_controller.py"],
+         "tests/ui", "tests/test_dev_scripts.py", "tests/test_compiler_dispatch_controller.py",
+         "tests/test_postgres_store.py"],
         cwd=ROOT, capture_output=True, text=True, timeout=120, check=True,
     ).stdout
     collected = {}
@@ -251,4 +304,5 @@ def test_policy_names_are_the_nodes_pytest_reports_and_cover_every_browser_test(
     for module, names in evidence.UI_CASES.items():
         assert names == collected[module], module
     assert evidence.DEV_SCRIPT_CASES <= collected["tests.test_dev_scripts"]
+    assert evidence.POSTGRES_CASES <= collected["tests.test_postgres_store"]
     assert COMPILER[1] in collected[COMPILER[0]]

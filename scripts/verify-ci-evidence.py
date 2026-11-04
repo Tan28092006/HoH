@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import hashlib
 import json
 import math
@@ -21,7 +20,7 @@ POSTGRES_CASES = {
     "test_a_stale_expected_version_is_rejected", "test_an_idempotency_record_replays_rather_than_duplicating",
     "test_a_constraint_violation_arrives_as_the_control_plane_s_own_error",
     "test_the_monotonic_sequence_column_still_orders_events", "test_foreign_keys_are_enforced_without_being_switched_on",
-    "test_sqlite_remains_the_default_and_needs_no_driver", "test_experience_notes_survive_the_backend",
+    "test_experience_notes_survive_the_backend",
     "test_a_lesson_reaches_an_overlapping_ticket_on_postgres", "test_the_spec_index_runs_on_postgres",
     "test_the_outline_depth_filter_runs_on_postgres", "test_an_older_postgres_database_gains_the_columns_it_is_missing",
     "test_the_upgraded_postgres_database_still_works", "test_migrating_a_postgres_database_twice_changes_nothing",
@@ -89,12 +88,8 @@ def allowed_skip(case: ET.Element, platform: str, checkout: str) -> bool:
         return False
     module, name = case.get("classname", ""), case.get("name", "")
     reason = skipped.get("message", "")
-    if not module and name in {"tests.test_postgres_store", "tests.test_postgres_concurrency"} and reason == "collection skipped" and skipped.get("type") is None:
-        try:
-            location, line, detail = ast.literal_eval(skipped.text or "")
-            return Path(location).resolve() == ROOT / "tests/helpers/postgres.py" and line == 12 and detail == "Skipped: PostgreSQL driver is not installed"
-        except (ValueError, SyntaxError, TypeError):
-            return False
+    # A whole-module collection skip is never accepted: under xdist only one of
+    # two such entries reached the report, so a module vanished unnoticed.
     if skipped.get("type") != "pytest.skip":
         return False
     # Collection-time importorskip uses the module name as the case name.
@@ -103,9 +98,10 @@ def allowed_skip(case: ET.Element, platform: str, checkout: str) -> bool:
         module = name.removesuffix(".py").replace("/", ".").replace("\\", ".")
     if module in {"tests.test_postgres_store", "tests.test_postgres_concurrency"}:
         if collection_skip:
-            return reason == "PostgreSQL driver is not installed"
+            return False
         allowed = POSTGRES_CASES if module == "tests.test_postgres_store" else {"test_overlapping_scopes_on_different_tickets_cannot_both_be_claimed"}
-        return name in allowed and reason == "set HOH_TEST_POSTGRES_DSN to run the PostgreSQL conformance suite"
+        return name in allowed and reason in {"PostgreSQL driver is not installed",
+                                              "set HOH_TEST_POSTGRES_DSN to run the PostgreSQL conformance suite"}
     if module == "tests.test_store_factory":
         return name in {"test_a_url_chooses_the_server_backend",
                         "test_a_url_wins_over_a_path"} and reason == "PostgreSQL driver is not installed"

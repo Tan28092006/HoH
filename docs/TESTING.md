@@ -57,7 +57,10 @@ Markers (`tests/conftest.py` assigns `slow` and `git` per module at collection):
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs Windows and
 Ubuntu with Python 3.12 and 3.13 (`requires-python = ">=3.12"`). It uses no
 secrets: the PostgreSQL suite skips without `HOH_TEST_POSTGRES_DSN` and the
-browser tests skip without `--run-ui`.
+browser tests skip without `--run-ui`. A PostgreSQL test skips in the
+`pg_service` fixture, node by node, with the missing prerequisite as its reason
+(driver or DSN); a module is never skipped whole at import, because under xdist
+such a collection skip could drop a module from the JUnit report unseen.
 
 Each matrix job invokes [`scripts/verify-ci-evidence.py`](../scripts/verify-ci-evidence.py)
 with the same lane, worker setting and private basetemp. It owns the child tree
