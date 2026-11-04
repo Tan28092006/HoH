@@ -245,6 +245,18 @@ class Supervisor:
                 return time.monotonic() - terminal_since >= TERMINAL_EXIT_GRACE_SECONDS
             with self.service.store.connection(immediate=True) as db:
                 db.execute('UPDATE worker_executions SET heartbeat_at = ? WHERE execution_id = ?', (now(), execution_id))
+                # Judge the job and its lease from this one transaction. The
+                # worker's final commit ends the job and deletes its lease
+                # together; read across it, the earlier RUNNING job and the
+                # missing lease looked like lost authority and killed a worker
+                # that had already finished.
+                table, key, _, _ = JOBS[kind]
+                job = db.execute(f'SELECT * FROM {table} WHERE {key} = ?', (identifier,)).fetchone()
+                if job is None:
+                    return True
+                if job['status'] not in {'QUEUED', 'RUNNING'}:
+                    return False  # The next guard applies terminal-exit grace.
+                job = dict(job)
                 if 'lease_id' not in job:
                     return False  # A main check belongs to no lease.
                 if kind == 'qa':

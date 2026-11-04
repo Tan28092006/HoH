@@ -211,3 +211,38 @@ def test_late_capture_miss_defers_without_the_slot_then_resumes(service, actors,
     resumed = service.execute_queued_merge(job_id, run_suite=True)
     assert resumed["status"] == "COMPLETED" and resumed["merge_status"] == "merged"
     assert _git(repository, "rev-parse", "main") == candidate["candidate"]["commit_sha"]
+
+
+def test_a_merge_that_commits_between_the_guards_reads_is_not_cancelled(
+    service, actors, seeded, tmp_path, monkeypatch
+) -> None:
+    """The authority check reads the job and its lease as one state.
+
+    The worker's last transaction marks the merge COMPLETED and deletes its
+    lease together. A guard that saw the job RUNNING in one read and the lease
+    missing in a later one took that commit for lost authority and killed a
+    worker that had already finished (the 'cancelled' outcome seen in CI).
+    """
+    from types import SimpleNamespace
+
+    from hoh_control_plane import supervisor as module
+
+    _, _, merge_job_id, _ = _queued_reuse_merge(service, actors, seeded, tmp_path)
+    decisions = []
+    with Supervisor(service, max_workers=1) as supervisor:
+        before_commit = supervisor._job("merge", merge_job_id)
+        assert before_commit["status"] == "QUEUED" and before_commit["lease_id"]
+        # The worker's commit lands after the guard's job read, before its lease read.
+        assert service.execute_queued_merge(merge_job_id, run_suite=False)["status"] == "COMPLETED"
+        stale = iter([before_commit])
+        read_job = Supervisor._job
+        monkeypatch.setattr(supervisor, "_job", lambda kind, identifier: next(stale, None) or read_job(supervisor, kind, identifier))
+
+        def finished_worker(arguments, *, cancel, hold, **kwargs):
+            decisions.append(cancel())
+            return SimpleNamespace(returncode=0, cancelled=False, timed_out=False)
+
+        monkeypatch.setattr(module, "run_managed", finished_worker)
+        supervisor._execute("probe-execution", "merge", merge_job_id)
+
+    assert decisions == [False]
