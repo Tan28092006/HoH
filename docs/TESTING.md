@@ -31,6 +31,10 @@ Markers (`tests/conftest.py` assigns `slow` and `git` per module at collection):
 ## What `test.ps1` does
 
 - Pins `.venv-hoh` (or `HOH_TEST_PYTHON`) and puts this checkout's `src/` first.
+- Under PowerShell 7 (`pwsh -File`), reads the caller's exact arguments from the
+  process: pwsh splits a dash argument at its first colon
+  (`--deselect=a::b`), which changed selection and the coverage decision. A
+  process argv that does not account for every bound argument is refused.
 - Sets `PYTHONUTF8=1`.
 - Runs with `-n 6` unless you pass `-n`.
 - Gives each run its own basetemp, `<HOH_TEST_TEMP_ROOT or D:\.hoh-pytest>\<checkout-hash>-<pid>`.

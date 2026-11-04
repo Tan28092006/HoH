@@ -87,6 +87,16 @@ def test_actual_selection_stays_targeted_without_a_full_coverage_claim(tmp_path,
     assert not any(argument.startswith("--cov") for argument in arguments_seen)
 
 
+def test_colon_arguments_reach_the_child_whole(tmp_path):
+    # PowerShell 7 splits a dash argument at its first colon unless the
+    # wrapper recovers the caller's argv; Windows PowerShell keeps it whole.
+    arguments = ["tests/test_api.py", "--deselect=tests/test_api.py::test_health",
+        "--junitxml=report:a.xml", "-n", "0"]
+    result, arguments_seen = invoke(tmp_path, arguments)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert arguments_seen[-len(arguments):] == arguments
+
+
 def test_ambient_pytest_arguments_cannot_change_a_full_run(tmp_path):
     result, arguments_seen = invoke(tmp_path, addopts="-k nonexistent --no-cov")
     assert result.returncode != 0
