@@ -1,5 +1,9 @@
 # Bounded ticket design
 
+Before releasing or revising technical work, complete the applicable research and
+design in [technical-planning.md](technical-planning.md). Record concrete scope,
+dependency and validation implications, not only a product-level idea.
+
 Plan from the current public specification, current artifact and candidate-bound
 QA evidence, never from a copied historical development document. Every
 executable ticket needs one observable objective, independently verifiable

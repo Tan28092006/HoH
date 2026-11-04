@@ -283,6 +283,9 @@ def test_gui_wait_profiles_have_long_timeout_and_unique_instances(desktop, tmp_p
     assert 'fully reopen Codex Desktop' in prompt
     planner_prompt = make_prompts(root, 'shop', instance='codex-1')['planner']
     assert 'sync repository' in planner_prompt
+    assert 'Use `$workflow` (Codex) or `/workflow` (Claude Code) for technical planning.' in planner_prompt
+    assert 'technical-planning reference before technical release or revision' in planner_prompt
+    assert "claim's `worker_brief`" not in planner_prompt
     integrator_prompt = make_prompts(root, 'shop', instance='codex-1')['integrator']
     assert 'mainline SHA' in integrator_prompt
     assert client.get('/local/agents?project_id=shop').json() == {'agents': []}

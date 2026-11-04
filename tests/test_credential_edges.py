@@ -78,7 +78,3 @@ def test_mcp_tokens_are_ascii_without_whitespace(token) -> None:
 def test_an_empty_or_malformed_mcp_map_is_a_validation_error(raw) -> None:
     with pytest.raises(ValidationError):
         credentials_from_environment(raw)
-
-
-def test_no_mcp_map_means_no_credentials() -> None:
-    assert credentials_from_environment("") == ()

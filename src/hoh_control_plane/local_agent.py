@@ -250,6 +250,8 @@ def make_prompts(root, project, instance='primary'):
     python = (root_path / '.venv' / 'Scripts' / 'python.exe').as_posix()
     focus = {
         'planner': (
+            'Use `$workflow` (Codex) or `/workflow` (Claude Code) for technical planning. '
+            'Follow the Planner technical-planning reference before technical release or revision. '
             'Run the Planner card after bootstrap and every event: sync repository, '
             'resolve reconciliation before any release/wait, handle Planner jobs and '
             'capability reviews, persist current priorities, then wait. Read the linked '

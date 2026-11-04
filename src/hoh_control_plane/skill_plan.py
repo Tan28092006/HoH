@@ -1,7 +1,9 @@
-"""Route existing practice skills according to the candidate's frozen budget."""
+"""Route planning practice and execution skills for the applicable role/budget."""
 
 
 def practice_skills_for(role: str, tier: str = "low") -> list[str]:
+    if role == "planner":
+        return ["workflow"]
     if role == "developer":
         return ["testing"] if tier == "low" else ["workflow", "testing"]
     if role == "qa":

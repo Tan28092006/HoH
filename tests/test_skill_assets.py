@@ -24,6 +24,7 @@ REQUIRED_FILES = (
     "hoh-control-plane/SKILL.md",
     "hoh-control-plane/references/wakeup.md",
     "hoh-planner/SKILL.md",
+    "hoh-planner/references/technical-planning.md",
     "hoh-developer/SKILL.md",
     "hoh-qa/SKILL.md",
     "hoh-qa/references/test-design.md",
@@ -291,6 +292,8 @@ def test_each_role_install_contains_the_expected_files(role_skill: str) -> None:
     assert all(path.startswith((f"{BASE_SKILL}/", f"{role_skill}/")) for path in installed)
     if role_skill == "hoh-qa":
         assert {"hoh-qa/references/test-design.md", "hoh-qa/references/ui-testing.md"} <= installed
+    if role_skill == "hoh-planner":
+        assert "hoh-planner/references/technical-planning.md" in installed
 
 
 @pytest.mark.parametrize("role_skill", ROLE_SKILLS)
@@ -334,3 +337,9 @@ def test_project_scope_installation_copies_the_whole_tree(
             if path.is_file()
         }
         assert copied == _installed_relative_paths(role_skill)
+        if role_skill == "hoh-planner":
+            relative = "hoh-planner/references/technical-planning.md"
+            assert (installed_root / relative).is_file()
+            assert (installed_root / relative).read_bytes() == (SKILL_ROOT / relative).read_bytes()
+            card = (installed_root / role_skill / "SKILL.md").read_text(encoding="utf-8")
+            assert "references/technical-planning.md" in card
