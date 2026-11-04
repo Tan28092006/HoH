@@ -28,14 +28,30 @@ POSTGRES_CASES = {
     "test_postgres_records_and_enforces_the_schema_version", "test_the_experience_index_is_rebuilt_on_postgres_too",
     "test_evidence_records_how_its_checksum_was_obtained_on_postgres",
 }
+# Every browser test, by module, as pytest names it in the JUnit report. Without
+# --run-ui each is skipped; a new browser test needs its own entry here.
 UI_CASES = {
-    *(f"test_operator_can_follow_ticket_and_filter_state[viewport{i}]" for i in range(3)),
-    "test_background_refresh_preserves_ticket_keyboard_focus",
-    "test_old_response_cannot_replace_a_newer_snapshot", "test_empty_project_and_error_are_observable",
+    "tests.ui.test_dashboard": {
+        *(f"test_operator_can_follow_ticket_and_filter_state[viewport{i}]" for i in range(3)),
+        "test_background_refresh_preserves_ticket_keyboard_focus",
+        "test_old_response_cannot_replace_a_newer_snapshot", "test_empty_project_and_error_are_observable",
+        "test_narrow_keyboard_selection_context_journey[375]", "test_narrow_keyboard_selection_context_journey[768]",
+        "test_hostile_quoted_id_is_literal_not_markup", "test_quoted_ticket_id_round_trips_through_selection",
+        "test_context_reference_ignores_absent_or_malformed_timestamp[None]",
+        "test_context_reference_ignores_absent_or_malformed_timestamp[not-a-timestamp]",
+        "test_context_reference_uses_projected_packet_fields",
+    },
+    "tests.ui.test_desktop": {
+        "test_create_project_and_get_four_bound_prompts",
+        "test_agent_wait_monitor_is_visible_without_spawning_agents",
+        "test_shutdown_confirmation_does_not_stop_on_cancel",
+    },
 }
 DEV_SCRIPT_CASES = {
     *(f"test_the_real_database_is_refused[{database}-{script}]"
-      for database in (r"D:\HoH\data\control-plane.db", r"D:\HOH\Data\control-plane.db", r"D:\HoH-service\data\control-plane.db")
+      # pytest escapes each backslash of a parameter id as two.
+      for database in (r"D:\\HoH\\data\\control-plane.db", r"D:\\HOH\\Data\\control-plane.db",
+                       r"D:\\HoH-service\\data\\control-plane.db")
       for script in ("start-dashboard.ps1", "start-scheduler.ps1", "start-supervisor.ps1")),
     "test_this_checkouts_data_directory_is_refused_through_the_environment",
     "test_the_installed_hosts_ports_are_refused[8765]", "test_the_installed_hosts_ports_are_refused[8931]",
@@ -93,8 +109,11 @@ def allowed_skip(case: ET.Element, platform: str, checkout: str) -> bool:
     if module == "tests.test_store_factory":
         return name in {"test_a_url_chooses_the_server_backend",
                         "test_a_url_wins_over_a_path"} and reason == "PostgreSQL driver is not installed"
-    if module == "tests.ui.test_dashboard":
-        return name in UI_CASES and reason == "Enable browser acceptance with --run-ui"
+    if module in UI_CASES:
+        return name in UI_CASES[module] and reason == "Enable browser acceptance with --run-ui"
+    if module == "tests.test_compiler_dispatch_controller":
+        return (platform != "win32" and name == "test_compiler_dependency_loss_cannot_reuse_old_green"
+                and reason == "Private copied-runtime layout is Windows-specific")
     if module == "tests.test_runtime_environment":
         if name == "test_actual_different_minor_candidate_interpreter_is_isolated":
             return reason == "Set HOH_TEST_CANDIDATE_PYTHON for a cross-version installation check"

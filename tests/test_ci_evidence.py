@@ -146,7 +146,8 @@ def test_full_coverage_requires_real_branches_and_the_eighty_percent_boundary(tm
 
 @pytest.mark.parametrize("platform,accepted", [("linux", True), ("win32", False)])
 def test_windows_only_skip_cannot_hide_the_contract_on_windows(platform, accepted):
-    case = ET.Element("testcase", classname="tests.test_dev_scripts", name="test_the_real_database_is_refused[D:\\HoH\\data\\control-plane.db-start-dashboard.ps1]")
+    # The JUnit name is pytest's id, which doubles each backslash of the path.
+    case = ET.Element("testcase", classname="tests.test_dev_scripts", name=r"test_the_real_database_is_refused[D:\\HoH\\data\\control-plane.db-start-dashboard.ps1]")
     ET.SubElement(case, "skipped", type="pytest.skip", message="the dev scripts are Windows PowerShell")
     assert evidence.allowed_skip(case, platform, str(ROOT)) is accepted
 
@@ -154,6 +155,8 @@ def test_windows_only_skip_cannot_hide_the_contract_on_windows(platform, accepte
 @pytest.mark.parametrize("module,reason", [
     ("tests.test_postgres_store", "set HOH_TEST_POSTGRES_DSN to run the PostgreSQL conformance suite"),
     ("tests.ui.test_dashboard", "Enable browser acceptance with --run-ui"),
+    ("tests.ui.test_desktop", "Enable browser acceptance with --run-ui"),
+    ("tests.test_compiler_dispatch_controller", "Private copied-runtime layout is Windows-specific"),
     ("tests.test_dev_scripts", "the dev scripts are Windows PowerShell"),
     ("tests.test_runtime_environment", "Windows DWORD exit status"),
     ("tests.test_skill_assets", "PowerShell is unavailable on this host"),
@@ -199,3 +202,53 @@ def test_collection_skip_text_cannot_authorize_a_different_module():
     skipped = ET.SubElement(case, "skipped", message="collection skipped")
     skipped.text = repr((str(ROOT / "tests/helpers/postgres.py"), 12, "Skipped: PostgreSQL driver is not installed"))
     assert evidence.allowed_skip(case, "linux", str(ROOT)) is False
+
+
+UI_REASON = "Enable browser acceptance with --run-ui"
+COMPILER = ("tests.test_compiler_dispatch_controller", "test_compiler_dependency_loss_cannot_reuse_old_green",
+            "Private copied-runtime layout is Windows-specific")
+
+
+def skipped_case(module, name, reason):
+    case = ET.Element("testcase", classname=module, name=name)
+    ET.SubElement(case, "skipped", type="pytest.skip", message=reason)
+    return case
+
+
+@pytest.mark.parametrize("module,name,reason,platform,accepted", [
+    ("tests.ui.test_dashboard", "test_narrow_keyboard_selection_context_journey[375]", UI_REASON, "win32", True),
+    ("tests.ui.test_desktop", "test_create_project_and_get_four_bound_prompts", UI_REASON, "linux", True),
+    (*COMPILER, "linux", True),
+    # The wrong module, an unlisted parameter or another reason is refused.
+    ("tests.ui.test_desktop", "test_narrow_keyboard_selection_context_journey[375]", UI_REASON, "linux", False),
+    ("tests.ui.test_dashboard", "test_narrow_keyboard_selection_context_journey[1024]", UI_REASON, "linux", False),
+    ("tests.ui.test_dashboard", "test_narrow_keyboard_selection_context_journey[375]", "browser unavailable", "linux", False),
+    # The compiler contract runs on Windows; elsewhere only its exact node and reason.
+    (*COMPILER, "win32", False),
+    (COMPILER[0], COMPILER[1], "Windows-specific", "linux", False),
+    (COMPILER[0], "test_compiler_dependency_loss_cannot_reuse_old_green[other]", COMPILER[2], "linux", False),
+    # An unescaped path is not the id pytest reports, so it names no real node.
+    ("tests.test_dev_scripts", "test_the_real_database_is_refused[D:\\HoH\\data\\control-plane.db-start-dashboard.ps1]",
+     "the dev scripts are Windows PowerShell", "linux", False),
+])
+def test_each_exclusion_is_bound_to_its_node_reason_and_platform(module, name, reason, platform, accepted):
+    assert evidence.allowed_skip(skipped_case(module, name, reason), platform, str(ROOT)) is accepted
+
+
+def test_policy_names_are_the_nodes_pytest_reports_and_cover_every_browser_test():
+    import subprocess
+    import sys
+    output = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider", "-c", str(ROOT / "pyproject.toml"),
+         "tests/ui", "tests/test_dev_scripts.py", "tests/test_compiler_dispatch_controller.py"],
+        cwd=ROOT, capture_output=True, text=True, timeout=120, check=True,
+    ).stdout
+    collected = {}
+    for line in output.splitlines():
+        if "::" in line:
+            path, name = line.split("::", 1)
+            collected.setdefault(path.removesuffix(".py").replace("/", "."), set()).add(name)
+    for module, names in evidence.UI_CASES.items():
+        assert names == collected[module], module
+    assert evidence.DEV_SCRIPT_CASES <= collected["tests.test_dev_scripts"]
+    assert COMPILER[1] in collected[COMPILER[0]]

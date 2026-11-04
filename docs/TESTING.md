@@ -67,6 +67,9 @@ identities, counters and revision must agree; only the explicitly listed
 existing node/reason/platform exclusions are accepted. Full runs retain XML
 coverage with valid line/branch counts and the 80% gate. Adding an optional skip
 requires an explicit policy review; a familiar reason on a new node is refused.
+Names are pytest's JUnit ids (a backslash in a parameter id appears doubled).
+`tests/test_ci_evidence.py` checks the browser-test list against every collected
+`tests/ui` node, so a new browser test fails locally until it is listed.
 
 Each job uploads its manifest, log, XML and pass/skip inventory even on failure.
 Failure, cancellation, missing artifacts, malformed reports, all-skipped runs
