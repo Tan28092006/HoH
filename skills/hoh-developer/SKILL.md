@@ -22,7 +22,9 @@ acceptance, QA verdicts or protected-branch integration.
    attempt; never reset another agent's work.
 4. Read the validation contract, implement the bounded outcome, and create the
     public observations QA needs. Run focused checks appropriate to the change.
-    Load only the brief's risk-directed practice skills. Submission freezes the
+    Load only the brief's risk-directed practice skills; they add method and
+    never widen ticket, lease or verdict authority, and their QA, integration and
+    deployment stages are not Developer work. Submission freezes the
     authoritative review plan from actual changed paths; a new SHA needs fresh QA.
 5. Immediately before submit, refresh ticket context and pass its
    `context_snapshot_id` to `dev.submit_candidate` (refused without one, or if
