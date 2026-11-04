@@ -11,12 +11,17 @@ import sys
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-POWERSHELL = shutil.which("powershell") or shutil.which("pwsh")
+# HOH_TEST_POWERSHELL pins the host (e.g. pwsh on Windows, where Windows
+# PowerShell 5.1 is found first); a pinned host is never replaced by a fallback.
+REQUESTED_POWERSHELL = os.environ.get("HOH_TEST_POWERSHELL")
+POWERSHELL = REQUESTED_POWERSHELL or shutil.which("powershell") or shutil.which("pwsh")
 
 
 def invoke(tmp_path, arguments=(), *, child_exit=0, addopts="", extra_env=None, silent=False):
     if POWERSHELL is None:
         pytest.fail("PowerShell is required to verify the supported test wrapper")
+    if REQUESTED_POWERSHELL and not Path(REQUESTED_POWERSHELL).is_file():
+        pytest.fail(f"HOH_TEST_POWERSHELL names no file: {REQUESTED_POWERSHELL}")
     capture = tmp_path / "capture.json"
     recorder = tmp_path / "record.py"
     recorder.write_text(
@@ -26,7 +31,12 @@ def invoke(tmp_path, arguments=(), *, child_exit=0, addopts="", extra_env=None, 
         "if os.environ['HOH_TEST_SILENT'] != '1': print('argument-recorder', flush=True)\n"
         "sys.exit(int(os.environ['HOH_TEST_CHILD_EXIT']))\n", encoding="utf-8")
     stub = tmp_path / "python.ps1"
-    stub.write_text("& $env:HOH_TEST_REAL_PYTHON $env:HOH_TEST_RECORDER @args\nexit $LASTEXITCODE\n", encoding="utf-8")
+    # The stub runs inside the PowerShell process that executes test.ps1, so it
+    # can report which host and edition actually ran the wrapper.
+    stub.write_text(
+        "if ($env:HOH_TEST_HOST_CAPTURE) { \"$($PSVersionTable.PSEdition)|$((Get-Process -Id $PID).Path)\" | "
+        "Set-Content -LiteralPath $env:HOH_TEST_HOST_CAPTURE }\n"
+        "& $env:HOH_TEST_REAL_PYTHON $env:HOH_TEST_RECORDER @args\nexit $LASTEXITCODE\n", encoding="utf-8")
     environment = os.environ.copy()
     for key in list(environment):
         if key.upper().startswith(("COVERAGE", "COV_CORE")):
@@ -95,6 +105,16 @@ def test_colon_arguments_reach_the_child_whole(tmp_path):
     result, arguments_seen = invoke(tmp_path, arguments)
     assert result.returncode == 0, result.stdout + result.stderr
     assert arguments_seen[-len(arguments):] == arguments
+
+
+def test_the_wrapper_runs_under_the_selected_powershell(tmp_path):
+    host = tmp_path / "host.txt"
+    result, _ = invoke(tmp_path, ["tests/test_api.py", "-n", "0"], extra_env={"HOH_TEST_HOST_CAPTURE": str(host)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    edition, path = host.read_text(encoding="utf-8-sig").strip().split("|", 1)
+    assert os.path.normcase(os.path.realpath(path)) == os.path.normcase(os.path.realpath(POWERSHELL))
+    if REQUESTED_POWERSHELL:
+        assert edition == "Core", "the pinned host must be PowerShell 7, not Windows PowerShell"
 
 
 def test_ambient_pytest_arguments_cannot_change_a_full_run(tmp_path):

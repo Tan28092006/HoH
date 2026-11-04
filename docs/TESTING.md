@@ -80,6 +80,16 @@ and source changes cannot become successful evidence. Coverage and report hashes
 bind the retained files to that run; previous results are never cached as proof.
 All four Windows/Ubuntu and Python 3.12/3.13 combinations remain.
 
+[`pwsh-windows.yml`](../.github/workflows/pwsh-windows.yml) checks
+`tests/test_test_runner.py` under PowerShell 7 on Windows, which `ci.yml` does
+not reach because Windows PowerShell 5.1 is found first. It runs only on
+request: when the `pwsh-windows-check` label is added to a pull request (it
+tests the PR head commit), or by manual dispatch once the file is on the default
+branch. It pins the host with `HOH_TEST_POWERSHELL`, asserts the wrapper really
+ran under that `pwsh`, fails if pytest or the log capture fails, and uploads the
+JUnit report, log and a manifest with the revision, `pwsh` path and version,
+command and both exit codes.
+
 For a read-only artifact recheck, pass the exact recorded revision and lane:
 
 ```powershell

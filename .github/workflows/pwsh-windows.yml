@@ -1,0 +1,117 @@
+# Focused check of scripts/test.ps1 under PowerShell 7 on Windows.
+# ci.yml covers Windows PowerShell 5.1 (found first on Windows); this job pins
+# pwsh through HOH_TEST_POWERSHELL and runs only tests/test_test_runner.py.
+#
+# It runs only on request, so it adds no cost to the regular lanes:
+# - before merge, when the "pwsh-windows-check" label is added to a pull
+#   request (pull_request events use the workflow file from the PR itself);
+#   remove and re-add the label to run it again;
+# - after this file is on the default branch, also by manual dispatch.
+# It tests the PR head commit, not GitHub's merge commit, and records it.
+name: pwsh on Windows (focused)
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-runner-under-pwsh:
+    if: "github.event_name == 'workflow_dispatch' || github.event.label.name == 'pwsh-windows-check'"
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      TESTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TESTED_SHA }}
+
+      # Every later failure still leaves a manifest to upload.
+      - name: Start evidence
+        run: |
+          mkdir -p "$RUNNER_TEMP/pwsh-evidence"
+          printf '{"revision": "%s", "stage": "started"}\n' "$TESTED_SHA" > "$RUNNER_TEMP/pwsh-evidence/manifest.json"
+          test "$(git rev-parse HEAD)" = "$TESTED_SHA"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Configure Git for test repositories
+        run: |
+          git config --global user.name "HoH CI"
+          git config --global user.email "hoh-ci@example.invalid"
+          git config --global init.defaultBranch main
+          git config --global core.longpaths true
+
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+
+      # Runs under bash, so a missing pwsh is reported rather than failing to
+      # start the step.
+      - name: Locate pwsh
+        id: pwsh
+        run: |
+          manifest="$RUNNER_TEMP/pwsh-evidence/manifest.json"
+          fail() {
+            printf '{"revision": "%s", "stage": "locate_pwsh", "error": "%s"}\n' "$TESTED_SHA" "$1" > "$manifest"
+            echo "::error::$1"
+            exit 1
+          }
+          found=$(command -v pwsh) || fail "pwsh is not on PATH"
+          if command -v cygpath >/dev/null; then found=$(cygpath -w "$found"); fi
+          version=$(pwsh -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()' | tr -d '\r') \
+            || fail "pwsh did not report its version"
+          [ -n "$version" ] || fail "pwsh reported an empty version"
+          echo "path=$found" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "pwsh $version at $found"
+
+      - name: Runner tests under pwsh
+        env:
+          PYTHONPATH: src
+          HOH_TEST_POWERSHELL: ${{ steps.pwsh.outputs.path }}
+          PWSH_VERSION: ${{ steps.pwsh.outputs.version }}
+        run: |
+          set +e
+          evidence="$RUNNER_TEMP/pwsh-evidence"
+          command=(python -m pytest -n 0 -p no:cacheprovider -c pyproject.toml
+                   "--basetemp=$RUNNER_TEMP/p" "--junitxml=$evidence/tests.xml"
+                   -o "junit_suite_name=pwsh-windows-${TESTED_SHA}" tests/test_test_runner.py)
+          "${command[@]}" 2>&1 | tee "$evidence/pytest.log"
+          statuses=("${PIPESTATUS[@]}")
+          pytest_status=${statuses[0]}
+          tee_status=${statuses[1]}
+          python - "$evidence" "$pytest_status" "$tee_status" "${command[*]}" <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          evidence, pytest_status, tee_status, command = sys.argv[1:]
+          Path(evidence, "manifest.json").write_text(json.dumps({
+              "revision": os.environ["TESTED_SHA"], "stage": "runner_tests",
+              "pwsh_path": os.environ["HOH_TEST_POWERSHELL"], "pwsh_version": os.environ["PWSH_VERSION"],
+              "command": command, "pytest_exit_code": int(pytest_status),
+              "log_capture_exit_code": int(tee_status)}, indent=2), encoding="utf-8")
+          PY
+          manifest_status=$?
+          # pytest's own status first; a lost log or manifest still fails a pass.
+          if [ "$pytest_status" -ne 0 ]; then exit "$pytest_status"; fi
+          if [ "$tee_status" -ne 0 ]; then echo "::error::log capture failed (tee exit $tee_status)"; exit 1; fi
+          if [ "$manifest_status" -ne 0 ]; then echo "::error::manifest write failed"; exit 1; fi
+          exit 0
+
+      - name: Retain evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pwsh-windows-test-runner
+          path: ${{ runner.temp }}/pwsh-evidence
+          if-no-files-found: error
